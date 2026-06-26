@@ -1796,10 +1796,10 @@
         setRefreshSpinning(true);
         try {
           const resp = force
-            ? await dashboardFetch(withSource("/api/refresh?history_size=10"), {
+            ? await dashboardFetch(withSource("/api/refresh"), {
                 method: "POST",
               })
-            : await dashboardFetch(withSource("/api/rigs?history_size=10"));
+            : await dashboardFetch(withSource("/api/rigs"));
           if (!resp.ok) {
             throw new Error(`HTTP ${resp.status}`);
           }

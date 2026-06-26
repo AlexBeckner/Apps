@@ -1394,7 +1394,7 @@ function dashboardHtml() {
       async function loadSnapshot() {
         rowsEl.innerHTML = '<tr><td colspan="6" class="muted">Loading...</td></tr>';
         errorsEl.innerHTML = "";
-        const resp = await fetch("/api/rigs?history_size=10&source=" + encodeURIComponent(source));
+        const resp = await fetch("/api/rigs?source=" + encodeURIComponent(source));
         const data = await resp.json();
         const meta = activeSource();
         refHeaderEl.textContent = meta.ref_label || "Branch";
