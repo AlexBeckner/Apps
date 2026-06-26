@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Rig Deployment Dashboard</title>
+    <script src="./config.js"></script>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        background: #111;
+        color: #eee;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+          sans-serif;
+        line-height: 1.5;
+        margin: 0;
+      }
+
+      main {
+        margin: 0 auto;
+        max-width: 760px;
+        padding: 32px 20px;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+      }
+
+      p {
+        color: #aaa;
+        margin: 0 0 20px;
+      }
+
+      code {
+        background: #1b1b1b;
+        color: #fff;
+        padding: 2px 5px;
+      }
+
+      .button {
+        border: 1px solid #555;
+        display: inline-block;
+        margin: 4px 0 24px;
+        padding: 10px 14px;
+        text-decoration: none;
+      }
+
+      .button:hover,
+      .button:focus {
+        border-color: #888;
+      }
+
+      .button[aria-disabled="true"] {
+        color: #777;
+        cursor: not-allowed;
+        pointer-events: none;
+      }
+
+      .panel {
+        border: 1px solid #333;
+        margin-top: 16px;
+        padding: 16px;
+      }
+
+      .panel h2 {
+        font-size: 18px;
+        margin: 0 0 8px;
+      }
+
+      .panel p,
+      .panel ol {
+        margin-bottom: 0;
+      }
+
+      .muted {
+        color: #aaa;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <a class="muted" href="../../">Back to Apps</a>
+      <h1>Rig Deployment Dashboard</h1>
+      <p>
+        Opens the Buildkite-backed dashboard that shows which branch and commit
+        are deployed on each rig.
+      </p>
+
+      <a id="dashboardLink" class="button" href="#" aria-disabled="true">
+        Dashboard URL not configured
+      </a>
+
+      <div class="panel">
+        <h2>Configured Dashboard</h2>
+        <p id="configuredUrl" class="muted">Not configured.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Cloudflare Backend</h2>
+        <ol>
+          <li>Deploy <code>workers/rig-deployment-dashboard</code> with Wrangler.</li>
+          <li>Store <code>BUILDKITE_API_TOKEN</code> and <code>ADMIN_TOKEN</code> as Worker secrets.</li>
+          <li>Update <code>config.js</code> if Wrangler reports a different Worker URL.</li>
+        </ol>
+      </div>
+    </main>
+
+    <script>
+      const config = window.rigDeploymentDashboardConfig || {};
+      const dashboardUrl = String(config.dashboardUrl || "").trim();
+      const dashboardLink = document.getElementById("dashboardLink");
+      const configuredUrl = document.getElementById("configuredUrl");
+
+      if (dashboardUrl) {
+        dashboardLink.href = dashboardUrl;
+        dashboardLink.textContent = "Open Deployment Dashboard";
+        dashboardLink.removeAttribute("aria-disabled");
+        configuredUrl.textContent = dashboardUrl;
+      }
+    </script>
+  </body>
+</html>

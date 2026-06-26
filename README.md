@@ -5,6 +5,7 @@ Static web tools hosted with GitHub Pages.
 ## Apps
 
 - [Dataspeed Parameter Hash Viewer](./apps/dataspeed-parameter-viewer/)
+- [Rig Deployment Dashboard](./apps/rig-deployment-dashboard/)
 
 ## Notes
 
