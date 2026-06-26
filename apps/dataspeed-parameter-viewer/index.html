@@ -145,7 +145,7 @@
         width: 16px;
       }
 
-      .token-section {
+      .status-section {
         margin-top: 8px;
         padding: 0;
       }
@@ -185,24 +185,17 @@
 
       <section id="rows" class="rows" aria-label="Dataspeed module hashes"></section>
 
-      <section class="token-section" aria-label="GitHub token">
-        <label for="github-token">GitHub token</label>
-        <input
-          id="github-token"
-          type="password"
-          autocomplete="off"
-          placeholder="Paste token for private repo access"
-        >
+      <section class="status-section" aria-live="polite">
+        <p id="backend-status"></p>
       </section>
 
       <datalist id="branch-suggestions"></datalist>
     </main>
 
+    <script src="./config.js"></script>
     <script>
-      const owner = "AppliedNeuron";
-      const repo = "core-stack";
-      const parameterDirectory =
-        "onroad/controls/dbw/dataspeed_v2/parameters";
+      const appConfig = window.dataspeedParameterViewerConfig || {};
+      const proxyApiBaseUrl = (appConfig.apiBaseUrl || "").replace(/\/+$/, "");
       const files = [
         { module: "Gateway", fileName: "FORD_GE1 Gateway.json" },
         { module: "Shift", fileName: "FORD_GE1 Shift.json" },
@@ -225,36 +218,13 @@
       };
 
       const rowsEl = document.querySelector("#rows");
-      const tokenInput = document.querySelector("#github-token");
       const branchSuggestions = document.querySelector("#branch-suggestions");
-      const decoder = new TextDecoder("utf-8");
-      const githubTokenStorageKey = "dataspeedParameterViewer.githubToken";
+      const backendStatus = document.querySelector("#backend-status");
 
-      let githubToken = loadSavedGithubToken();
-      tokenInput.value = githubToken;
       let branchSuggestionRequestId = 0;
 
+      renderBackendStatus();
       renderRows();
-
-      function loadSavedGithubToken() {
-        try {
-          return window.localStorage.getItem(githubTokenStorageKey) || "";
-        } catch {
-          return "";
-        }
-      }
-
-      function saveGithubToken(token) {
-        try {
-          if (token) {
-            window.localStorage.setItem(githubTokenStorageKey, token);
-          } else {
-            window.localStorage.removeItem(githubTokenStorageKey);
-          }
-        } catch {
-          // Some browser settings disable localStorage; the in-memory token still works.
-        }
-      }
 
       function normalizeRef(input) {
         const trimmed = input.trim();
@@ -269,41 +239,47 @@
         return trimmed.replace(/^origin\//, "");
       }
 
-      function encodedPath(path) {
-        return path.split("/").map(encodeURIComponent).join("/");
-      }
-
-      function contentsApiUrl(ref, fileName) {
-        const path = `${parameterDirectory}/${fileName}`;
-        return `https://api.github.com/repos/${owner}/${repo}/contents/${encodedPath(
-          path
-        )}?ref=${encodeURIComponent(ref)}`;
-      }
-
-      function matchingRefsApiUrl(prefix) {
-        const encodedPrefix = prefix.split("/").map(encodeURIComponent).join("/");
-        return `https://api.github.com/repos/${owner}/${repo}/git/matching-refs/heads/${encodedPrefix}`;
-      }
-
-      function githubHeaders(accept) {
-        const headers = {
-          Accept: accept,
-          "X-GitHub-Api-Version": "2022-11-28",
-        };
-
-        if (githubToken) {
-          headers.Authorization = `Bearer ${githubToken}`;
+      function renderBackendStatus() {
+        if (proxyApiBaseUrl) {
+          backendStatus.textContent = `Using backend proxy: ${proxyApiBaseUrl}`;
+          return;
         }
 
-        return headers;
+        backendStatus.className = "error";
+        backendStatus.textContent =
+          "Backend proxy is not configured. Set apiBaseUrl in config.js.";
       }
 
-      function decodeBase64Content(content) {
-        const binary = atob(content.replace(/\s/g, ""));
-        const bytes = Uint8Array.from(binary, (character) =>
-          character.charCodeAt(0)
-        );
-        return decoder.decode(bytes);
+      function proxyApiUrl(path, params) {
+        if (!proxyApiBaseUrl) {
+          throw new Error("Backend proxy is not configured.");
+        }
+
+        const url = new URL(path, `${proxyApiBaseUrl}/`);
+        Object.entries(params).forEach(([key, value]) => {
+          url.searchParams.set(key, value);
+        });
+        return url.toString();
+      }
+
+      async function fetchProxyJson(path, params) {
+        const response = await fetch(proxyApiUrl(path, params));
+        const responseText = await response.text();
+        let data;
+        try {
+          data = JSON.parse(responseText);
+        } catch {
+          data = {};
+        }
+
+        if (!response.ok) {
+          throw new Error(
+            data.error ||
+              `${response.status} ${response.statusText}: ${responseText}`
+          );
+        }
+
+        return data;
       }
 
       function downloadText(fileName, text) {
@@ -328,41 +304,16 @@
       }
 
       async function fetchParameterFile(ref, file) {
-        const response = await fetch(contentsApiUrl(ref, file.fileName), {
-          headers: githubHeaders("application/vnd.github.object+json"),
+        const parameterFile = await fetchProxyJson("parameter-file", {
+          ref,
+          file: file.fileName,
         });
 
-        if (!response.ok) {
-          const errorText = await response.text();
-          let githubMessage = errorText;
-          try {
-            githubMessage = JSON.parse(errorText).message || errorText;
-          } catch {
-            // GitHub usually returns JSON errors, but keep the raw body if not.
-          }
-          const error = new Error(
-            `${response.status} ${response.statusText}: ${githubMessage}`
-          );
-          error.status = response.status;
-          throw error;
-        }
-
-        const metadata = await response.json();
-        if (metadata.type !== "file" || metadata.encoding !== "base64") {
-          throw new Error(`${file.fileName} was not returned as a JSON file.`);
-        }
-
-        const text = decodeBase64Content(metadata.content);
-        const json = JSON.parse(text);
-        if (typeof json.hash !== "string" && typeof json.hash !== "number") {
-          throw new Error(`${file.fileName} does not contain a top-level hash.`);
-        }
-
         return {
-          module: file.module,
-          fileName: metadata.name,
-          hash: String(json.hash).toUpperCase(),
-          text,
+          module: parameterFile.module || file.module,
+          fileName: parameterFile.fileName || file.fileName,
+          hash: parameterFile.hash,
+          text: parameterFile.text,
         };
       }
 
@@ -478,60 +429,19 @@
             return;
           }
 
-          const response = await fetch(matchingRefsApiUrl(prefix), {
-            headers: githubHeaders("application/vnd.github+json"),
-          });
-          if (!response.ok) {
-            return;
-          }
-
-          const refs = await response.json();
-          const branchRefs = refs
-            .filter((ref) => ref.ref && ref.ref.startsWith("refs/heads/"))
-            .slice(0, 50);
-          const suggestions = await Promise.all(
-            branchRefs.map(async (ref) => ({
-              name: ref.ref.slice("refs/heads/".length),
-              updatedAt: await fetchBranchUpdatedAt(ref),
-            }))
-          );
+          const data = await fetchProxyJson("branch-suggestions", { prefix });
           if (requestId !== branchSuggestionRequestId) {
             return;
           }
 
           branchSuggestions.innerHTML = "";
-          suggestions
-            .sort(
-              (left, right) =>
-                right.updatedAt - left.updatedAt ||
-                left.name.localeCompare(right.name)
-            )
-            .slice(0, 25)
-            .forEach((suggestion) => {
-              const option = document.createElement("option");
-              option.value = suggestion.name;
-              branchSuggestions.appendChild(option);
-            });
+          (data.suggestions || []).forEach((suggestion) => {
+            const option = document.createElement("option");
+            option.value = suggestion;
+            branchSuggestions.appendChild(option);
+          });
         } catch {
           branchSuggestions.innerHTML = "";
-        }
-      }
-
-      async function fetchBranchUpdatedAt(ref) {
-        try {
-          const response = await fetch(ref.object.url, {
-            headers: githubHeaders("application/vnd.github+json"),
-          });
-          if (!response.ok) {
-            return 0;
-          }
-
-          const commit = await response.json();
-          return (
-            Date.parse(commit.committer?.date || commit.author?.date || "") || 0
-          );
-        } catch {
-          return 0;
         }
       }
 
@@ -586,19 +496,6 @@
         debounce(() => {
           updateBranchSuggestions(columns.right.input);
           loadColumn("right");
-        }, 400)
-      );
-      tokenInput.addEventListener(
-        "input",
-        debounce(() => {
-          githubToken = tokenInput.value.trim();
-          saveGithubToken(githubToken);
-          if (normalizeRef(columns.left.input.value)) {
-            loadColumn("left");
-          }
-          if (normalizeRef(columns.right.input.value)) {
-            loadColumn("right");
-          }
         }, 400)
       );
 

@@ -8,5 +8,6 @@ Static web tools hosted with GitHub Pages.
 
 ## Notes
 
-These tools are static pages. Tools that read private GitHub repositories require
-each user to provide their own GitHub token in the page.
+These tools are static pages. Tools that read private GitHub repositories should
+use a hosted backend proxy or pre-generated static data; GitHub tokens must not
+be embedded in the browser app.
