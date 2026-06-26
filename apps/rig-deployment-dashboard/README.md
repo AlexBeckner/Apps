@@ -28,3 +28,12 @@ npm run deploy
 
 Keep `BUILDKITE_API_TOKEN` and `ADMIN_TOKEN` in Worker secrets. Do not copy
 tokens into this static site.
+
+## Refresh and Sync
+
+The GitHub Pages UI is read-only until you click **Unlock controls** and enter
+the Worker `ADMIN_TOKEN`. The token is saved in this browser's `localStorage`
+and sent as `X-Dashboard-Admin-Token` only to the Cloudflare Worker.
+
+For this machine, the current admin token is also stored in the gitignored
+`workers/rig-deployment-dashboard/.dev.vars` file.

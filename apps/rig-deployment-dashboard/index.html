@@ -372,6 +372,15 @@
           </label>
 
           <button
+            id="adminBtn"
+            type="button"
+            class="flex items-center gap-2 px-3 py-2"
+            title="Enter the Cloudflare dashboard admin token to enable Refresh and Sync history from this browser."
+          >
+            Unlock controls
+          </button>
+
+          <button
             id="refreshBtn"
             style="display: none"
             class="flex items-center gap-2 px-3 py-2 disabled:opacity-60 disabled:cursor-not-allowed"
@@ -614,10 +623,38 @@
       )
         .trim()
         .replace(/\/+$/, "");
+      const ADMIN_TOKEN_STORAGE_KEY = "rigDeploymentDashboardAdminToken";
+      let adminToken = "";
+      try {
+        adminToken = localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || "";
+      } catch (err) {
+        adminToken = "";
+      }
 
       function apiPath(path) {
         if (!apiBaseUrl) return path;
         return new URL(path, `${apiBaseUrl}/`).toString();
+      }
+
+      function dashboardFetch(url, options = {}) {
+        const headers = new Headers(options.headers || {});
+        if (adminToken) {
+          headers.set("X-Dashboard-Admin-Token", adminToken);
+        }
+        return fetch(url, { ...options, headers });
+      }
+
+      function setAdminToken(token) {
+        adminToken = String(token || "").trim();
+        try {
+          if (adminToken) {
+            localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, adminToken);
+          } else {
+            localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+          }
+        } catch (err) {
+          // Storage can be unavailable in some privacy modes; keep it in memory.
+        }
       }
 
       // Append the active ``?source=`` to an API path so every snapshot /
@@ -916,7 +953,7 @@
 
       async function loadKnownRigs() {
         try {
-          const resp = await fetch(apiPath("/api/known-rigs"));
+          const resp = await dashboardFetch(apiPath("/api/known-rigs"));
           if (!resp.ok) return;
           const data = await resp.json();
           state.knownRigs = Array.isArray(data.rigs) ? data.rigs : [];
@@ -937,7 +974,7 @@
         const el = document.getElementById("storeFooter");
         const backfillBtn = document.getElementById("backfillBtn");
         try {
-          const resp = await fetch(withSource("/api/stats"));
+          const resp = await dashboardFetch(withSource("/api/stats"));
           if (!resp.ok) {
             if (el) el.textContent = "";
             return;
@@ -1061,7 +1098,7 @@
         try {
           let url = `/api/rigs/${encodeURIComponent(trimmed)}/history`;
           if (force) url += "?force_refresh=true";
-          const resp = await fetch(withSource(url));
+          const resp = await dashboardFetch(withSource(url));
           if (!resp.ok) {
             const text = await resp.text();
             throw new Error(`HTTP ${resp.status}: ${text.slice(0, 200)}`);
@@ -1298,7 +1335,7 @@
           const useForce = silent && state.isOperator;
           let url = `/api/builds/${buildNumber}/attempts`;
           if (useForce) url += "?force_refresh=true";
-          const resp = await fetch(withSource(url));
+          const resp = await dashboardFetch(withSource(url));
           if (!resp.ok) {
             const text = await resp.text();
             throw new Error(`HTTP ${resp.status}: ${text.slice(0, 200)}`);
@@ -1761,8 +1798,10 @@
         setRefreshSpinning(true);
         try {
           const resp = force
-            ? await fetch(withSource("/api/refresh"), { method: "POST" })
-            : await fetch(withSource("/api/rigs"));
+            ? await dashboardFetch(withSource("/api/refresh?compact=true"), {
+                method: "POST",
+              })
+            : await dashboardFetch(withSource("/api/rigs?compact=true"));
           if (!resp.ok) {
             throw new Error(`HTTP ${resp.status}`);
           }
@@ -1906,7 +1945,7 @@
         }
         setBackfillRunning(true);
         try {
-          const resp = await fetch(withSource("/api/backfill"), {
+          const resp = await dashboardFetch(withSource("/api/backfill"), {
             method: "POST",
           });
           if (!resp.ok) {
@@ -2059,6 +2098,7 @@
           const el = $(id);
           if (el) el.style.display = operator ? "" : "none";
         }
+        updateAdminButton();
         if (!operator) {
           // Read-only viewers keep polling so deploys show up in real time;
           // the toggle is hidden, so pin it on and (re)start the loop.
@@ -2075,7 +2115,7 @@
         state.isOperator = looksLikeLocalhost();
         applyAccessMode();
         try {
-          const resp = await fetch(apiPath("/api/client-context"));
+          const resp = await dashboardFetch(apiPath("/api/client-context"));
           if (resp.ok) {
             const ctx = await resp.json();
             state.isOperator = !!ctx.is_operator;
@@ -2084,6 +2124,39 @@
           // Network blip: keep the hostname-based guess from above.
         }
         applyAccessMode();
+      }
+
+      function updateAdminButton() {
+        const btn = $("adminBtn");
+        if (!btn) return;
+        if (state.isOperator) {
+          btn.textContent = "Lock controls";
+          btn.title =
+            "Forget the saved dashboard admin token and return to read-only mode.";
+        } else {
+          btn.textContent = adminToken ? "Unlock failed" : "Unlock controls";
+          btn.title =
+            "Enter the Cloudflare dashboard admin token to enable Refresh and Sync history from this browser.";
+        }
+      }
+
+      async function unlockAdminControls() {
+        if (state.isOperator && adminToken) {
+          setAdminToken("");
+          state.isOperator = false;
+          applyAccessMode();
+          return;
+        }
+
+        const token = window.prompt("Enter dashboard admin token");
+        if (!token) return;
+        setAdminToken(token);
+        await initAccessMode();
+        if (!state.isOperator) {
+          setAdminToken("");
+          applyAccessMode();
+          window.alert("Admin token was not accepted.");
+        }
       }
 
       // ============================================================
@@ -2125,7 +2198,7 @@
 
       async function loadSources() {
         try {
-          const resp = await fetch(apiPath("/api/sources"));
+          const resp = await dashboardFetch(apiPath("/api/sources"));
           if (resp.ok) {
             const data = await resp.json();
             state.sources = Array.isArray(data.sources) ? data.sources : [];
@@ -2200,6 +2273,7 @@
       $("refreshBtn").addEventListener("click", () => {
         if (state.isOperator) fetchSnapshot(true);
       });
+      $("adminBtn").addEventListener("click", unlockAdminControls);
       $("backfillBtn").addEventListener("click", runBackfill);
       $("autoRefresh").addEventListener("change", setupAutoRefresh);
       $("search").addEventListener("input", (e) => {

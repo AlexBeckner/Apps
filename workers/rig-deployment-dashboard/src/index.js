@@ -6,8 +6,8 @@ const GITHUB_OWNER = "AppliedNeuron";
 const GITHUB_REPO = "core-stack";
 const HISTORY_SIZE = 10;
 const BACKFILL_PER_PAGE = 100;
-const DEFAULT_BACKFILL_PAGES = 10;
-const MAX_BACKFILL_PAGES = 50;
+const DEFAULT_BACKFILL_PAGES = 50;
+const MAX_BACKFILL_PAGES = 200;
 const MAX_STALE_ACTIVE_RECHECKS = 10;
 const AWAITING_DEPLOY = "awaiting_deploy";
 
@@ -109,7 +109,12 @@ export default {
       }
       if (request.method === "GET" && url.pathname === "/api/rigs") {
         const source = resolveSource(env, url.searchParams.get("source"));
-        return jsonResponse(request, env, await getSnapshot(env, source, { force: false }));
+        const historySize = snapshotHistorySize(url);
+        return jsonResponse(
+          request,
+          env,
+          await getSnapshot(env, source, { force: false, historySize })
+        );
       }
 
       const historyMatch = url.pathname.match(/^\/api\/rigs\/([^/]+)\/history$/);
@@ -155,7 +160,12 @@ export default {
         const authError = requireWrite(request, env);
         if (authError) return jsonResponse(request, env, { detail: authError }, { status: 403 });
         const source = resolveSource(env, url.searchParams.get("source"));
-        return jsonResponse(request, env, await getSnapshot(env, source, { force: true }));
+        const historySize = snapshotHistorySize(url);
+        return jsonResponse(
+          request,
+          env,
+          await getSnapshot(env, source, { force: true, historySize })
+        );
       }
 
       if (request.method === "POST" && url.pathname === "/api/backfill") {
@@ -227,7 +237,7 @@ async function refreshAllSources(env) {
   }
 }
 
-async function getSnapshot(env, source, { force }) {
+async function getSnapshot(env, source, { force, historySize = HISTORY_SIZE }) {
   const errors = [];
   let rateLimitedUntil = null;
   const stale = await sourceNeedsRefresh(env, source.key);
@@ -240,7 +250,7 @@ async function getSnapshot(env, source, { force }) {
     errors.push("Worker secret BUILDKITE_API_TOKEN is not configured.");
   }
 
-  const aggregate = await aggregateSnapshot(env, source.key);
+  const aggregate = await aggregateSnapshot(env, source.key, historySize);
   const fetchedAt =
     Number(await getMeta(env, metaKey(source.key, "last_refresh_at"))) ||
     Math.floor(Date.now() / 1000);
@@ -498,8 +508,8 @@ async function getBuildAttempts(env, source, buildNumber, { force }) {
   };
 }
 
-async function aggregateSnapshot(env, sourceKey) {
-  const latestByRig = await getLatestPerRig(env, sourceKey, HISTORY_SIZE);
+async function aggregateSnapshot(env, sourceKey, historySize) {
+  const latestByRig = await getLatestPerRig(env, sourceKey, historySize);
   const totals = await rigTotals(env, sourceKey);
   const rigs = [];
 
@@ -510,7 +520,7 @@ async function aggregateSnapshot(env, sourceKey) {
       .sort((left, right) => compareDesc(left.last_event_at, right.last_event_at));
     rigs.push({
       name,
-      history: deploys.slice(0, HISTORY_SIZE),
+      history: deploys.slice(0, historySize),
       total_deploys: totals.get(name) || deploys.length,
       last_deploy_at: deploys[0]?.last_event_at || null,
     });
@@ -1238,6 +1248,12 @@ function httpError(status, message) {
 function snapshotSize(env) {
   const value = Number(env.SNAPSHOT_SIZE || 10);
   return Math.max(1, Math.min(100, Number.isFinite(value) ? Math.floor(value) : 10));
+}
+
+function snapshotHistorySize(url) {
+  if (parseBoolean(url.searchParams.get("compact"))) return 1;
+  const value = Number(url.searchParams.get("history_size") || HISTORY_SIZE);
+  return Math.max(1, Math.min(HISTORY_SIZE, Number.isFinite(value) ? Math.floor(value) : HISTORY_SIZE));
 }
 
 function cacheSeconds(env) {

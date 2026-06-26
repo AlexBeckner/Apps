@@ -3,8 +3,8 @@
 Cloudflare Worker backend for the rig deployment dashboard.
 
 The Worker keeps `BUILDKITE_API_TOKEN` server-side, stores deployment history in
-D1, refreshes snapshots on a cron trigger, and serves both the JSON API and a
-small always-on dashboard page.
+D1, refreshes snapshots on a cron trigger, and serves the JSON API used by the
+static GitHub Pages dashboard.
 
 ## Endpoints
 
@@ -22,6 +22,10 @@ small always-on dashboard page.
 
 Read endpoints are available to the configured `ALLOWED_ORIGIN`. Write endpoints
 require `ADMIN_TOKEN` by default.
+
+The static dashboard sends `ADMIN_TOKEN` as `X-Dashboard-Admin-Token` after a
+user clicks **Unlock controls** and enters the token. Do not put this token in
+`config.js`.
 
 ## Setup
 
