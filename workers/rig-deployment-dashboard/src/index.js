@@ -1393,7 +1393,7 @@ function dashboardHtml() {
       async function loadSnapshot() {
         rowsEl.innerHTML = '<tr><td colspan="6" class="muted">Loading...</td></tr>';
         errorsEl.innerHTML = "";
-        const resp = await fetch("/api/rigs?source=" + encodeURIComponent(source));
+        const resp = await fetch("/api/rigs?history_size=10&source=" + encodeURIComponent(source));
         const data = await resp.json();
         const meta = activeSource();
         refHeaderEl.textContent = meta.ref_label || "Branch";
@@ -1427,7 +1427,7 @@ function dashboardHtml() {
       loadSources().then(loadSnapshot).catch((error) => {
         errorsEl.innerHTML = '<div class="error">' + escapeHtml(error.message || error) + '</div>';
       });
-      setInterval(loadSnapshot, 30000);
+      setInterval(loadSnapshot, 10000);
     </script>
   </body>
 </html>`;

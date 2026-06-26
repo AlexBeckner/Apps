@@ -550,7 +550,7 @@
         rateLimitRetryTimer: null,
         // Build numbers whose retry/attempt panel is currently open
         // inline. Survives re-renders (auto-refresh, filter changes) so
-        // an opened panel doesn't snap shut every 30s.
+        // an opened panel doesn't snap shut every 10s.
         expandedBuilds: new Set(),
         // Cache of attempts data per build number, keyed by build_number.
         // Shape: { [n]: { loading?: bool, error?: string, data?: object } }
@@ -1798,10 +1798,10 @@
         setRefreshSpinning(true);
         try {
           const resp = force
-            ? await dashboardFetch(withSource("/api/refresh?compact=true"), {
+            ? await dashboardFetch(withSource("/api/refresh?history_size=10"), {
                 method: "POST",
               })
-            : await dashboardFetch(withSource("/api/rigs?compact=true"));
+            : await dashboardFetch(withSource("/api/rigs?history_size=10"));
           if (!resp.ok) {
             throw new Error(`HTTP ${resp.status}`);
           }
@@ -1995,8 +1995,8 @@
       function autoRefreshTick() {
         // Skip the tick while rate-limited; the dedicated retry timer handles
         // resuming once the limit resets, so we don't hammer Buildkite and
-        // trigger the same 429 again. Each tick is a tiny fetch (the last 10
-        // builds) because the persistent store covers older history, so 10s
+        // trigger the same 429 again. Each tick fetches the last 10 deploys
+        // per rig because the persistent store covers older history, so 10s
         // is well within Buildkite's 100/min limit. The operator's ticks
         // force a fresh server-side fetch (bypassing the cache) so the
         // snapshot — and the "updated X ago" label — advance every cycle.
