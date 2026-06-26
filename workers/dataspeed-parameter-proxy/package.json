@@ -1,5 +1,5 @@
 {
-  "name": "dataspeedhashfinder",
+  "name": "dataspeed-parameter-proxy",
   "private": true,
   "type": "module",
   "scripts": {

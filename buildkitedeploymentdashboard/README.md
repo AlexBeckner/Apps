@@ -12,7 +12,7 @@ Edit `config.js` when the dashboard URL changes:
 
 ```js
 window.buildkiteDeploymentDashboardConfig = {
-  apiBaseUrl: "https://buildkitedeploymentdashboard.dataspeedhashfinder.workers.dev",
+  apiBaseUrl: "https://rig-deployment-dashboard.dataspeedhashfinder.workers.dev",
 };
 ```
 

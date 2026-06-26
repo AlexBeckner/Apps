@@ -10,7 +10,7 @@
       }
 
       body {
-        background: #111;
+        background: #1d1d1d;
         color: #eee;
         font-family:
           -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
@@ -20,56 +20,40 @@
 
       main {
         margin: 0 auto;
-        max-width: 900px;
-        padding: 32px 20px;
+        max-width: 560px;
+        padding: 88px 20px;
       }
 
-      h1 {
-        margin: 0 0 8px;
+      .apps {
+        border: 1px solid #444;
       }
 
-      p {
-        color: #aaa;
-        margin: 0 0 24px;
-      }
-
-      .app-card {
-        border: 1px solid #333;
+      .app-link {
         color: inherit;
         display: block;
+        font-size: 13px;
+        font-weight: 700;
         padding: 16px;
         text-decoration: none;
       }
 
-      .app-card:hover,
-      .app-card:focus {
+      .app-link + .app-link {
+        border-top: 1px solid #444;
+      }
+
+      .app-link:hover,
+      .app-link:focus {
         border-color: #666;
-      }
-
-      .app-card h2 {
-        font-size: 18px;
-        margin: 0 0 8px;
-      }
-
-      .app-card p {
-        margin: 0;
+        background: #242424;
       }
     </style>
   </head>
   <body>
     <main>
-      <h1>Apps</h1>
-      <p>Small web tools used with AppliedNeuron/core-stack.</p>
-
-      <a class="app-card" href="./dataspeedhashfinder/">
-        <h2>dataspeedhashfinder</h2>
-        <p>Compare Ford GE1 Dataspeed parameter hashes across branches.</p>
-      </a>
-
-      <a class="app-card" href="./buildkitedeploymentdashboard/">
-        <h2>buildkitedeploymentdashboard</h2>
-        <p>Open the Buildkite-backed dashboard for current rig deployments.</p>
-      </a>
+      <nav class="apps" aria-label="Apps">
+        <a class="app-link" href="./dataspeedhashfinder/">dataspeedhashfinder</a>
+        <a class="app-link" href="./buildkitedeploymentdashboard/">buildkitedeploymentdashboard</a>
+      </nav>
     </main>
   </body>
 </html>

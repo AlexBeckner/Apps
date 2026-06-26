@@ -315,7 +315,7 @@ async function buildkiteJson(env, url) {
     headers: {
       Accept: "application/json",
       Authorization: `Bearer ${env.BUILDKITE_API_TOKEN}`,
-      "User-Agent": "buildkitedeploymentdashboard-worker/0.1",
+      "User-Agent": "rig-deployment-dashboard-worker/0.1",
     },
   });
   const text = await response.text();
