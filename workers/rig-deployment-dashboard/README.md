@@ -6,6 +6,10 @@ The Worker keeps `BUILDKITE_API_TOKEN` server-side, stores deployment history in
 D1, refreshes snapshots on a cron trigger, and serves the JSON API used by the
 static GitHub Pages dashboard.
 
+`GET /api/rigs` automatically refreshes Buildkite data when the stored snapshot
+is older than `CACHE_SECONDS` (10 seconds in `wrangler.toml`). The cron trigger
+runs every minute as a fallback when no dashboard client is open.
+
 ## Endpoints
 
 - `GET /` - minimal dashboard UI

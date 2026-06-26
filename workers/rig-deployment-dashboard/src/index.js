@@ -5,6 +5,7 @@ const DEFAULT_FLASHING_PIPELINE = "core-stack-aaos-flashing";
 const GITHUB_OWNER = "AppliedNeuron";
 const GITHUB_REPO = "core-stack";
 const HISTORY_SIZE = 10;
+const DEFAULT_CACHE_SECONDS = 10;
 const BACKFILL_PER_PAGE = 100;
 const DEFAULT_BACKFILL_PAGES = 50;
 const MAX_BACKFILL_PAGES = 200;
@@ -749,7 +750,7 @@ async function countBuilds(env, sourceKey) {
 async function sourceNeedsRefresh(env, sourceKey) {
   if ((await countBuilds(env, sourceKey)) === 0) return true;
   const lastRefresh = Number(await getMeta(env, metaKey(sourceKey, "last_refresh_at"))) || 0;
-  return Date.now() / 1000 - lastRefresh > cacheSeconds(env);
+  return Date.now() / 1000 - lastRefresh >= cacheSeconds(env);
 }
 
 async function ensureSchema(env) {
@@ -1257,8 +1258,8 @@ function snapshotHistorySize(url) {
 }
 
 function cacheSeconds(env) {
-  const value = Number(env.CACHE_SECONDS || 300);
-  return Math.max(30, Number.isFinite(value) ? Math.floor(value) : 300);
+  const value = Number(env.CACHE_SECONDS || DEFAULT_CACHE_SECONDS);
+  return Math.max(10, Number.isFinite(value) ? Math.floor(value) : DEFAULT_CACHE_SECONDS);
 }
 
 function normalizePageCap(value) {

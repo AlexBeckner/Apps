@@ -529,12 +529,12 @@
         // server fall back to its primary pipeline.
         sources: [],
         source: null,
-        // Whether this client may use the write controls (Refresh / Sync /
-        // Auto-refresh) and force server-side Buildkite fetches. Set from
-        // /api/client-context on load; the operator is the machine running
-        // the dashboard (localhost). LAN viewers stay read-only and just
-        // poll the cache the operator keeps warm. Defaults to false so a
-        // LAN viewer never flashes the controls before the probe resolves.
+        // Whether this client may use the write controls (Refresh / Sync)
+        // and force server-side Buildkite fetches. Set from
+        // /api/client-context on load. LAN viewers stay read-only, but their
+        // normal polling still lets the Worker refresh stale Buildkite data.
+        // Defaults to false so a LAN viewer never flashes the controls before
+        // the probe resolves.
         isOperator: false,
         autoRefreshTimer: null,
         history: null,
@@ -1789,11 +1789,9 @@
 
       async function fetchSnapshot(forceRefresh = false) {
         // Only the operator may force a server-side refresh (POST
-        // /api/refresh, which spends the Buildkite token). LAN viewers
-        // always read the cached snapshot (GET /api/rigs); the operator's
-        // forced ticks keep that cache fresh, so read-only clients still see
-        // deploys roll in — and the "updated X ago" label stays accurate
-        // because it's driven by the snapshot's own fetched_at.
+        // /api/refresh, which spends the Buildkite token). LAN viewers use
+        // GET /api/rigs; the Worker refreshes from Buildkite when that
+        // snapshot is stale, so read-only clients still see deploys roll in.
         const force = forceRefresh && state.isOperator;
         setRefreshSpinning(true);
         try {
@@ -1997,9 +1995,8 @@
         // resuming once the limit resets, so we don't hammer Buildkite and
         // trigger the same 429 again. Each tick fetches the last 10 deploys
         // per rig because the persistent store covers older history, so 10s
-        // is well within Buildkite's 100/min limit. The operator's ticks
-        // force a fresh server-side fetch (bypassing the cache) so the
-        // snapshot — and the "updated X ago" label — advance every cycle.
+        // is well within Buildkite's 100/min limit. Normal read-only ticks
+        // also advance the server cache once its 10s freshness window expires.
         if (isRateLimited()) return;
         fetchSnapshot(true);
       }
@@ -2070,13 +2067,11 @@
       // ============================================================
       // Operator vs. read-only LAN viewer
       // ============================================================
-      // Only the machine running the dashboard (localhost) gets the
-      // Refresh / Sync / Auto-refresh controls and the ability to spend the
-      // Buildkite token. Everyone else on the LAN gets a read-only view that
-      // still auto-updates from the operator-warmed server cache and still
-      // shows the "updated X ago" timestamp. The server is the source of
-      // truth — it gates the write endpoints by client IP and reports
-      // whether *this* client is the operator — and we fall back to a
+      // Only an unlocked admin client gets the Refresh / Sync controls and
+      // the ability to force Buildkite refreshes. Everyone else gets a
+      // read-only view that still auto-updates through GET /api/rigs; the
+      // Worker refreshes stale snapshots itself. The server is the source of
+      // truth for whether this client is an operator, and we fall back to a
       // hostname check if that probe can't be reached.
       function looksLikeLocalhost() {
         const h = (window.location.hostname || "").toLowerCase();
