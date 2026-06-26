@@ -1,130 +1,2422 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="dark">
   <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Rig Deployment Dashboard</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Deployments</title>
+    <!-- Dynamic favicon. ``href`` is replaced at runtime by ``renderFavicon``
+         once the first snapshot loads; the inline transparent placeholder
+         avoids a 404 + flicker on the very first paint. -->
+    <link
+      id="favicon"
+      rel="icon"
+      type="image/png"
+      href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgAAIAAAUAAarVyFEAAAAASUVORK5CYII="
+    />
     <script src="./config.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            fontFamily: {
+              mono: [
+                "ui-monospace",
+                "SFMono-Regular",
+                "Menlo",
+                "Monaco",
+                "Consolas",
+                "monospace",
+              ],
+            },
+          },
+        },
+      };
+    </script>
     <style>
-      * {
-        box-sizing: border-box;
+      *,
+      *::before,
+      *::after {
+        border-radius: 0 !important;
       }
-
       body {
-        background: #111;
-        color: #eee;
         font-family:
-          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
-          sans-serif;
-        line-height: 1.5;
-        margin: 0;
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
+          Ubuntu, sans-serif;
+        font-size: 14px;
       }
 
-      main {
-        margin: 0 auto;
-        max-width: 760px;
-        padding: 32px 20px;
+      table thead th {
+        padding-block: 7px;
+        vertical-align: middle;
+      }
+      /* Match thead: 7px vertical padding on every table body row (nested + main). */
+      table tbody td:not(.p-0),
+      table tbody th {
+        padding-block: 7px !important;
+      }
+      .spin {
+        animation: spin 1s linear infinite;
+      }
+      @keyframes spin {
+        from {
+          transform: rotate(0deg);
+        }
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      details > summary {
+        list-style: none;
+      }
+      details > summary::-webkit-details-marker {
+        display: none;
+      }
+      details[open] .chevron {
+        transform: rotate(90deg);
+      }
+      .chevron {
+        transition: transform 0.15s ease;
       }
 
-      a {
-        color: inherit;
+      /* Native search clear control replaced by a flat mask (currentColor). */
+      input[type="search"]::-webkit-search-cancel-button {
+        -webkit-appearance: none;
+        appearance: none;
+        height: 20px;
+        width: 20px;
+        margin-left: 6px;
+        cursor: pointer;
+        background-color: currentColor;
+        opacity: 0.55;
+        -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><path d='M6 6l8 8M14 6l-8 8' stroke='black' stroke-width='2' stroke-linecap='round'/></svg>");
+        mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><path d='M6 6l8 8M14 6l-8 8' stroke='black' stroke-width='2' stroke-linecap='round'/></svg>");
+        -webkit-mask-size: contain;
+        mask-size: contain;
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+      }
+      input[type="search"]::-webkit-search-cancel-button:hover {
+        opacity: 1;
       }
 
-      h1 {
-        margin: 0 0 8px;
-      }
-
-      p {
-        color: #aaa;
-        margin: 0 0 20px;
-      }
-
-      code {
-        background: #1b1b1b;
-        color: #fff;
-        padding: 2px 5px;
-      }
-
-      .button {
-        border: 1px solid #555;
-        display: inline-block;
-        margin: 4px 0 24px;
-        padding: 10px 14px;
-        text-decoration: none;
-      }
-
-      .button:hover,
-      .button:focus {
-        border-color: #888;
-      }
-
-      .button[aria-disabled="true"] {
-        color: #777;
-        cursor: not-allowed;
+      /* Custom tooltip (replaces the native browser one). The JS at the
+         bottom of the page suppresses `title` attrs and renders this
+         element instead, with a 100ms hover delay. */
+      .app-tooltip {
+        position: fixed;
+        z-index: 9999;
         pointer-events: none;
+        background: #000000;
+        color: #ffffff;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 14px;
+        font-weight: 500;
+        line-height: 1.4;
+        max-width: 320px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        box-shadow: none;
+        opacity: 0;
+        transform: translateY(2px);
+        transition:
+          opacity 80ms ease-out,
+          transform 80ms ease-out;
+      }
+      .app-tooltip.visible {
+        opacity: 1;
+        transform: translateY(0);
       }
 
-      .panel {
-        border: 1px solid #333;
-        margin-top: 16px;
-        padding: 16px;
+      /* Step 1 experiment: black surfaces everywhere, white text (incl. pills/badges/buttons). */
+      html.dark,
+      html.dark body {
+        background-color: #000000 !important;
+        color: #ffffff !important;
       }
 
-      .panel h2 {
-        font-size: 18px;
-        margin: 0 0 8px;
+      html.dark *,
+      html.dark *::before,
+      html.dark *::after {
+        background-color: #000000 !important;
+        background-image: none !important;
+        color: #ffffff !important;
+        border: none !important;
+        border-width: 0 !important;
+        outline: none !important;
+        box-shadow: none !important;
       }
 
-      .panel p,
-      .panel ol {
-        margin-bottom: 0;
+      html.dark hr {
+        display: none !important;
       }
 
-      .muted {
-        color: #aaa;
+      html.dark input::placeholder,
+      html.dark textarea::placeholder {
+        color: #ffffff !important;
+        opacity: 0.45;
+      }
+
+      html.dark input[type="text"],
+      html.dark input[type="search"],
+      html.dark input[type="url"],
+      html.dark input[type="email"],
+      html.dark input[type="password"],
+      html.dark input[type="tel"],
+      html.dark input:not([type]),
+      html.dark textarea,
+      html.dark button:not([data-history-rig]),
+      html.dark input[type="button"],
+      html.dark input[type="submit"],
+      html.dark input[type="reset"] {
+        border: 1px solid #222222 !important;
+        outline: none !important;
+      }
+
+      html.dark input[type="text"],
+      html.dark input[type="search"],
+      html.dark input[type="url"],
+      html.dark input[type="email"],
+      html.dark input[type="password"],
+      html.dark input[type="tel"],
+      html.dark input:not([type]),
+      html.dark textarea {
+        background-color: transparent !important;
+      }
+
+      html.dark button[data-history-rig] {
+        border: none !important;
+        outline: none !important;
+      }
+
+      /* Source toggle tabs. Defined after the generic button rule above so
+         they win the equal-specificity tie and drop the default 1px border.
+         Inactive tabs are dimmed; the active tab takes the header accent
+         (#e9b6ff) with an underline so the current pipeline is obvious even
+         under the monochrome dark theme. */
+      html.dark button[data-source-tab] {
+        border: none !important;
+        outline: none !important;
+        padding: 2px 2px;
+        font-weight: 600;
+        opacity: 0.5;
+        cursor: pointer;
+      }
+      html.dark button[data-source-tab]:hover {
+        opacity: 0.85;
+      }
+      html.dark button[data-source-tab].active,
+      html.dark button[data-source-tab].active * {
+        opacity: 1;
+        color: #e9b6ff !important;
+        text-decoration: underline;
+        text-underline-offset: 5px;
+        text-decoration-thickness: 2px;
+        cursor: default;
+      }
+      .source-tab-sep {
+        opacity: 0.3;
+      }
+
+      html.dark #rigsTableWrap {
+        outline: 1px solid #212121 !important;
+        outline-offset: 0 !important;
+      }
+
+      html.dark thead,
+      html.dark thead * {
+        background-color: transparent !important;
+        color: #e9b6ff !important;
+      }
+
+      html.dark tbody tr:hover > td:not(.p-0),
+      html.dark tbody tr:hover > th {
+        background-color: rgba(33, 33, 33, 0.5) !important;
+      }
+
+      html.dark .app-tooltip {
+        background-color: #000000 !important;
+        color: #ffffff !important;
+        box-shadow: none !important;
+      }
+
+      /* Error notices: coral text (overrides html.dark * white). */
+      html.dark .app-error-notice,
+      html.dark .app-error-notice * {
+        color: #ff674d !important;
+      }
+
+      /* Info / success notices: green text (overrides html.dark * white). */
+      html.dark .app-info-notice,
+      html.dark .app-info-notice * {
+        color: #4ade80 !important;
+      }
+
+      /* Passed pills: dark green. */
+      html.dark .status-pill-ok,
+      html.dark .status-pill-ok * {
+        background-color: #004b00 !important;
+        color: #ffffff !important;
+      }
+
+      /* Waiting / canceled-style pills: slate gray. */
+      html.dark .status-pill-muted,
+      html.dark .status-pill-muted * {
+        background-color: #2f373b !important;
+        color: #ffffff !important;
+      }
+
+      /* Running (in-flight / queued) pills. */
+      html.dark .status-pill-running,
+      html.dark .status-pill-running * {
+        background-color: #cb7409 !important;
+        color: #ffffff !important;
+      }
+
+      html.dark .status-pill-failed,
+      html.dark .status-pill-failed * {
+        background-color: #ff674d !important;
+        color: #ffffff !important;
+      }
+
+      html.dark tbody tr:hover > td:not(.p-0) *:not(.status-pill-ok):not(
+          .status-pill-muted
+        ):not(.status-pill-running):not(.status-pill-failed):not(
+          .search-highlight
+        ),
+      html.dark tbody tr:hover > th *:not(.search-highlight) {
+        background-color: transparent !important;
+      }
+
+      /*
+        Main rigs table uses auto column sizing (natural / full container width).
+
+        Nested history + steps tables use ``.deploy-nested-table`` +
+        ``--deploy-col-0…7`` (px widths measured from the main table) so their
+        columns line up without forcing the main grid narrow.
+      */
+      .deploy-nested-table {
+        table-layout: fixed;
+        width: 100%;
+      }
+
+      /* Nesting guides for expanded sections and their child rows. */
+      html.dark .deploy-history-table thead th:nth-child(2),
+      html.dark .deploy-history-table tbody tr[data-build-row] > td:nth-child(2),
+      html.dark .deploy-attempts-table thead th:nth-child(2),
+      html.dark .deploy-attempts-table tbody td:nth-child(4) {
+        border-left: 1px solid #e9b6ff !important;
+      }
+
+      /* Search-match highlight. Classic amber highlighter with black text so
+         it reads clearly on both the light and (pure black) dark surfaces.
+         The dark rule needs higher specificity + !important to beat the
+         global ``html.dark *`` monochrome override; the hover-transparent
+         rule above already exempts ``.search-highlight`` so matches stay lit
+         while hovering a row. */
+      mark.search-highlight {
+        background-color: #fde047;
+        color: #000000;
+        padding: 0 1px;
+        font-weight: 600;
+      }
+      html.dark mark.search-highlight,
+      html.dark mark.search-highlight * {
+        background-color: #fde047 !important;
+        color: #000000 !important;
       }
     </style>
   </head>
-  <body>
-    <main>
-      <a class="muted" href="../../">Back to Apps</a>
-      <h1>Rig Deployment Dashboard</h1>
-      <p>
-        Opens the Buildkite-backed dashboard that shows which branch and commit
-        are deployed on each rig.
-      </p>
+  <body class="min-h-screen">
+    <header class="sticky top-0 z-10">
+      <div class="w-full px-[17px] py-4 flex flex-wrap items-center gap-4">
+        <div class="flex-1 min-w-[240px] flex flex-col gap-1">
+          <div
+            id="sourceToggle"
+            class="flex items-center gap-3 text-[15px]"
+            role="tablist"
+            aria-label="Pipeline source"
+          ></div>
+          <p class="text-[13px] opacity-70">
+            Source:
+            <a
+              id="pipelineLink"
+              href="https://buildkite.com/mosaic/core-stack-deployment-pipeline/builds"
+              target="_blank"
+              rel="noopener"
+              class="hover:underline"
+              >mosaic/core-stack-deployment-pipeline</a
+            >
+            <span class="mx-2">|</span>
+            <span id="lastUpdated">loading...</span>
+          </p>
+        </div>
 
-      <a id="dashboardLink" class="button" href="#" aria-disabled="true">
-        Dashboard URL not configured
-      </a>
+        <div class="flex items-center gap-3 flex-wrap">
+          <input
+            id="search"
+            type="search"
+            placeholder="Filter by rig / branch / commit / author..."
+            class="px-3 py-2 w-72"
+          />
 
-      <div class="panel">
-        <h2>Configured Dashboard</h2>
-        <p id="configuredUrl" class="muted">Not configured.</p>
+          <label
+            id="autoRefreshLabel"
+            class="flex items-center gap-2 cursor-pointer select-none"
+            style="display: none"
+          >
+            <input id="autoRefresh" type="checkbox" checked class="rounded" />
+            Auto-refresh (10s)
+          </label>
+
+          <button
+            id="refreshBtn"
+            style="display: none"
+            class="flex items-center gap-2 px-3 py-2 disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            <svg
+              id="refreshIcon"
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              class="w-4 h-4"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M15.312 11.424a5.5 5.5 0 01-9.203 2.466l-.312-.311h1.81a.75.75 0 000-1.5H3.989a.75.75 0 00-.75.75v3.618a.75.75 0 001.5 0v-1.828l.336.335a7 7 0 0011.712-3.138.75.75 0 00-1.474-.286zm.279-7.75a.75.75 0 01.75.75v3.417a.75.75 0 01-.75.75h-3.417a.75.75 0 010-1.5h1.78l-.34-.341a5.5 5.5 0 00-9.201 2.466.75.75 0 01-1.474-.286 7 7 0 0111.713-3.138l.339.338V4.424a.75.75 0 01.75-.75z"
+                clip-rule="evenodd"
+              />
+            </svg>
+            Refresh
+          </button>
+
+          <button
+            id="backfillBtn"
+            type="button"
+            style="display: none"
+            title="Walk Buildkite history page-by-page until we hit deploys we already have, upserting each into the local store. Safe to click anytime — use it to seed the store on a fresh install and to catch up on deploys that landed while the dashboard was offline."
+            class="flex items-center gap-2 px-3 py-2 disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            <svg
+              id="backfillIcon"
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              class="w-4 h-4"
+            >
+              <path d="M10 3a.75.75 0 01.75.75v8.69l2.97-2.97a.75.75 0 111.06 1.06l-4.25 4.25a.75.75 0 01-1.06 0L5.22 10.53a.75.75 0 111.06-1.06l2.97 2.97V3.75A.75.75 0 0110 3z" />
+              <path d="M3.75 15.5a.75.75 0 01.75.75V17a.5.5 0 00.5.5h10a.5.5 0 00.5-.5v-.75a.75.75 0 011.5 0V17a2 2 0 01-2 2H5a2 2 0 01-2-2v-.75a.75.75 0 01.75-.75z" />
+            </svg>
+            <span id="backfillLabel">Sync history</span>
+          </button>
+
+        </div>
+      </div>
+    </header>
+
+    <main class="w-full px-[17px] pt-1 pb-6">
+      <section
+        id="historyCard"
+        class="mb-6 rounded-lg overflow-hidden"
+      >
+        <div class="flex flex-wrap items-end gap-3">
+          <form id="historyForm" class="flex flex-wrap items-end gap-3">
+            <div class="flex flex-col">
+              <input
+                id="historyRigInput"
+                list="rigSuggestions"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="e.g. mce201"
+                class="px-3 py-2 w-56 font-mono"
+              />
+              <datalist id="rigSuggestions"></datalist>
+            </div>
+
+            <button
+              type="submit"
+              class="px-3 py-2"
+            >
+              Show history
+            </button>
+
+            <button
+              type="button"
+              id="historyClearBtn"
+              class="px-3 py-2 hidden"
+            >
+              Clear
+            </button>
+          </form>
+
+          <div
+            id="statusBanners"
+            class="ml-auto flex flex-wrap items-center gap-3"
+          >
+            <div
+              id="rateLimitBanner"
+              class="hidden px-3 py-2 rounded app-error-notice"
+            ></div>
+            <div
+              id="syncBanner"
+              class="hidden px-3 py-2 rounded app-info-notice"
+            ></div>
+            <div
+              id="errorBanner"
+              class="hidden px-3 py-2 rounded app-error-notice"
+            ></div>
+          </div>
+        </div>
+
+        <div
+          id="historyResult"
+          class="hidden"
+        ></div>
+      </section>
+
+      <div id="rigsTableWrap" class="rounded-lg overflow-hidden">
+        <div class="overflow-x-auto">
+          <table id="rigsMainTable" class="w-full">
+            <thead
+              class="uppercase tracking-wide"
+            >
+              <tr>
+                <th class="px-4 text-left w-10"></th>
+                <th class="px-4 text-left">Rig</th>
+                <th class="px-4 text-left">Status</th>
+                <th id="branchHeader" class="px-4 text-left min-w-[24rem]">Branch</th>
+                <th class="px-4 text-left min-w-[10rem]">Commit</th>
+                <th class="px-4 text-left">Deployed By</th>
+                <th class="px-4 text-left">When</th>
+                <th class="px-4 text-left">Build</th>
+              </tr>
+            </thead>
+            <tbody id="tableBody">
+              <tr>
+                <td colspan="8" class="px-4 text-center">
+                  Loading...
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
 
-      <div class="panel">
-        <h2>Cloudflare Backend</h2>
-        <ol>
-          <li>Deploy <code>workers/rig-deployment-dashboard</code> with Wrangler.</li>
-          <li>Store <code>BUILDKITE_API_TOKEN</code> and <code>ADMIN_TOKEN</code> as Worker secrets.</li>
-          <li>Update <code>config.js</code> if Wrangler reports a different Worker URL.</li>
-        </ol>
-      </div>
+      <div id="storeFooter" class="mt-6"></div>
     </main>
 
     <script>
-      const config = window.rigDeploymentDashboardConfig || {};
-      const dashboardUrl = String(config.dashboardUrl || "").trim();
-      const dashboardLink = document.getElementById("dashboardLink");
-      const configuredUrl = document.getElementById("configuredUrl");
+      const state = {
+        snapshot: null,
+        expanded: new Set(),
+        filter: "",
+        // Available pipelines (from /api/sources) and the one currently
+        // shown. ``source`` is threaded through every API call as
+        // ``?source=`` so the backend reads the right pipeline + store.
+        // null until /api/sources resolves; a null source just lets the
+        // server fall back to its primary pipeline.
+        sources: [],
+        source: null,
+        // Whether this client may use the write controls (Refresh / Sync /
+        // Auto-refresh) and force server-side Buildkite fetches. Set from
+        // /api/client-context on load; the operator is the machine running
+        // the dashboard (localhost). LAN viewers stay read-only and just
+        // poll the cache the operator keeps warm. Defaults to false so a
+        // LAN viewer never flashes the controls before the probe resolves.
+        isOperator: false,
+        autoRefreshTimer: null,
+        history: null,
+        historyLoading: false,
+        fetchedAtMs: null,
+        knownRigs: [],
+        // Epoch seconds when the Buildkite rate limit resets, per the
+        // latest server response. Null when we're not rate-limited.
+        rateLimitedUntil: null,
+        // Handle returned by setTimeout for the scheduled auto-retry so we
+        // can clear it if a new fetch succeeds (or a new rate-limit window
+        // starts) before the retry fires.
+        rateLimitRetryTimer: null,
+        // Build numbers whose retry/attempt panel is currently open
+        // inline. Survives re-renders (auto-refresh, filter changes) so
+        // an opened panel doesn't snap shut every 30s.
+        expandedBuilds: new Set(),
+        // Cache of attempts data per build number, keyed by build_number.
+        // Shape: { [n]: { loading?: bool, error?: string, data?: object } }
+        // We hold onto results across re-renders and sync open panels
+        // during snapshot refreshes.
+        buildAttempts: {},
+      };
 
-      if (dashboardUrl) {
-        dashboardLink.href = dashboardUrl;
-        dashboardLink.textContent = "Open Deployment Dashboard";
-        dashboardLink.removeAttribute("aria-disabled");
-        configuredUrl.textContent = dashboardUrl;
+      // Mirrors main rigs column widths (``syncDeployColumnWidths`` sets px on
+      // ``:root`` ``--deploy-col-0`` … ``--deploy-col-7`` from measured cells).
+      const DEPLOY_NESTED_COLGROUP = `
+            <colgroup>
+              <col style="width:var(--deploy-col-0, 12.5%)" />
+              <col style="width:var(--deploy-col-1, 12.5%)" />
+              <col style="width:var(--deploy-col-2, 12.5%)" />
+              <col style="width:var(--deploy-col-3, 12.5%)" />
+              <col style="width:var(--deploy-col-4, 12.5%)" />
+              <col style="width:var(--deploy-col-5, 12.5%)" />
+              <col style="width:var(--deploy-col-6, 12.5%)" />
+              <col style="width:var(--deploy-col-7, 12.5%)" />
+            </colgroup>`;
+
+      let deployColSyncRaf = null;
+      function syncDeployColumnWidths() {
+        const table = document.getElementById("rigsMainTable");
+        if (!table) return;
+        const row = table.querySelector("tbody tr[data-rig]");
+        const hdr = table.querySelectorAll("thead tr th");
+        const cells = row ? row.querySelectorAll("td") : hdr;
+        if (!cells || cells.length < 8) return;
+        const root = document.documentElement;
+        for (let i = 0; i < 8; i++) {
+          const w = cells[i].getBoundingClientRect().width;
+          root.style.setProperty(
+            `--deploy-col-${i}`,
+            `${Number.isFinite(w) ? Math.round(w * 100) / 100 : 0}px`,
+          );
+        }
       }
+
+      function scheduleSyncDeployColumnWidths() {
+        if (deployColSyncRaf) cancelAnimationFrame(deployColSyncRaf);
+        deployColSyncRaf = requestAnimationFrame(() => {
+          deployColSyncRaf = null;
+          requestAnimationFrame(syncDeployColumnWidths);
+        });
+      }
+
+      let deployResizeTimer = null;
+      window.addEventListener("resize", () => {
+        clearTimeout(deployResizeTimer);
+        deployResizeTimer = setTimeout(scheduleSyncDeployColumnWidths, 120);
+      });
+
+      function updateLastUpdatedLabel() {
+        const el = $("lastUpdated");
+        if (!el) return;
+        if (!state.fetchedAtMs) {
+          el.textContent = "loading...";
+          return;
+        }
+        el.textContent = `updated ${relativeTime(new Date(state.fetchedAtMs).toISOString())}`;
+      }
+
+      const $ = (id) => document.getElementById(id);
+
+      const dashboardConfig = window.rigDeploymentDashboardConfig || {};
+      const apiBaseUrl = String(
+        dashboardConfig.apiBaseUrl || dashboardConfig.dashboardUrl || "",
+      )
+        .trim()
+        .replace(/\/+$/, "");
+
+      function apiPath(path) {
+        if (!apiBaseUrl) return path;
+        return new URL(path, `${apiBaseUrl}/`).toString();
+      }
+
+      // Append the active ``?source=`` to an API path so every snapshot /
+      // history / attempts / refresh / sync call hits the pipeline the user
+      // selected. No-op until /api/sources resolves (state.source is null),
+      // in which case the server falls back to its primary pipeline. Handles
+      // paths that already carry a query string (e.g. ?force_refresh=true).
+      function withSource(path) {
+        let sourcedPath = path;
+        if (state.source) {
+          const sep = sourcedPath.includes("?") ? "&" : "?";
+          sourcedPath = `${sourcedPath}${sep}source=${encodeURIComponent(state.source)}`;
+        }
+        return apiPath(sourcedPath);
+      }
+
+      // The /api/sources entry for the active source (or null before it
+      // resolves / when single-source).
+      function activeSourceMeta() {
+        return (state.sources || []).find((s) => s.key === state.source) || null;
+      }
+
+      // Header label for the "ref" column. Defaults to "Branch"; the AAOS
+      // Flashing source reports "AAOS Version" so we relabel the column and
+      // render deploy.version instead of the (always-master) git branch.
+      function refColumnLabel() {
+        const meta = activeSourceMeta();
+        return (meta && meta.ref_label) || "Branch";
+      }
+
+      // True when the active source shows an AAOS version in place of the
+      // branch (i.e. its ref_label isn't the default "Branch").
+      function sourceUsesVersion() {
+        return refColumnLabel() !== "Branch";
+      }
+
+      // Keep the main table's ref-column header in sync with the active
+      // source (the nested history tables interpolate refColumnLabel()
+      // directly when they render).
+      function applyRefColumnLabel() {
+        const h = $("branchHeader");
+        if (h) h.textContent = refColumnLabel();
+      }
+
+      function escapeHtml(s) {
+        if (s == null) return "";
+        return String(s)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      // Escape ``text`` for HTML and wrap every case-insensitive occurrence of
+      // ``filter`` in a <mark> so search matches are visually highlighted.
+      // Splitting/escaping is done on the *raw* string (not the escaped one)
+      // so match offsets stay correct even when the text contains characters
+      // that expand on escape (& < > " '). Only ever emit the matched slice
+      // of the original text — never the filter — so casing is preserved.
+      function highlightTerm(text, filter) {
+        const str = text == null ? "" : String(text);
+        const needle = (filter || "").toLowerCase();
+        if (!needle) return escapeHtml(str);
+        const hay = str.toLowerCase();
+        let out = "";
+        let i = 0;
+        while (i < str.length) {
+          const idx = hay.indexOf(needle, i);
+          if (idx === -1) {
+            out += escapeHtml(str.slice(i));
+            break;
+          }
+          out += escapeHtml(str.slice(i, idx));
+          out += `<mark class="search-highlight">${escapeHtml(
+            str.slice(idx, idx + needle.length),
+          )}</mark>`;
+          i = idx + needle.length;
+        }
+        return out;
+      }
+
+      function relativeTime(iso) {
+        if (!iso) return "-";
+        const then = new Date(iso).getTime();
+        if (Number.isNaN(then)) return "-";
+        const diffSec = Math.round((Date.now() - then) / 1000);
+        const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+        const units = [
+          ["year", 31536000],
+          ["month", 2592000],
+          ["week", 604800],
+          ["day", 86400],
+          ["hour", 3600],
+          ["minute", 60],
+          ["second", 1],
+        ];
+        for (const [unit, seconds] of units) {
+          if (Math.abs(diffSec) >= seconds || unit === "second") {
+            return rtf.format(-Math.round(diffSec / seconds), unit);
+          }
+        }
+        return "-";
+      }
+
+      // Format an ISO timestamp as "YYYY-MM-DD at HH:MM:SS" in the
+      // viewer's local timezone, 24-hour clock. Used wherever we need
+      // an unambiguous wall-clock timestamp (the "When" column on
+      // deploy / job rows). Returns "-" for unparseable input so it
+      // can be dropped straight into a table cell.
+      function formatTimestamp(iso) {
+        if (!iso) return "-";
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return "-";
+        const pad = (n) => String(n).padStart(2, "0");
+        return (
+          `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+          `at ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+        );
+      }
+
+      const PAUSE_ICON_SVG = `<svg class="w-3 h-3" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M5.5 4.5A1.5 1.5 0 017 6v8a1.5 1.5 0 01-3 0V6a1.5 1.5 0 011.5-1.5zm8 0A1.5 1.5 0 0115 6v8a1.5 1.5 0 01-3 0V6a1.5 1.5 0 011.5-1.5z"/></svg>`;
+
+      function statusPill(state) {
+        // Build- and job-level "blocked" both mean the same thing in this
+        // pipeline: paused at a manual gate. Render them identically to
+        // ``awaiting_deploy`` so a deploy script that's gated behind an
+        // open proceed-after-prebuild block reads as "waiting" instead of
+        // the more alarming "blocked".
+        const pillCls = "";
+        const pillOkCls = "status-pill-ok";
+        const pillFailedCls = "status-pill-failed";
+        const pillMutedCls = "status-pill-muted";
+        const pillRunningCls = "status-pill-running";
+        const WAITING_PILL = [pillMutedCls, "waiting", PAUSE_ICON_SVG];
+        const map = {
+          passed: [pillOkCls, "passed"],
+          failed: [pillFailedCls, "failed"],
+          failing: [pillFailedCls, "failing"],
+          canceled: [pillMutedCls, "canceled"],
+          canceling: [pillMutedCls, "canceling"],
+          running: [pillRunningCls, "running"],
+          scheduled: [pillRunningCls, "scheduled"],
+          blocked: WAITING_PILL,
+          awaiting_deploy: WAITING_PILL,
+          skipped: [pillCls, "skipped"],
+          not_run: [pillCls, "not run"],
+        };
+        const entry = map[state] || [pillCls, state || "unknown"];
+        const [cls, label, icon] = entry;
+        const inner = icon
+          ? `${icon}<span>${escapeHtml(label)}</span>`
+          : escapeHtml(label);
+        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded font-medium ${cls}" title="${escapeHtml(label)}">${inner}</span>`;
+      }
+
+      function deployCells(deploy, filter = "") {
+        if (!deploy) {
+          return {
+            status: `<span>-</span>`,
+            branch: "-",
+            commit: "-",
+            pr: "-",
+            author: "-",
+            when: "-",
+            build: "-",
+          };
+        }
+        // For version-style sources (AAOS Flashing) the branch is always
+        // ``master`` and meaningless, so show the AAOS version instead — as
+        // plain text, since it's not a git ref to link to GitHub. A dash
+        // makes a missing version obvious rather than silently showing the
+        // branch under an "AAOS Version" header.
+        const branchCell = sourceUsesVersion()
+          ? (deploy.version
+              ? `<span class="font-mono">${highlightTerm(deploy.version, filter)}</span>`
+              : `<span class="opacity-50">—</span>`)
+          : (deploy.branch
+              ? (deploy.branch_url
+                  ? `<a href="${escapeHtml(deploy.branch_url)}" target="_blank" rel="noopener" class="font-mono hover:underline" title="View ${escapeHtml(deploy.branch)} on GitHub">${highlightTerm(deploy.branch, filter)}</a>`
+                  : `<span class="font-mono">${highlightTerm(deploy.branch, filter)}</span>`)
+              : "-");
+        const commitCell = deploy.commit
+          ? `<a href="${escapeHtml(deploy.commit_url)}" target="_blank" rel="noopener" class="font-mono hover:underline" title="${escapeHtml(deploy.commit_subject)}">${highlightTerm(deploy.commit_short, filter)}</a>`
+          : "-";
+        const authorCell = deploy.triggered_by
+          ? highlightTerm(deploy.triggered_by, filter)
+          : "-";
+        // Show *when the deploy started* (not when it finished). Falls
+        // back to scheduled_at and then created_at for builds that
+        // haven't reached the started state yet, mirroring the per-job
+        // "when" logic below. Builds are still sorted server-side by
+        // last_event_at so retries bubble to the top -- this column
+        // just shows the start time of whatever build is in the row.
+        const when =
+          deploy.started_at || deploy.scheduled_at || deploy.created_at;
+        const whenCell = when
+          ? `<span>${escapeHtml(formatTimestamp(when))}</span>`
+          : "-";
+        const buildCell = deploy.build_url
+          ? `<a href="${escapeHtml(deploy.build_url)}" target="_blank" rel="noopener" class="hover:underline">#${deploy.build_number}</a>`
+          : `#${deploy.build_number}`;
+        return {
+          status: statusPill(deploy.state),
+          branch: branchCell,
+          commit: commitCell,
+          author: authorCell,
+          when: whenCell,
+          build: buildCell,
+        };
+      }
+
+      function matchesDeploy(rigName, deploy, filter) {
+        if (!filter) return true;
+        const parts = [rigName];
+        if (deploy) {
+          if (deploy.version) parts.push(deploy.version);
+          if (deploy.branch) parts.push(deploy.branch);
+          if (deploy.commit) parts.push(deploy.commit);
+          if (deploy.commit_short) parts.push(deploy.commit_short);
+          if (deploy.triggered_by) parts.push(deploy.triggered_by);
+          if (deploy.commit_subject) parts.push(deploy.commit_subject);
+        }
+        const hay = parts.filter(Boolean).join(" ").toLowerCase();
+        return hay.includes(filter.toLowerCase());
+      }
+
+      function matchesFilter(rig, filter) {
+        if (!filter) return true;
+        // Match on the rig name + every deploy we have cached for this rig,
+        // not just the latest one. Without this, a rig whose latest deploy is
+        // a nightly build won't match a branch search like "denysk" even when
+        // denysk's deploy is one row down in the expanded history.
+        if (matchesDeploy(rig.name, null, filter)) return true;
+        const history = rig.history || [];
+        return history.some((d) => matchesDeploy(rig.name, d, filter));
+      }
+
+      // Canonical fleet shapes accepted in the rig autocomplete. Keep in
+      // sync with ``_CANONICAL_RIG_RE`` in buildkite_client.py so the
+      // autocomplete and the main table agree on what counts as a real rig.
+      const RIG_SUGGEST_RE = /^(?:cosmo|wanda|(?:rog|mce|dmx)\d{3})$/i;
+
+      // Pretty display names for rigs whose canonical name doesn't match the
+      // mce### pattern people often think in. Keys are canonical names (as
+      // returned by the backend after aliasing); values are what we show in
+      // the dropdown. parseRigInput() reverses this back to the canonical
+      // form for the API call.
+      const RIG_DISPLAY_OVERRIDES = {
+        cosmo: "mce101 (cosmo)",
+        wanda: "mce102 (wanda)",
+      };
+
+      // If the user picked an annotated entry like "mce101 (cosmo)" from
+      // the dropdown, take the canonical name from inside the parens.
+      // Otherwise pass the raw input through; the backend's _normalize_rig
+      // will handle lowercasing and any aliasing.
+      function parseRigInput(s) {
+        const t = (s || "").trim();
+        const m = t.match(/^\S+\s+\(([^)]+)\)$/);
+        return m ? m[1].trim() : t;
+      }
+
+      function renderRigSuggestions() {
+        const datalist = $("rigSuggestions");
+        const snapshotNames = new Set(
+          state.snapshot && state.snapshot.rigs
+            ? state.snapshot.rigs.map((r) => r.name)
+            : [],
+        );
+        const knownNames = new Set(state.knownRigs || []);
+        // Union so rigs without recent deploys still appear in the dropdown,
+        // then narrow to the canonical fleet shapes: cosmo, wanda, rog###,
+        // mce###. Anything else (helper directories, one-off names, etc.)
+        // is hidden from the suggestion list.
+        const items = Array.from(new Set([...snapshotNames, ...knownNames]))
+          .filter((n) => RIG_SUGGEST_RE.test(n))
+          .map((n) => ({
+            canonical: n,
+            display: RIG_DISPLAY_OVERRIDES[n] || n,
+            inSnapshot: snapshotNames.has(n),
+          }))
+          // Sort by display string so e.g. "mce102 (wanda)" sits with the
+          // other mce### entries instead of at the bottom under "w".
+          .sort((a, b) => a.display.localeCompare(b.display));
+        datalist.innerHTML = items
+          .map(({ display, inSnapshot }) => {
+            // The `label` attribute is shown as secondary text in the
+            // datalist suggestion; rigs without recent deploys get a hint
+            // so it's clear why they don't show up in the main table.
+            const labelAttr = inSnapshot ? "" : ` label="no recent deploys"`;
+            return `<option value="${escapeHtml(display)}"${labelAttr}></option>`;
+          })
+          .join("");
+      }
+
+      async function loadKnownRigs() {
+        try {
+          const resp = await fetch(apiPath("/api/known-rigs"));
+          if (!resp.ok) return;
+          const data = await resp.json();
+          state.knownRigs = Array.isArray(data.rigs) ? data.rigs : [];
+          renderRigSuggestions();
+        } catch (err) {
+          // Non-fatal: fall back to snapshot-only suggestions.
+        }
+      }
+
+      function formatStoreSinceLabel(isoTimestamp) {
+        if (!isoTimestamp) return "";
+        const d = new Date(isoTimestamp);
+        if (Number.isNaN(d.getTime())) return "";
+        return d.toISOString().slice(0, 10);
+      }
+
+      async function loadStoreStats() {
+        const el = document.getElementById("storeFooter");
+        const backfillBtn = document.getElementById("backfillBtn");
+        try {
+          const resp = await fetch(withSource("/api/stats"));
+          if (!resp.ok) {
+            if (el) el.textContent = "";
+            return;
+          }
+          const data = await resp.json();
+          if (!data.enabled) {
+            if (el) el.textContent = "Persistent history store disabled (--no-db)";
+            // Sync is meaningless without a place to put the results.
+            if (backfillBtn) {
+              backfillBtn.disabled = true;
+              backfillBtn.title =
+                "Persistent store disabled (--no-db). Restart without --no-db to enable history sync.";
+              $("backfillLabel").textContent = "Sync (disabled)";
+            }
+            return;
+          }
+          if (backfillBtn) {
+            backfillBtn.disabled = false;
+          }
+          const total = Number(data.total_builds || 0).toLocaleString();
+          const rigs = Number(data.total_rigs || 0).toLocaleString();
+          const since = formatStoreSinceLabel(data.first_event_at);
+          const sinceFragment = since ? ` since ${since}` : "";
+          if (el) {
+            el.textContent =
+              `Local store: ${total} deploys across ${rigs} rigs${sinceFragment}`;
+          }
+        } catch (err) {
+          // Non-fatal: leave footer empty if /api/stats is unreachable.
+        }
+      }
+
+      function renderHistoryDeploys(deploys, { source } = {}) {
+        if (deploys.length === 0) {
+          const msg = source === "snapshot"
+            ? "No deploys to this rig in the most recent ~100 builds. The persistent history store is disabled (--no-db), so we can only see the snapshot window."
+            : "No deploys recorded for this rig yet. The dashboard records every build it sees on refresh; deploy to this rig and it will start showing up here.";
+          return `<div class="text-center">${escapeHtml(msg)}</div>`;
+        }
+        const rows = deploys.flatMap((d) => buildRowAndAttempts(d, 8, state.filter));
+        return `
+          <div class="overflow-x-auto">
+            <table class="deploy-nested-table deploy-history-table w-full">
+              ${DEPLOY_NESTED_COLGROUP}
+              <thead class="uppercase tracking-wide">
+                <tr>
+                  <th class="px-4 text-left" colspan="2" aria-hidden="true"></th>
+                  <th class="px-4 text-left">Status</th>
+                  <th class="px-4 text-left">${escapeHtml(refColumnLabel())}</th>
+                  <th class="px-4 text-left">Commit</th>
+                  <th class="px-4 text-left">Deployed By</th>
+                  <th class="px-4 text-left">When</th>
+                  <th class="px-4 text-left">Build</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rows.join("")}
+              </tbody>
+            </table>
+          </div>`;
+      }
+
+      function renderHistoryPanel() {
+        const panel = $("historyResult");
+
+        if (state.historyLoading) {
+          panel.classList.remove("hidden");
+          panel.innerHTML = `<div class="text-center">Loading...</div>`;
+          return;
+        }
+
+        const h = state.history;
+        if (!h) {
+          panel.classList.add("hidden");
+          panel.innerHTML = "";
+          $("historyClearBtn").classList.add("hidden");
+          return;
+        }
+
+        $("historyClearBtn").classList.remove("hidden");
+
+        const errorBanner = (h.errors && h.errors.length > 0)
+          ? `<div class="rounded app-error-notice">
+              <strong>Error:</strong> ${escapeHtml(h.errors[0])}
+            </div>`
+          : "";
+
+        // The `source` field tells us which backend path produced this
+        // history. "local_history" is the default (persistent store);
+        // "snapshot" means the dashboard was started with --no-db.
+        const isSnapshotOnly = h.source === "snapshot";
+        const sourceBanner = isSnapshotOnly
+          ? `<div class="rounded">
+              Persistent history store is disabled (--no-db). Showing only this rig's deploys in the most recent ~100 builds.
+            </div>`
+          : "";
+
+        panel.classList.remove("hidden");
+        panel.innerHTML = `
+          ${errorBanner}
+          ${sourceBanner}
+          ${renderHistoryDeploys(h.deploys, { source: h.source })}
+        `;
+
+        scheduleSyncDeployColumnWidths();
+      }
+
+      async function loadHistory(rig, { force = false, silent = false } = {}) {
+        const trimmed = parseRigInput(rig);
+        if (!trimmed) return;
+        // User-initiated loads surface the loading state and update the
+        // input/URL so it's obvious something is happening. Silent
+        // refreshes (driven by the auto-refresh tick) keep the existing
+        // panel on screen while a fresh fetch is in flight, so re-renders
+        // don't flicker through a "Loading..." state every 10s.
+        if (!silent) {
+          $("historyRigInput").value = trimmed;
+          state.historyLoading = true;
+          renderHistoryPanel();
+        }
+        try {
+          let url = `/api/rigs/${encodeURIComponent(trimmed)}/history`;
+          if (force) url += "?force_refresh=true";
+          const resp = await fetch(withSource(url));
+          if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(`HTTP ${resp.status}: ${text.slice(0, 200)}`);
+          }
+          state.history = await resp.json();
+          applyRateLimit(state.history);
+          if (!silent) updateUrlState({ rig: trimmed });
+        } catch (err) {
+          // Silent refresh failures should leave the previously-rendered
+          // history alone so a transient blip (network, 429, etc.)
+          // doesn't blank out the panel mid-session. The next refresh
+          // tick will try again.
+          if (!silent) {
+            state.history = {
+              rig: trimmed,
+              deploys: [],
+              stats: { total: 0, passed: 0, failed: 0, canceled: 0, in_progress: 0, other: 0 },
+              source: "local_history",
+              fetched_at: Date.now() / 1000,
+              errors: [String(err.message || err)],
+            };
+          }
+        } finally {
+          if (!silent) state.historyLoading = false;
+          renderHistoryPanel();
+        }
+      }
+
+      function refreshOpenHistoryPanel() {
+        // After a snapshot refresh, re-pull the standalone rig deploy
+        // history so new deploys (and state transitions on existing ones)
+        // catch up without requiring the user to re-trigger the load.
+        // Mirrors ``refreshOpenBuildAttempts``. No-op when the panel is
+        // closed, or when a user-initiated load is already in flight (the
+        // pending response will render the panel itself).
+        if (
+          state.history
+          && state.history.rig
+          && !state.historyLoading
+        ) {
+          loadHistory(state.history.rig, { silent: true });
+        }
+      }
+
+      function clearHistory() {
+        state.history = null;
+        $("historyRigInput").value = "";
+        renderHistoryPanel();
+        updateUrlState({ rig: null });
+      }
+
+      // ============================================================
+      // Build retry/attempt inline expansion
+      // ============================================================
+      // Each build row in the rig-table expansion and the rig-history
+      // panel can be clicked to expand inline and show the build's
+      // job/attempt history (every Buildkite job in the build, with
+      // retried attempts grouped together via the ``attempt_number``
+      // badge). State lives on ``state.expandedBuilds`` /
+      // ``state.buildAttempts`` so it survives auto-refresh re-renders.
+
+      function formatDuration(ms) {
+        if (ms == null) return "-";
+        if (ms < 1000) return `${ms}ms`;
+        const totalSec = Math.round(ms / 1000);
+        if (totalSec < 60) return `${totalSec}s`;
+        const min = Math.floor(totalSec / 60);
+        const sec = totalSec % 60;
+        if (min < 60) return sec ? `${min}m ${sec}s` : `${min}m`;
+        const hr = Math.floor(min / 60);
+        const remMin = min % 60;
+        return remMin ? `${hr}h ${remMin}m` : `${hr}h`;
+      }
+
+      function renderAttemptsTable(data) {
+        // Skip the manual gates that aren't real pipeline work:
+        //   - input-deployment-metadata: the "Specify Deployment
+        //     Parameters" prompt at the top of every build.
+        //   - proceed-after-prebuild: the "Proceed with deployment on
+        //     <rig>?" approval block.
+        //   - force-unlock-block: the ":unlock: Force unlock <rig>?"
+        //     escape-hatch prompt.
+        const HIDDEN_STEP_KEYS = new Set([
+          "input-deployment-metadata",
+          "proceed-after-prebuild",
+          "force-unlock-block",
+        ]);
+        // The AAOS Flashing pipeline's equivalent of the deployment
+        // "Specify Deployment Parameters" input prompt (":pencil2: Specify
+        // Flashing Parameters"). Matched by name rather than step_key since
+        // the flashing pipeline's key isn't assumed to match the deployment
+        // one; the name match is harmless on the deployment pipeline (which
+        // has no such step).
+        const isParamsPrompt = (job) =>
+          typeof job.name === "string"
+          && /specify (?:flashing|deployment) parameters/i.test(job.name);
+        // Force-unlock script steps (step_key ``<rig>-force-unlock``) only
+        // run when an operator clicks through the force-unlock-block escape
+        // hatch. In a normal deploy they sit in ``state=blocked`` forever
+        // because nobody approves the gate. Showing them as "waiting" or
+        // "blocked" alongside the real deploy steps is misleading — they
+        // weren't part of this build's actual work — so hide them unless
+        // the script actually started running (passed/failed/canceled).
+        const isUnusedForceUnlock = (job) =>
+          typeof job.step_key === "string"
+          && job.step_key.endsWith("-force-unlock")
+          && !job.started_at;
+        const jobs = (data.jobs || []).filter(
+          (j) =>
+            !HIDDEN_STEP_KEYS.has(j.step_key)
+            && !isParamsPrompt(j)
+            && !isUnusedForceUnlock(j),
+        );
+        if (jobs.length === 0) {
+          return `<div class="px-4 py-6">
+            This build has no jobs to show. It may have been canceled before any step ran.
+          </div>`;
+        }
+        const rows = jobs
+          .map((job) => {
+            const stepName = job.name || "(unnamed)";
+            // ``web_url`` opens the Buildkite job page (which auto-expands
+            // the log panel). Step name is the link when a URL exists.
+            const stepCell = job.web_url
+              ? `<a href="${escapeHtml(job.web_url)}" target="_blank" rel="noopener" class="font-mono text-inherit hover:underline min-w-0" title="Open this step's log on Buildkite">${escapeHtml(
+                  stepName,
+                )}</a>`
+              : `<span class="font-mono" title="${escapeHtml(stepName)}">${escapeHtml(stepName)}</span>`;
+            const stateCell = `<span class="inline-flex items-center gap-1.5 min-w-0 shrink-0">${statusPill(job.state)}</span>`;
+            const durationCell = formatDuration(job.duration_ms);
+            // Prefer started_at for "when" — it's the most actionable
+            // timestamp (when did this attempt actually run). Fall back
+            // to scheduled_at and finally created_at for not-yet-started
+            // jobs.
+            const ts = job.started_at || job.scheduled_at || job.created_at;
+            const whenCell = ts
+              ? `<span>${escapeHtml(formatTimestamp(ts))}</span>`
+              : "-";
+            // Three leading cells align this row with the Branch column on the
+            // deploy row above; status + step share branch + commit widths.
+            // Duration / When use Deployed By + When column widths from the main
+            // grid; trailing cell pads the Build column.
+            const statusStepCell = `<div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 min-w-0">${stateCell}<span class="min-w-0">${stepCell}</span></div>`;
+            return `
+              <tr>
+                <td class="px-4" aria-hidden="true"></td>
+                <td class="px-4" aria-hidden="true"></td>
+                <td class="px-4" aria-hidden="true"></td>
+                <td class="px-4 min-w-0" colspan="2">${statusStepCell}</td>
+                <td class="px-4 whitespace-nowrap">${durationCell}</td>
+                <td class="px-4 whitespace-nowrap">${whenCell}</td>
+                <td class="px-4" aria-hidden="true"></td>
+              </tr>`;
+          })
+          .join("");
+
+        return `
+          <table class="deploy-nested-table deploy-attempts-table w-full">
+            ${DEPLOY_NESTED_COLGROUP}
+            <thead class="uppercase tracking-wide">
+              <tr>
+                <th class="px-4 text-left" colspan="3" aria-hidden="true"></th>
+                <th class="px-4 text-left" colspan="2">Steps</th>
+                <th class="px-4 text-left">Duration</th>
+                <th class="px-4 text-left">When</th>
+                <th class="px-4 text-left" aria-hidden="true"></th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>`;
+      }
+
+      function renderAttemptsPanel(buildNumber) {
+        const entry = state.buildAttempts[buildNumber];
+        const wrap = (inner) => `
+          <div>
+            ${inner}
+          </div>`;
+        if (!entry || entry.loading) {
+          return wrap(
+            `<div class="px-4 py-4 flex items-center gap-2">
+              <svg class="spin w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M15.312 11.424a5.5 5.5 0 01-9.203 2.466l-.312-.311h1.81a.75.75 0 000-1.5H3.989a.75.75 0 00-.75.75v3.618a.75.75 0 001.5 0v-1.828l.336.335a7 7 0 0011.712-3.138.75.75 0 00-1.474-.286z" clip-rule="evenodd"/></svg>
+              Loading attempts for #${buildNumber}...
+            </div>`,
+          );
+        }
+        if (entry.error) {
+          return wrap(
+            `<div class="px-0 py-4 app-error-notice">
+              <strong>Couldn't load attempts:</strong> ${escapeHtml(entry.error)}
+            </div>`,
+          );
+        }
+        const data = entry.data;
+        if (!data) {
+          return wrap(
+            `<div class="px-4 py-4">No data.</div>`,
+          );
+        }
+        if (data.errors && data.errors.length > 0 && (!data.jobs || data.jobs.length === 0)) {
+          return wrap(
+            `<div class="px-0 py-4 app-error-notice">
+              <strong>Buildkite error:</strong> ${escapeHtml(data.errors[0])}
+            </div>`,
+          );
+        }
+        return wrap(renderAttemptsTable(data));
+      }
+
+      async function loadBuildAttempts(
+        buildNumber,
+        { silent = false } = {},
+      ) {
+        const existing = state.buildAttempts[buildNumber];
+        // ``silent`` bypasses both client-side and server-side attempt caches,
+        // so a snapshot refresh can sync open panels (e.g. so a step that
+        // just transitioned to "failed" shows up without a page reload).
+        if (existing && existing.data && !silent) {
+          return;
+        }
+        // Silent refreshes keep the previously-rendered table on screen
+        // while the request is in flight to avoid flicker. Show the
+        // spinner only on the initial panel load.
+        const showSpinner = !silent || !(existing && existing.data);
+        if (showSpinner) {
+          state.buildAttempts[buildNumber] = { loading: true };
+          rerenderForBuild(buildNumber);
+        }
+        try {
+          // ``silent`` background syncs normally force a fresh Buildkite
+          // fetch, but that spends the token — so only the operator forces.
+          // LAN viewers re-read the cached/stored attempts (kept current by
+          // the operator's snapshot refreshes) instead.
+          const useForce = silent && state.isOperator;
+          let url = `/api/builds/${buildNumber}/attempts`;
+          if (useForce) url += "?force_refresh=true";
+          const resp = await fetch(withSource(url));
+          if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(`HTTP ${resp.status}: ${text.slice(0, 200)}`);
+          }
+          const data = await resp.json();
+          state.buildAttempts[buildNumber] = { data };
+          applyRateLimit(data);
+        } catch (err) {
+          // Surface errors only for user-initiated loads. A silent
+          // background refresh that fails should leave the previously
+          // rendered data alone so a transient blip doesn't blank out
+          // the panel; the next refresh tick will try again.
+          if (!silent) {
+            state.buildAttempts[buildNumber] = {
+              error: String(err.message || err),
+            };
+          }
+        } finally {
+          rerenderForBuild(buildNumber);
+        }
+      }
+
+      function refreshOpenBuildAttempts() {
+        // After a snapshot refresh, sync any inline-expanded build
+        // attempts panels so step states (e.g. "running" → "failed")
+        // catch up with the rest of the dashboard. Without this, the
+        // rig row updates but the open panel keeps showing stale step
+        // states. Silent mode reuses the on-screen data until fresh data
+        // arrives so there's no flicker.
+        for (const buildNumber of state.expandedBuilds) {
+          loadBuildAttempts(buildNumber, { silent: true });
+        }
+      }
+
+      function toggleBuildExpansion(buildNumber) {
+        // Accordion: opening a build collapses any other open build.
+        // Clicking the already-open build collapses it.
+        const wasOpen = state.expandedBuilds.has(buildNumber);
+        state.expandedBuilds.clear();
+        if (wasOpen) {
+          rerenderForBuild(buildNumber);
+          return;
+        }
+        state.expandedBuilds.add(buildNumber);
+        // Fire-and-forget — loadBuildAttempts triggers its own re-render
+        // when it finishes. The synchronous rerender below ensures the
+        // loading state appears immediately, even if the network is fast.
+        //
+        // If we already have cached attempts data from a previous expansion
+        // of this same build, the cache is likely stale: snapshot refresh
+        // ticks only sync currently-open panels (see
+        // ``refreshOpenBuildAttempts``), so the data hasn't been touched
+        // since the panel was last closed. Force a silent refresh so step
+        // states catch up to whatever Buildkite is reporting now. ``silent``
+        // keeps the cached rows on screen while the request is in flight
+        // (no spinner flicker) and bypasses the server-side build-detail
+        // cache via ``?force_refresh=true``.
+        const hasCachedData = !!(
+          state.buildAttempts[buildNumber]
+          && state.buildAttempts[buildNumber].data
+        );
+        loadBuildAttempts(buildNumber, { silent: hasCachedData });
+        rerenderForBuild(buildNumber);
+      }
+
+      // A build row can appear in two places at once: inside the rig
+      // table's history expansion and inside the standalone history
+      // panel. Re-render both so the panel stays in sync regardless
+      // of where the user clicked.
+      function rerenderForBuild(_buildNumber) {
+        renderTable();
+        renderHistoryPanel();
+      }
+
+      function updateUrlState({ rig }) {
+        const url = new URL(window.location);
+        if (rig) {
+          url.searchParams.set("rig", rig);
+        } else {
+          url.searchParams.delete("rig");
+        }
+        // Legacy URL param from the old time-window UI; strip it so stale
+        // bookmarks don't carry a no-op query string forward.
+        url.searchParams.delete("hours");
+        window.history.replaceState({}, "", url);
+      }
+
+      function loadHistoryFromUrl() {
+        const url = new URL(window.location);
+        const rig = url.searchParams.get("rig");
+        if (rig) {
+          loadHistory(rig);
+        }
+      }
+
+      function renderHistory(rig, filter = "") {
+        if (!rig.history || rig.history.length === 0) {
+          return `<div class="p-4">No history.</div>`;
+        }
+        const rows = rig.history.flatMap((d) => buildRowAndAttempts(d, 8, filter));
+        return `
+          <div>
+            <table class="deploy-nested-table deploy-history-table w-full">
+              ${DEPLOY_NESTED_COLGROUP}
+              <thead class="uppercase tracking-wide">
+                <tr>
+                  <th class="px-4 text-left" colspan="2" aria-hidden="true"></th>
+                  <th class="px-4 text-left">Status</th>
+                  <th class="px-4 text-left">${escapeHtml(refColumnLabel())}</th>
+                  <th class="px-4 text-left">Commit</th>
+                  <th class="px-4 text-left">Deployed By</th>
+                  <th class="px-4 text-left">When</th>
+                  <th class="px-4 text-left">Build</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rows.join("")}
+              </tbody>
+            </table>
+          </div>`;
+      }
+
+      // Render one build row plus, if expanded, its attempts row beneath
+      // it. ``colspan`` is the parent's column count — 8 everywhere (expand,
+      // rig spacer, then deploy columns).
+      function buildRowAndAttempts(deploy, colspan, filter = "") {
+        const c = deployCells(deploy, filter);
+        const num = deploy.build_number;
+        const isOpen = state.expandedBuilds.has(num);
+        const chevronCls = isOpen ? "rotate-90" : "";
+        const out = [];
+        out.push(`
+          <tr class="cursor-pointer" data-build-row="${num}">
+            <td class="px-4" colspan="2" aria-hidden="true"></td>
+            <td class="px-4 align-middle">
+              <span class="inline-flex items-center gap-1.5 min-w-0">
+                <svg class="chevron w-3.5 h-3.5 shrink-0 ${chevronCls}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd" />
+                </svg>
+                ${c.status}
+              </span>
+            </td>
+            <td class="px-4">${c.branch}</td>
+            <td class="px-4">${c.commit}</td>
+            <td class="px-4">${c.author}</td>
+            <td class="px-4">${c.when}</td>
+            <td class="px-4">${c.build}</td>
+          </tr>`);
+        if (isOpen) {
+          out.push(`
+            <tr data-build-attempts-for="${num}" class="deploy-nested-expand">
+              <td colspan="${colspan}" class="p-0">${renderAttemptsPanel(num)}</td>
+            </tr>`);
+        }
+        return out;
+      }
+
+      function renderTable() {
+        applyRefColumnLabel();
+        const body = $("tableBody");
+        if (!state.snapshot) return;
+        const rigs = state.snapshot.rigs.filter((r) =>
+          matchesFilter(r, state.filter),
+        );
+        if (rigs.length === 0) {
+          body.innerHTML = `
+            <tr>
+              <td colspan="8" class="px-4 text-center">
+                ${state.snapshot.rigs.length === 0 ? "No rigs with recent deploys." : "No rigs match the filter."}
+              </td>
+            </tr>`;
+          scheduleSyncDeployColumnWidths();
+          return;
+        }
+
+        const rows = [];
+        for (const rig of rigs) {
+          const latest = rig.history[0] || null;
+          const c = deployCells(latest, state.filter);
+          // If the user is searching and the match is via an older build
+          // (not the latest), auto-expand so the matching row is visible
+          // instead of silently hiding behind the collapsed row.
+          const filterMatchesLatest = !state.filter
+            || matchesDeploy(rig.name, latest, state.filter);
+          const isExpanded =
+            state.expanded.has(rig.name) || !filterMatchesLatest;
+          const status = latest
+            ? statusPill(latest.state)
+            : `<span>-</span>`;
+
+          rows.push(`
+            <tr class="cursor-pointer" data-rig="${escapeHtml(rig.name)}">
+              <td class="px-4">
+                <svg class="chevron w-4 h-4 ${isExpanded ? "rotate-90" : ""}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                  <path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd" />
+                </svg>
+              </td>
+              <td class="px-4 font-mono font-medium">
+                <button type="button" data-history-rig="${escapeHtml(rig.name)}" class="hover:underline" title="View deploy history for ${escapeHtml(rig.name)}">${highlightTerm(rig.name, state.filter)}</button>
+              </td>
+              <td class="px-4">${status}</td>
+              <td class="px-4">${c.branch}</td>
+              <td class="px-4">${c.commit}</td>
+              <td class="px-4">${c.author}</td>
+              <td class="px-4">${c.when}</td>
+              <td class="px-4">${c.build}</td>
+            </tr>
+          `);
+          if (isExpanded) {
+            rows.push(`
+              <tr data-history-for="${escapeHtml(rig.name)}" class="deploy-nested-expand">
+                <td colspan="8" class="p-0">${renderHistory(rig, state.filter)}</td>
+              </tr>
+            `);
+          }
+        }
+        body.innerHTML = rows.join("");
+
+        body.querySelectorAll("tr[data-rig]").forEach((tr) => {
+          tr.addEventListener("click", (e) => {
+            if (e.target.closest("a")) return;
+            if (e.target.closest("button[data-history-rig]")) return;
+            const rigName = tr.getAttribute("data-rig");
+            // Accordion: opening a rig collapses any other open rig.
+            // Clicking the already-open rig collapses it. Note that the
+            // search-filter auto-expand path (where the latest deploy
+            // doesn't match but an older one does) is independent of
+            // ``state.expanded`` and is unaffected.
+            const wasOpen = state.expanded.has(rigName);
+            state.expanded.clear();
+            // Switching rigs (or collapsing one) also resets every
+            // open build-attempts panel so that re-opening a rig
+            // later starts from a clean slate instead of restoring
+            // stale expansions from a different rig context.
+            state.expandedBuilds.clear();
+            if (!wasOpen) state.expanded.add(rigName);
+            renderTable();
+          });
+        });
+
+        body.querySelectorAll("button[data-history-rig]").forEach((btn) => {
+          btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const rig = btn.getAttribute("data-history-rig");
+            loadHistory(rig);
+            $("historyCard").scrollIntoView({ behavior: "smooth", block: "start" });
+          });
+        });
+        scheduleSyncDeployColumnWidths();
+      }
+
+      // Document-level delegation for the build row chevrons. Both the
+      // rig-table-expansion table and the standalone history panel table
+      // render rows with ``data-build-row``; one handler covers both
+      // without re-attaching after every render.
+      document.addEventListener("click", (e) => {
+        const row = e.target.closest("tr[data-build-row]");
+        if (!row) return;
+        // Don't toggle on link/button clicks within the row (e.g. the
+        // commit/branch/build links each open in a new tab).
+        if (e.target.closest("a")) return;
+        if (e.target.closest("button")) return;
+        const num = parseInt(row.getAttribute("data-build-row"), 10);
+        if (Number.isFinite(num)) toggleBuildExpansion(num);
+      });
+
+      function hideSyncBanner() {
+        // The sync-success confirmation is sticky — it stays on screen until
+        // a warning (rate limit, snapshot error, sync failure) takes over the
+        // adjacent slot, or the next sync run replaces its content. Anything
+        // that surfaces a warning calls this helper to drop the stale "all
+        // good" message instead of leaving conflicting signals side by side.
+        const syncBanner = $("syncBanner");
+        if (!syncBanner) return;
+        syncBanner.classList.add("hidden");
+        syncBanner.innerHTML = "";
+      }
+
+      function renderErrors(snapshot) {
+        const banner = $("errorBanner");
+        // When the dedicated rate-limit banner is active it already
+        // explains why things failed; the generic "Buildkite returned
+        // 429: ..." lines are just noise, so suppress them.
+        const rateLimited = isRateLimited();
+        if (!rateLimited && snapshot.errors && snapshot.errors.length > 0) {
+          banner.innerHTML = snapshot.errors
+            .map((e) => `<div><strong>Error:</strong> ${escapeHtml(e)}</div>`)
+            .join("");
+          banner.classList.remove("hidden");
+          hideSyncBanner();
+        } else {
+          banner.classList.add("hidden");
+        }
+      }
+
+      // Favicon: passed #004b00, failed #ff674d, running #cb7409, else black.
+      const FAVICON_COLORS = {
+        passed: "#004b00",
+        running: "#cb7409",
+        failed: "#ff674d",
+        neutral: "#000000",
+      };
+
+      // Buildkite states that mean "actively executing right now". A rig in
+      // any of these wins favicon priority: we want the tab dot to scream
+      // "deploy in flight" even if some other rig finished more recently.
+      const FAVICON_RUNNING_STATES = new Set([
+        "creating",
+        "scheduled",
+        "running",
+        "canceling",
+      ]);
+
+      // States we treat as "the last deploy failed". ``infra_failure`` is
+      // surfaced by Buildkite separately from ``failed`` so include both.
+      // ``canceled`` counts as a failure for the favicon — a canceled deploy
+      // didn't reach the rig, which is closer to "broken" than to "good".
+      const FAVICON_FAILED_STATES = new Set([
+        "failed",
+        "failing",
+        "canceled",
+        "infra_failure",
+      ]);
+
+      function deriveFaviconState(snapshot) {
+        const rigs = snapshot && snapshot.rigs;
+        if (!rigs || rigs.length === 0) return "neutral";
+
+        // 1. Anything actively running anywhere -> running state.
+        for (const rig of rigs) {
+          const latest = rig.history && rig.history[0];
+          if (latest && FAVICON_RUNNING_STATES.has(latest.state)) {
+            return "running";
+          }
+        }
+
+        // 2. Otherwise, classify the most recent deploy across all rigs.
+        // Backend already sorts ``rigs`` by ``last_deploy_at`` desc and each
+        // rig's ``history[0]`` is its most recent deploy, so ``rigs[0]
+        // .history[0]`` is the freshest event we know about.
+        const latestOverall = rigs[0].history && rigs[0].history[0];
+        if (!latestOverall) return "neutral";
+        if (FAVICON_FAILED_STATES.has(latestOverall.state)) return "failed";
+        // ``passed``, ``awaiting_deploy``, ``blocked``, ``skipped``, etc.
+        // all read as "not actively broken" until we see an unambiguous
+        // failure below.
+        return "passed";
+      }
+
+      function renderFavicon(faviconState) {
+        const color = FAVICON_COLORS[faviconState] || FAVICON_COLORS.neutral;
+        const link = $("favicon");
+        if (!link) return;
+        // Skip the redraw if the color hasn't changed; saves a canvas
+        // round-trip on every poll when nothing has moved.
+        if (link.dataset.faviconColor === color) return;
+
+        const size = 32;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        // 1px breathing room from the edge so the circle reads as a dot
+        // rather than filling the entire 16x16 tab tile.
+        const radius = size / 2 - 1;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(size / 2, size / 2, radius, 0, Math.PI * 2);
+        ctx.fill();
+        link.href = canvas.toDataURL("image/png");
+        link.dataset.faviconColor = color;
+      }
+
+      function isRateLimited() {
+        return (
+          state.rateLimitedUntil != null
+          && state.rateLimitedUntil * 1000 > Date.now()
+        );
+      }
+
+      function applyRateLimit(response) {
+        // Called on every snapshot or history response. ``response`` is the
+        // parsed JSON body or an object with ``rate_limited_until`` synthesized
+        // from a client-side error.
+        const until = response && response.rate_limited_until;
+        if (typeof until === "number" && until * 1000 > Date.now()) {
+          state.rateLimitedUntil = until;
+          scheduleRateLimitRetry(until);
+        } else if (state.rateLimitedUntil != null) {
+          // Upstream call succeeded (or returned no reset) — rate limit is
+          // no longer active; clear state and cancel any scheduled retry.
+          state.rateLimitedUntil = null;
+          if (state.rateLimitRetryTimer) {
+            clearTimeout(state.rateLimitRetryTimer);
+            state.rateLimitRetryTimer = null;
+          }
+        }
+        renderRateLimitBanner();
+      }
+
+      function scheduleRateLimitRetry(resetEpochSeconds) {
+        if (state.rateLimitRetryTimer) {
+          clearTimeout(state.rateLimitRetryTimer);
+          state.rateLimitRetryTimer = null;
+        }
+        // 2s buffer past the reset so we don't race the server clock.
+        const delayMs = Math.max(
+          1000,
+          resetEpochSeconds * 1000 - Date.now() + 2000,
+        );
+        state.rateLimitRetryTimer = setTimeout(() => {
+          state.rateLimitRetryTimer = null;
+          fetchSnapshot(true);
+          // If the history panel is open, also retry that so both views
+          // recover from the rate-limit hit together.
+          if (state.history && state.history.rig) {
+            loadHistory(state.history.rig);
+          }
+        }, delayMs);
+      }
+
+      function renderRateLimitBanner() {
+        const banner = $("rateLimitBanner");
+        if (!state.rateLimitedUntil) {
+          banner.classList.add("hidden");
+          banner.innerHTML = "";
+          return;
+        }
+        const now = Date.now();
+        const resetMs = state.rateLimitedUntil * 1000;
+        const secondsLeft = Math.max(0, Math.ceil((resetMs - now) / 1000));
+        banner.innerHTML = `<div><strong>Error:</strong> API Rate Limit Reached. Please Wait ${secondsLeft}s</div>`;
+        banner.classList.remove("hidden");
+        // Rate-limit is the canonical warning — drop any sticky sync-success
+        // confirmation so the user isn't reading "Sync complete" right next
+        // to "rate limit reached".
+        hideSyncBanner();
+      }
+
+      function setRefreshSpinning(isOn) {
+        const btn = $("refreshBtn");
+        const icon = $("refreshIcon");
+        if (isOn) {
+          icon.classList.add("spin");
+          btn.disabled = true;
+        } else {
+          icon.classList.remove("spin");
+          btn.disabled = false;
+        }
+      }
+
+      async function fetchSnapshot(forceRefresh = false) {
+        // Only the operator may force a server-side refresh (POST
+        // /api/refresh, which spends the Buildkite token). LAN viewers
+        // always read the cached snapshot (GET /api/rigs); the operator's
+        // forced ticks keep that cache fresh, so read-only clients still see
+        // deploys roll in — and the "updated X ago" label stays accurate
+        // because it's driven by the snapshot's own fetched_at.
+        const force = forceRefresh && state.isOperator;
+        setRefreshSpinning(true);
+        try {
+          const resp = force
+            ? await fetch(withSource("/api/refresh"), { method: "POST" })
+            : await fetch(withSource("/api/rigs"));
+          if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+          }
+          const snapshot = await resp.json();
+          state.snapshot = snapshot;
+          $("pipelineLink").href = `${snapshot.pipeline_url}/builds`;
+          $("pipelineLink").textContent = `${snapshot.organization_slug}/${snapshot.pipeline_slug}`;
+          state.fetchedAtMs = snapshot.fetched_at
+            ? snapshot.fetched_at * 1000
+            : Date.now();
+          updateLastUpdatedLabel();
+          renderRigSuggestions();
+          // Rate-limit must be applied before renderErrors so the error
+          // banner can defer to the dedicated rate-limit banner.
+          applyRateLimit(snapshot);
+          renderErrors(snapshot);
+          renderTable();
+          renderFavicon(deriveFaviconState(snapshot));
+          // The snapshot refresh advanced the rig rows; nudge any open
+          // build attempts panels so their step states stay in sync.
+          refreshOpenBuildAttempts();
+          // Same idea for the standalone rig deploy history panel — it's
+          // backed by ``state.history`` rather than the snapshot, so
+          // without an explicit nudge new deploys (and state transitions
+          // on in-flight ones) don't show up until the user re-triggers
+          // the load.
+          refreshOpenHistoryPanel();
+          // The store gets a new batch of upserts every successful
+          // snapshot fetch, so the totals shift. Refresh the footer.
+          loadStoreStats();
+        } catch (err) {
+          // Keep whatever data we already have on screen so a transient
+          // failure (network blip, server 5xx, Buildkite rate limit that
+          // bubbled all the way up) doesn't wipe the dashboard. Just
+          // surface the error in the banner so the user knows the last
+          // refresh attempt failed; the existing rig table and "updated X
+          // ago" timestamp keep advancing until the next successful fetch.
+          const prefix = state.snapshot
+            ? "Refresh failed (showing last good data)"
+            : "Failed to load data";
+          $("errorBanner").innerHTML = `<div><strong>${prefix}:</strong> ${escapeHtml(err.message)}</div>`;
+          $("errorBanner").classList.remove("hidden");
+          hideSyncBanner();
+        } finally {
+          setRefreshSpinning(false);
+        }
+      }
+
+      function setBackfillRunning(isOn) {
+        const btn = $("backfillBtn");
+        const icon = $("backfillIcon");
+        const label = $("backfillLabel");
+        if (!btn) return;
+        if (isOn) {
+          icon.classList.add("spin");
+          btn.disabled = true;
+          label.textContent = "Syncing...";
+        } else {
+          icon.classList.remove("spin");
+          btn.disabled = false;
+          label.textContent = "Sync history";
+        }
+      }
+
+      // Human-readable summary for the ``stopped_reason`` field returned
+      // by /api/backfill. Centralized so the success and failure branches
+      // of ``showBackfillResult`` use the same vocabulary.
+      const BACKFILL_REASON_LABELS = {
+        caught_up: "caught up",
+        end_of_history: "reached end of Buildkite history",
+        completed: "page cap reached",
+        empty_page: "no more builds",
+        rate_limited: "rate limited",
+        http_error: "Buildkite error",
+        network_error: "network error",
+        bad_response: "unexpected response",
+        store_error: "local store error",
+        no_store: "no local store",
+        client_error: "client error",
+      };
+
+      function describeBackfillReason(reason) {
+        return BACKFILL_REASON_LABELS[reason] || reason || "completed";
+      }
+
+      function showBackfillResult(result) {
+        const syncBanner = $("syncBanner");
+        const errorBanner = $("errorBanner");
+        if (!syncBanner || !errorBanner) return;
+        const reason = result.stopped_reason || "completed";
+        const reasonLabel = describeBackfillReason(reason);
+        const pages = Number(result.pages_fetched || 0).toLocaleString();
+        // Older API responses pre-date the new/updated/unchanged
+        // breakdown; fall back to builds_written so a stale server
+        // doesn't render "undefined" in the banner.
+        const newCount = Number(result.builds_new ?? result.builds_written ?? 0);
+        const updatedCount = Number(result.builds_updated ?? 0);
+        const unchangedCount = Number(result.builds_unchanged ?? 0);
+        const breakdownParts = [
+          `<strong>${newCount.toLocaleString()}</strong> new`,
+          `<strong>${updatedCount.toLocaleString()}</strong> updated`,
+        ];
+        if (unchangedCount > 0) {
+          breakdownParts.push(`${unchangedCount.toLocaleString()} already in store`);
+        }
+        const breakdown = breakdownParts.join(", ");
+        if (result.ok) {
+          const headline =
+            newCount === 0 && updatedCount === 0
+              ? "Already in sync"
+              : "Sync complete";
+          syncBanner.innerHTML =
+            `<div><strong>${headline}</strong> (${escapeHtml(reasonLabel)}): ` +
+            `${breakdown} across ${pages} page(s).</div>`;
+          syncBanner.classList.remove("hidden");
+          // Persistent confirmation: stays put until a rate-limit warning,
+          // snapshot error, or sync failure (all routed via hideSyncBanner)
+          // takes over the slot, or the next sync run rewrites it.
+          errorBanner.classList.add("hidden");
+          errorBanner.innerHTML = "";
+        } else {
+          const errText = (result.errors && result.errors[0]) || reasonLabel;
+          errorBanner.innerHTML =
+            `<div><strong>Sync stopped (${escapeHtml(reasonLabel)}):</strong> ` +
+            `${breakdown} across ${pages} page(s). ${escapeHtml(errText)}</div>`;
+          errorBanner.classList.remove("hidden");
+          hideSyncBanner();
+        }
+      }
+
+      async function runBackfill() {
+        // Read-only viewers don't have this button, but guard anyway so a
+        // stray call can't fire a request the server would just 403.
+        if (!state.isOperator) return;
+        if (isRateLimited()) {
+          $("errorBanner").innerHTML =
+            `<div><strong>Sync blocked:</strong> rate-limited by Buildkite. Wait for the countdown to clear.</div>`;
+          $("errorBanner").classList.remove("hidden");
+          hideSyncBanner();
+          return;
+        }
+        setBackfillRunning(true);
+        try {
+          const resp = await fetch(withSource("/api/backfill"), {
+            method: "POST",
+          });
+          if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+          }
+          const result = await resp.json();
+          showBackfillResult(result);
+          // The sync invalidates the in-memory snapshot cache
+          // server-side, so a follow-up snapshot fetch will pull fresh
+          // data. Run it unconditionally so the dashboard advances to
+          // whatever the sync surfaced.
+          fetchSnapshot(false);
+          loadStoreStats();
+          // If the history panel is open, re-pull it from the (newly
+          // populated) store.
+          if (state.history && state.history.rig) {
+            loadHistory(state.history.rig);
+          }
+        } catch (err) {
+          showBackfillResult({
+            ok: false,
+            stopped_reason: "client_error",
+            pages_fetched: 0,
+            builds_seen: 0,
+            builds_written: 0,
+            builds_new: 0,
+            builds_updated: 0,
+            builds_unchanged: 0,
+            errors: [String(err.message || err)],
+          });
+        } finally {
+          setBackfillRunning(false);
+        }
+      }
+
+      // Auto-refresh drives its 10s loop from a Web Worker instead of a plain
+      // setInterval on the page. Browsers aggressively throttle (and
+      // eventually freeze) main-thread timers in background/unfocused tabs —
+      // Chrome clamps a hidden tab to roughly one timer fire per minute after
+      // a few minutes — which is why the refresh only advanced while the tab
+      // was focused. Worker timers aren't subject to that background
+      // throttling, so the worker posts a "tick" every interval and the page
+      // does the actual fetch on receipt. (Only timer *scheduling* is
+      // throttled; the fetch itself runs fine in a background tab.)
+      const AUTO_REFRESH_INTERVAL_MS = 10000;
+
+      function autoRefreshTick() {
+        // Skip the tick while rate-limited; the dedicated retry timer handles
+        // resuming once the limit resets, so we don't hammer Buildkite and
+        // trigger the same 429 again. Each tick is a tiny fetch (the last 10
+        // builds) because the persistent store covers older history, so 10s
+        // is well within Buildkite's 100/min limit. The operator's ticks
+        // force a fresh server-side fetch (bypassing the cache) so the
+        // snapshot — and the "updated X ago" label — advance every cycle.
+        if (isRateLimited()) return;
+        fetchSnapshot(true);
+      }
+
+      let autoRefreshWorker = null;
+      let autoRefreshWorkerTried = false;
+      function getAutoRefreshWorker() {
+        // Build the worker lazily on first use and cache the result (worker or
+        // null) so construction is only attempted once. The worker source is
+        // inlined via a Blob URL to keep everything in this single static file
+        // (the server sets no CSP, so blob: workers are allowed).
+        if (autoRefreshWorkerTried) return autoRefreshWorker;
+        autoRefreshWorkerTried = true;
+        try {
+          if (typeof Worker !== "undefined" && typeof Blob !== "undefined") {
+            const src =
+              "let t=null;" +
+              "onmessage=function(e){" +
+              "var d=e.data||{};" +
+              "if(d.cmd==='start'){" +
+              "if(t)clearInterval(t);" +
+              "t=setInterval(function(){postMessage('tick');},d.interval);" +
+              "}else if(d.cmd==='stop'){" +
+              "if(t){clearInterval(t);t=null;}" +
+              "}};";
+            const url = URL.createObjectURL(
+              new Blob([src], { type: "application/javascript" }),
+            );
+            const worker = new Worker(url);
+            URL.revokeObjectURL(url);
+            worker.onmessage = autoRefreshTick;
+            autoRefreshWorker = worker;
+          }
+        } catch (err) {
+          // No worker support (or blocked) — fall back to setInterval below.
+          autoRefreshWorker = null;
+        }
+        return autoRefreshWorker;
+      }
+
+      function setupAutoRefresh() {
+        const worker = getAutoRefreshWorker();
+        // Stop any existing loop first (worker tick and the fallback timer) so
+        // toggling — or re-running on access-mode changes — never leaves us
+        // double-ticking.
+        if (worker) worker.postMessage({ cmd: "stop" });
+        if (state.autoRefreshTimer) {
+          clearInterval(state.autoRefreshTimer);
+          state.autoRefreshTimer = null;
+        }
+        if (!$("autoRefresh").checked) return;
+        if (worker) {
+          worker.postMessage({
+            cmd: "start",
+            interval: AUTO_REFRESH_INTERVAL_MS,
+          });
+        } else {
+          // Fallback for environments without Web Worker support. Still
+          // subject to background-tab throttling, but better than no
+          // auto-refresh at all.
+          state.autoRefreshTimer = setInterval(
+            autoRefreshTick,
+            AUTO_REFRESH_INTERVAL_MS,
+          );
+        }
+      }
+
+      // ============================================================
+      // Operator vs. read-only LAN viewer
+      // ============================================================
+      // Only the machine running the dashboard (localhost) gets the
+      // Refresh / Sync / Auto-refresh controls and the ability to spend the
+      // Buildkite token. Everyone else on the LAN gets a read-only view that
+      // still auto-updates from the operator-warmed server cache and still
+      // shows the "updated X ago" timestamp. The server is the source of
+      // truth — it gates the write endpoints by client IP and reports
+      // whether *this* client is the operator — and we fall back to a
+      // hostname check if that probe can't be reached.
+      function looksLikeLocalhost() {
+        const h = (window.location.hostname || "").toLowerCase();
+        return (
+          h === "" ||
+          h === "localhost" ||
+          h === "127.0.0.1" ||
+          h === "::1" ||
+          h === "[::1]"
+        );
+      }
+
+      function applyAccessMode() {
+        const operator = state.isOperator;
+        // These controls carry the `flex` utility (which also sets
+        // `display`), so toggle the inline style rather than a `hidden`
+        // class to avoid a display tug-of-war. "" reverts to the stylesheet.
+        for (const id of ["refreshBtn", "backfillBtn", "autoRefreshLabel"]) {
+          const el = $(id);
+          if (el) el.style.display = operator ? "" : "none";
+        }
+        if (!operator) {
+          // Read-only viewers keep polling so deploys show up in real time;
+          // the toggle is hidden, so pin it on and (re)start the loop.
+          const auto = $("autoRefresh");
+          if (auto) auto.checked = true;
+          setupAutoRefresh();
+        }
+      }
+
+      async function initAccessMode() {
+        // Optimistically reveal controls when the URL is localhost so the
+        // operator never sees a flash of the read-only header; the probe
+        // below confirms (and, for a LAN URL, leaves them hidden).
+        state.isOperator = looksLikeLocalhost();
+        applyAccessMode();
+        try {
+          const resp = await fetch(apiPath("/api/client-context"));
+          if (resp.ok) {
+            const ctx = await resp.json();
+            state.isOperator = !!ctx.is_operator;
+          }
+        } catch (err) {
+          // Network blip: keep the hostname-based guess from above.
+        }
+        applyAccessMode();
+      }
+
+      // ============================================================
+      // Pipeline source toggle
+      // ============================================================
+      // The dashboard can front several Buildkite pipelines (e.g.
+      // Deployments + AAOS Flashing). /api/sources lists them; the header
+      // renders one tab per source and ``state.source`` is threaded through
+      // every API call via withSource(). Build numbers and rig sets differ
+      // per pipeline, so switching resets the per-source view state.
+
+      function renderSourceToggle() {
+        const wrap = $("sourceToggle");
+        if (!wrap) return;
+        const sources = state.sources || [];
+        // With a single (or no) source there's nothing to toggle, so leave
+        // the row empty — the page looks exactly like the old single-pipeline
+        // dashboard.
+        if (sources.length <= 1) {
+          wrap.innerHTML = "";
+          return;
+        }
+        wrap.innerHTML = sources
+          .map((s) => {
+            const active = s.key === state.source;
+            return `<button type="button" role="tab" aria-selected="${active}" data-source-tab="${escapeHtml(
+              s.key,
+            )}" class="source-tab${active ? " active" : ""}">${escapeHtml(
+              s.label,
+            )}</button>`;
+          })
+          .join(`<span class="source-tab-sep" aria-hidden="true">/</span>`);
+        wrap.querySelectorAll("button[data-source-tab]").forEach((btn) => {
+          btn.addEventListener("click", () =>
+            switchSource(btn.getAttribute("data-source-tab")),
+          );
+        });
+      }
+
+      async function loadSources() {
+        try {
+          const resp = await fetch(apiPath("/api/sources"));
+          if (resp.ok) {
+            const data = await resp.json();
+            state.sources = Array.isArray(data.sources) ? data.sources : [];
+          }
+        } catch (err) {
+          // Non-fatal: no toggle, and withSource() stays a no-op so the
+          // server serves its primary pipeline.
+          state.sources = [];
+        }
+        // Pick the active source: a valid ?source= in the URL wins (so links
+        // are shareable), otherwise the server-declared default / first.
+        const keys = (state.sources || []).map((s) => s.key);
+        const urlSource = new URL(window.location).searchParams.get("source");
+        if (urlSource && keys.includes(urlSource)) {
+          state.source = urlSource;
+        } else if (state.sources.length) {
+          const def = state.sources.find((s) => s.is_default);
+          state.source = def ? def.key : state.sources[0].key;
+        } else {
+          state.source = null;
+        }
+        renderSourceToggle();
+        applyRefColumnLabel();
+      }
+
+      function switchSource(key) {
+        if (!key || key === state.source) return;
+        if (!(state.sources || []).some((s) => s.key === key)) return;
+        state.source = key;
+        // Build numbers and rig sets are per-pipeline, so wipe everything
+        // tied to the old source before loading the new one.
+        state.snapshot = null;
+        state.expanded.clear();
+        state.expandedBuilds.clear();
+        state.buildAttempts = {};
+        state.history = null;
+        const input = $("historyRigInput");
+        if (input) input.value = "";
+        $("historyClearBtn").classList.add("hidden");
+        // Drop any rate-limit countdown carried over from the old source.
+        state.rateLimitedUntil = null;
+        if (state.rateLimitRetryTimer) {
+          clearTimeout(state.rateLimitRetryTimer);
+          state.rateLimitRetryTimer = null;
+        }
+        renderRateLimitBanner();
+        // Reflect the choice in the URL (omit it for the default source so
+        // the common case stays a clean URL), and clear the per-source rig.
+        const isDefault = state.sources[0] && state.sources[0].key === key;
+        const url = new URL(window.location);
+        if (isDefault) {
+          url.searchParams.delete("source");
+        } else {
+          url.searchParams.set("source", key);
+        }
+        url.searchParams.delete("rig");
+        window.history.replaceState({}, "", url);
+        renderSourceToggle();
+        applyRefColumnLabel();
+        // Show an immediate loading state, then pull the new source's data.
+        $("tableBody").innerHTML = `
+          <tr>
+            <td colspan="8" class="px-4 text-center">Loading...</td>
+          </tr>`;
+        renderHistoryPanel();
+        state.fetchedAtMs = null;
+        updateLastUpdatedLabel();
+        loadStoreStats();
+        fetchSnapshot(false);
+      }
+
+      $("refreshBtn").addEventListener("click", () => {
+        if (state.isOperator) fetchSnapshot(true);
+      });
+      $("backfillBtn").addEventListener("click", runBackfill);
+      $("autoRefresh").addEventListener("change", setupAutoRefresh);
+      $("search").addEventListener("input", (e) => {
+        state.filter = e.target.value;
+        renderTable();
+        // The standalone history panel isn't filtered by the search box, but
+        // it should still highlight matches of the current term. Re-render it
+        // so highlights track the search bar live as the user types. No-op
+        // when the panel is closed (renderHistoryPanel bails on empty state).
+        renderHistoryPanel();
+      });
+
+      $("historyForm").addEventListener("submit", (e) => {
+        e.preventDefault();
+        const rig = $("historyRigInput").value;
+        loadHistory(rig);
+      });
+      $("historyClearBtn").addEventListener("click", clearHistory);
+
+      renderHistoryPanel();
+      // Resolve operator vs. read-only first so the right controls are
+      // shown (or hidden) before the data loads in.
+      initAccessMode();
+      // Known rigs (autocomplete) are pipeline-independent, so kick that off
+      // immediately. The source list must resolve first, though, so the
+      // snapshot + footer fetches carry the right ?source=.
+      loadKnownRigs();
+      loadSources().then(() => {
+        loadStoreStats();
+        fetchSnapshot(false).then(loadHistoryFromUrl);
+      });
+      setupAutoRefresh();
+
+      if (typeof ResizeObserver !== "undefined") {
+        const rw = document.getElementById("rigsTableWrap");
+        if (rw) {
+          const ro = new ResizeObserver(() =>
+            scheduleSyncDeployColumnWidths(),
+          );
+          ro.observe(rw);
+        }
+      }
+
+      // Tick the "updated X ago" label every second so it stays live without
+      // waiting for the next refresh.
+      setInterval(() => {
+        updateLastUpdatedLabel();
+        // Tick the rate-limit countdown (no-op when not rate-limited).
+        if (state.rateLimitedUntil) {
+          if (state.rateLimitedUntil * 1000 <= Date.now()) {
+            // Reset time passed; let the scheduled retry clear state when
+            // it runs. Just show "retrying now" until then.
+            renderRateLimitBanner();
+          } else {
+            renderRateLimitBanner();
+          }
+        }
+      }, 1000);
+
+      // ============================================================
+      // Custom tooltip system
+      // ============================================================
+      // Replaces the native browser tooltip with a small floating element
+      // that appears after a fixed 100ms hover. Uses event delegation on
+      // `document` so it picks up dynamically-rendered content (the rig
+      // table and history panel re-render on every snapshot fetch) without
+      // re-attaching listeners.
+      //
+      // Hijacks any element with a `title` attribute: on enter, the title
+      // is stashed and removed (so the native tooltip doesn't fire), and an
+      // `aria-label` is set so screen readers still see the text. On leave,
+      // the original title is restored.
+      const TOOLTIP_DELAY_MS = 100;
+      const tt = {
+        el: null,
+        showTimer: null,
+        currentTarget: null,
+        originalTitle: null,
+        hadAriaLabel: false,
+      };
+
+      function ensureTooltipEl() {
+        if (tt.el) return tt.el;
+        const el = document.createElement("div");
+        el.className = "app-tooltip";
+        el.setAttribute("role", "tooltip");
+        document.body.appendChild(el);
+        tt.el = el;
+        return el;
+      }
+
+      function findTooltipTarget(start) {
+        let node = start;
+        while (node && node.nodeType === 1 && node !== document.documentElement) {
+          if (node.getAttribute && node.getAttribute("title")) {
+            return { el: node, text: node.getAttribute("title") };
+          }
+          node = node.parentNode;
+        }
+        return null;
+      }
+
+      function positionTooltip(target) {
+        const el = ensureTooltipEl();
+        // Reset position so getBoundingClientRect measures the natural size.
+        el.style.left = "0px";
+        el.style.top = "0px";
+        const r = target.getBoundingClientRect();
+        const tip = el.getBoundingClientRect();
+        const margin = 6;
+        let top = r.top - tip.height - margin;
+        if (top < 4) top = r.bottom + margin; // flip below if no room above
+        let left = r.left + (r.width - tip.width) / 2;
+        if (left < 4) left = 4;
+        if (left + tip.width > window.innerWidth - 4) {
+          left = window.innerWidth - 4 - tip.width;
+        }
+        el.style.left = `${left}px`;
+        el.style.top = `${top}px`;
+      }
+
+      function showTooltipFor(target, text) {
+        const el = ensureTooltipEl();
+        el.textContent = text;
+        positionTooltip(target);
+        el.classList.add("visible");
+      }
+
+      function hideTooltip() {
+        if (tt.el) tt.el.classList.remove("visible");
+      }
+
+      function clearShowTimer() {
+        if (tt.showTimer) {
+          clearTimeout(tt.showTimer);
+          tt.showTimer = null;
+        }
+      }
+
+      function restoreTitle() {
+        const t = tt.currentTarget;
+        if (t && tt.originalTitle != null) {
+          t.setAttribute("title", tt.originalTitle);
+          if (!tt.hadAriaLabel) t.removeAttribute("aria-label");
+        }
+        tt.currentTarget = null;
+        tt.originalTitle = null;
+        tt.hadAriaLabel = false;
+      }
+
+      function engageTarget(found) {
+        tt.currentTarget = found.el;
+        tt.originalTitle = found.el.getAttribute("title");
+        tt.hadAriaLabel = found.el.hasAttribute("aria-label");
+        // Remove `title` so the native tooltip never fires.
+        found.el.removeAttribute("title");
+        if (!tt.hadAriaLabel) {
+          found.el.setAttribute("aria-label", found.text);
+        }
+        clearShowTimer();
+        tt.showTimer = setTimeout(() => {
+          // Element may have been removed from the DOM by a re-render.
+          if (!document.contains(found.el)) {
+            restoreTitle();
+            return;
+          }
+          showTooltipFor(found.el, found.text);
+        }, TOOLTIP_DELAY_MS);
+      }
+
+      function disengageTarget() {
+        clearShowTimer();
+        hideTooltip();
+        restoreTitle();
+      }
+
+      document.addEventListener("mouseover", (event) => {
+        const found = findTooltipTarget(event.target);
+        if (!found || found.el === tt.currentTarget) return;
+        if (tt.currentTarget) disengageTarget();
+        engageTarget(found);
+      });
+
+      document.addEventListener("mouseout", (event) => {
+        if (!tt.currentTarget) return;
+        // mouseout fires for child→parent transitions inside the target;
+        // only disengage when the cursor actually leaves the subtree.
+        const related = event.relatedTarget;
+        if (related && tt.currentTarget.contains(related)) return;
+        disengageTarget();
+      });
+
+      // Keyboard accessibility: also show tooltips when an element is
+      // focused via Tab.
+      document.addEventListener("focusin", (event) => {
+        const found = findTooltipTarget(event.target);
+        if (!found || found.el === tt.currentTarget) return;
+        if (tt.currentTarget) disengageTarget();
+        engageTarget(found);
+      });
+      document.addEventListener("focusout", () => {
+        if (tt.currentTarget) disengageTarget();
+      });
+
+      // Hide on scroll/resize so the tooltip doesn't drift away from its
+      // anchor. Capture phase + passive so we catch scrolls in nested
+      // containers (e.g. the table wrapper) without blocking them.
+      window.addEventListener(
+        "scroll",
+        () => {
+          if (tt.currentTarget) disengageTarget();
+        },
+        { passive: true, capture: true },
+      );
+      window.addEventListener("resize", () => {
+        if (tt.currentTarget) disengageTarget();
+      });
     </script>
   </body>
 </html>

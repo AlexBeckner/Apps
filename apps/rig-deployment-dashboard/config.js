@@ -1,5 +1,5 @@
 window.rigDeploymentDashboardConfig = {
-  // The Cloudflare Worker serves the live UI and keeps BUILDKITE_API_TOKEN server-side.
+  // The GitHub Pages UI calls this Cloudflare Worker for Buildkite data.
   // Replace this if Wrangler reports a different workers.dev subdomain.
-  dashboardUrl: "https://rig-deployment-dashboard.dataspeedhashfinder.workers.dev",
+  apiBaseUrl: "https://rig-deployment-dashboard.dataspeedhashfinder.workers.dev",
 };
