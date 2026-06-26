@@ -315,7 +315,7 @@ async function buildkiteJson(env, url) {
     headers: {
       Accept: "application/json",
       Authorization: `Bearer ${env.BUILDKITE_API_TOKEN}`,
-      "User-Agent": "rig-deployment-dashboard-worker/0.1",
+      "User-Agent": "buildkitedeploymentdashboard-worker/0.1",
     },
   });
   const text = await response.text();
@@ -1289,7 +1289,7 @@ function dashboardHtml() {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Rig Deployment Dashboard</title>
+    <title>buildkitedeploymentdashboard</title>
     <style>
       * { box-sizing: border-box; }
       body {
@@ -1320,7 +1320,7 @@ function dashboardHtml() {
     <main>
       <header>
         <div>
-          <h1>Rig Deployment Dashboard</h1>
+          <h1>buildkitedeploymentdashboard</h1>
           <p id="subtitle">Loading deployments...</p>
         </div>
         <div class="controls">

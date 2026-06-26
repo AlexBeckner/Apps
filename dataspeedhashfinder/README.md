@@ -1,4 +1,4 @@
-# Dataspeed Parameter Hash Viewer
+# dataspeedhashfinder
 
 Compares Ford GE1 Dataspeed parameter hashes across two Git refs.
 
@@ -13,7 +13,7 @@ Worker secret and must not be added to this static page.
 After deploying the Worker, set its public URL in `config.js`:
 
 ```js
-window.dataspeedParameterViewerConfig = {
-  apiBaseUrl: "https://dataspeed-parameter-proxy.<account>.workers.dev",
+window.dataspeedHashFinderConfig = {
+  apiBaseUrl: "https://dataspeedhashfinder.<account>.workers.dev",
 };
 ```

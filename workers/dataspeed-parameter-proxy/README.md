@@ -1,6 +1,6 @@
 # Dataspeed Parameter Proxy
 
-Cloudflare Worker backend for the Dataspeed Parameter Hash Viewer.
+Cloudflare Worker backend for dataspeedhashfinder.
 
 The Worker keeps the GitHub token server-side and exposes only two narrow
 endpoints for the static GitHub Pages app:
@@ -42,7 +42,7 @@ Only these parameter files are allowed:
    ```
 
 6. Copy the deployed Worker URL into
-   `apps/dataspeed-parameter-viewer/config.js` as `apiBaseUrl`.
+   `dataspeedhashfinder/config.js` as `apiBaseUrl`.
 
 ## Local Development
 

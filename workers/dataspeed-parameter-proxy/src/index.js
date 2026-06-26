@@ -200,7 +200,7 @@ async function githubJson(url, accept, env) {
     headers: {
       Accept: accept,
       Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      "User-Agent": "dataspeed-parameter-proxy",
+      "User-Agent": "dataspeedhashfinder",
       "X-GitHub-Api-Version": "2022-11-28",
     },
   });

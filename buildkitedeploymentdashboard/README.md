@@ -1,6 +1,6 @@
-# Rig Deployment Dashboard
+# buildkitedeploymentdashboard
 
-Static GitHub Pages version of the rig deployment dashboard.
+Static GitHub Pages version of the Buildkite deployment dashboard.
 
 The UI is copied from `~/rig-deployment-dashboard/static/index.html` and runs
 as a static page. The Cloudflare Worker in `workers/rig-deployment-dashboard`
@@ -11,8 +11,8 @@ keeps `BUILDKITE_API_TOKEN` server-side and stores deployment history in D1.
 Edit `config.js` when the dashboard URL changes:
 
 ```js
-window.rigDeploymentDashboardConfig = {
-  apiBaseUrl: "https://rig-deployment-dashboard.dataspeedhashfinder.workers.dev",
+window.buildkiteDeploymentDashboardConfig = {
+  apiBaseUrl: "https://buildkitedeploymentdashboard.dataspeedhashfinder.workers.dev",
 };
 ```
 

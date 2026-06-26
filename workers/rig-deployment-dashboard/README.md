@@ -1,6 +1,6 @@
-# Rig Deployment Dashboard Worker
+# buildkitedeploymentdashboard Worker
 
-Cloudflare Worker backend for the rig deployment dashboard.
+Cloudflare Worker backend for buildkitedeploymentdashboard.
 
 The Worker keeps `BUILDKITE_API_TOKEN` server-side, stores deployment history in
 D1, refreshes snapshots on a cron trigger, and serves the JSON API used by the
@@ -71,7 +71,7 @@ user clicks **Unlock controls** and enters the token. Do not put this token in
    ```
 
 8. Copy the deployed Worker URL into
-   `apps/rig-deployment-dashboard/config.js` as `dashboardUrl`.
+   `buildkitedeploymentdashboard/config.js` as `dashboardUrl`.
 
 ## Local Development
 

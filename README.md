@@ -4,8 +4,8 @@ Static web tools hosted with GitHub Pages.
 
 ## Apps
 
-- [Dataspeed Parameter Hash Viewer](./dataspeed-parameter-viewer/)
-- [Rig Deployment Dashboard](./rig-deployment-dashboard/)
+- [dataspeedhashfinder](./dataspeedhashfinder/)
+- [buildkitedeploymentdashboard](./buildkitedeploymentdashboard/)
 
 ## Notes
 
