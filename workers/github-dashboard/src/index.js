@@ -1,3 +1,5 @@
+import { dashboardHtml, isDashboardRoute } from "./ui.js";
+
 const GITHUB_API = "https://api.github.com";
 const DEFAULT_REPO = "AppliedNeuron/core-stack";
 const DEFAULT_BRANCH_PAGES = 5;
@@ -90,8 +92,8 @@ export default {
 
       const url = new URL(request.url);
 
-      if (request.method === "GET" && url.pathname === "/") {
-        return htmlResponse(dashboardHtml(), request, env);
+      if (request.method === "GET" && isDashboardRoute(url.pathname)) {
+        return htmlResponse(dashboardHtml(env), request, env);
       }
 
       if (request.method === "GET" && url.pathname === "/api/health") {
@@ -103,17 +105,49 @@ export default {
       if (request.method === "GET" && url.pathname === "/api/search") {
         return jsonResponse(request, env, await handleSearch(env, url));
       }
+      if (request.method === "GET" && url.pathname.startsWith("/api/branch-commits/")) {
+        const name = decodePathParam(url.pathname, "/api/branch-commits/");
+        return jsonResponse(request, env, await handleBranchCommits(env, url, name));
+      }
+      if (request.method === "GET" && url.pathname.startsWith("/api/branch-prs/")) {
+        const name = decodePathParam(url.pathname, "/api/branch-prs/");
+        return jsonResponse(request, env, await handleBranchPrs(env, url, name));
+      }
       if (request.method === "GET" && url.pathname === "/api/branches") {
         return jsonResponse(request, env, await handleBranches(env, url));
+      }
+      if (request.method === "GET" && url.pathname.startsWith("/api/branches/")) {
+        const name = decodePathParam(url.pathname, "/api/branches/");
+        return jsonResponse(request, env, await handleBranchDetail(env, name));
       }
       if (request.method === "GET" && url.pathname === "/api/commits") {
         return jsonResponse(request, env, await handleCommits(env, url));
       }
+      if (request.method === "GET" && url.pathname.startsWith("/api/commits/")) {
+        const rest = decodePathParam(url.pathname, "/api/commits/");
+        if (rest.endsWith("/branches")) {
+          const sha = rest.slice(0, -"/branches".length);
+          return jsonResponse(request, env, await handleCommitBranches(env, sha));
+        }
+        return jsonResponse(request, env, await handleCommitDetail(env, rest));
+      }
       if (request.method === "GET" && url.pathname === "/api/prs") {
         return jsonResponse(request, env, await handlePrs(env, url));
       }
+      if (request.method === "GET" && url.pathname.startsWith("/api/prs/")) {
+        const rest = decodePathParam(url.pathname, "/api/prs/");
+        if (rest.endsWith("/branches")) {
+          const number = Number(rest.slice(0, -"/branches".length));
+          return jsonResponse(request, env, await handlePrBranches(env, number));
+        }
+        return jsonResponse(request, env, await handlePrDetail(env, Number(rest)));
+      }
       if (request.method === "GET" && url.pathname === "/api/tags") {
         return jsonResponse(request, env, await handleTags(env, url));
+      }
+      if (request.method === "GET" && url.pathname.startsWith("/api/tags/")) {
+        const name = decodePathParam(url.pathname, "/api/tags/");
+        return jsonResponse(request, env, await handleTagDetail(env, name));
       }
       if (request.method === "GET" && url.pathname === "/api/sync/status") {
         return jsonResponse(request, env, await syncStatus(env));
@@ -281,6 +315,208 @@ async function handleSearch(env, url) {
     commits: (commits.results || []).map(toCommit),
     prs: (prRows.results || []).map(toPr),
     tags: (tagRows.results || []).map(toTag),
+  };
+}
+
+async function handleBranchDetail(env, name) {
+  const row = await env.DB.prepare("SELECT * FROM branches WHERE name = ?")
+    .bind(name)
+    .first();
+  if (!row) throw httpError(404, "Branch not found");
+
+  const commit = await getCommitRow(env, row.head_sha);
+  const directionCounts = await Promise.all([
+    scalar(env, "SELECT COUNT(*) AS c FROM prs WHERE head_ref = ?", name),
+    scalar(env, "SELECT COUNT(*) AS c FROM prs WHERE base_ref = ?", name),
+  ]);
+
+  return {
+    branch: toBranch(row),
+    branchedFrom: null,
+    defaultBranch: await getMeta(env, "default_branch"),
+    totalCommits: commit ? 1 : 0,
+    walkError: null,
+    prsFromBranchCount: directionCounts[0],
+    prsToBranchCount: directionCounts[1],
+    commits: commit ? [toCommit(commit)] : [],
+  };
+}
+
+async function handleBranchCommits(env, url, name) {
+  const branch = await env.DB.prepare("SELECT * FROM branches WHERE name = ?")
+    .bind(name)
+    .first();
+  if (!branch) throw httpError(404, "Branch not found");
+
+  const q = (url.searchParams.get("q") || "").trim().toLowerCase();
+  const offset = normalizedOffset(url.searchParams.get("offset"));
+  const limit = normalizedLimit(url.searchParams.get("limit"), 100);
+  const commit = await getCommitRow(env, branch.head_sha);
+  const commits =
+    commit && matchesCommitQuery(commit, q) ? [toCommit(commit)] : [];
+
+  return {
+    total: commits.length,
+    offset,
+    limit,
+    q,
+    source: "sql",
+    walkError: null,
+    commits: commits.slice(offset, offset + limit),
+  };
+}
+
+async function handleBranchPrs(env, url, name) {
+  const direction = url.searchParams.get("direction") === "to" ? "to" : "from";
+  const column = direction === "to" ? "base_ref" : "head_ref";
+  const q = (url.searchParams.get("q") || "").trim();
+  const offset = normalizedOffset(url.searchParams.get("offset"));
+  const limit = normalizedLimit(url.searchParams.get("limit"), 100);
+  const bindings = [name];
+  let filterSql = "";
+
+  if (q) {
+    const like = likeParam(q);
+    filterSql =
+      " AND (title LIKE ? ESCAPE '\\' OR author LIKE ? ESCAPE '\\' OR CAST(number AS TEXT) LIKE ? ESCAPE '\\')";
+    bindings.push(like, like, like);
+  }
+
+  const total = await scalar(
+    env,
+    `SELECT COUNT(*) AS c FROM prs WHERE ${column} = ?${filterSql}`,
+    ...bindings
+  );
+  const rows = await env.DB.prepare(
+    `SELECT * FROM prs WHERE ${column} = ?${filterSql} ORDER BY updated_at DESC LIMIT ? OFFSET ?`
+  )
+    .bind(...bindings, limit, offset)
+    .all();
+
+  return {
+    total,
+    offset,
+    limit,
+    direction,
+    q,
+    prs: (rows.results || []).map(toPr),
+  };
+}
+
+async function handleTagDetail(env, name) {
+  const row = await env.DB.prepare("SELECT * FROM tags WHERE name = ?")
+    .bind(name)
+    .first();
+  if (!row) throw httpError(404, "Tag not found");
+
+  const target = await getCommitRow(env, row.target_sha);
+  return {
+    tag: {
+      ...toTag(row),
+      taggerName: null,
+      taggerEmail: null,
+    },
+    target: target ? toCommit(target) : null,
+  };
+}
+
+async function handleCommitDetail(env, sha) {
+  const row = await getCommitRow(env, sha);
+  if (!row) throw httpError(404, "Commit not found");
+
+  const [prRows, tagRows, branchRows] = await Promise.all([
+    env.DB.prepare(
+      `SELECT * FROM prs
+       WHERE merge_commit_sha = ? OR head_sha = ?
+       ORDER BY updated_at DESC
+       LIMIT 100`
+    )
+      .bind(row.sha, row.sha)
+      .all(),
+    env.DB.prepare("SELECT * FROM tags WHERE target_sha = ? ORDER BY COALESCE(tagged_at, 0) DESC, name ASC")
+      .bind(row.sha)
+      .all(),
+    env.DB.prepare("SELECT * FROM branches WHERE head_sha = ? ORDER BY name ASC")
+      .bind(row.sha)
+      .all(),
+  ]);
+
+  return {
+    commit: toCommit(row),
+    message: row.message || row.summary || "",
+    parents: [],
+    prs: (prRows.results || []).map(toPr),
+    tagsPointing: (tagRows.results || []).map((tag) => ({
+      name: tag.name,
+      deletedAt: tag.deleted_at ?? null,
+    })),
+    branches: (branchRows.results || []).map(toBranch),
+  };
+}
+
+async function handleCommitBranches(env, sha) {
+  const row = await getCommitRow(env, sha);
+  if (!row) throw httpError(404, "Commit not found");
+
+  const branches = await env.DB.prepare(
+    "SELECT name FROM branches WHERE head_sha = ? ORDER BY name ASC"
+  )
+    .bind(row.sha)
+    .all();
+
+  return {
+    sha: row.sha,
+    branches: (branches.results || []).map((branch) => branch.name),
+    stale: false,
+    computedAt: unixNow(),
+  };
+}
+
+async function handlePrDetail(env, number) {
+  if (!Number.isFinite(number)) throw httpError(400, "Invalid PR number");
+
+  const row = await env.DB.prepare("SELECT * FROM prs WHERE number = ?")
+    .bind(number)
+    .first();
+  if (!row) throw httpError(404, "PR not found");
+
+  const shas = [...new Set([row.head_sha, row.merge_commit_sha].filter(Boolean))];
+  const commits = [];
+  for (const sha of shas) {
+    const commit = await getCommitRow(env, sha);
+    if (commit) commits.push(toCommit(commit));
+  }
+
+  return {
+    pr: toPrDetail(row),
+    commits,
+  };
+}
+
+async function handlePrBranches(env, number) {
+  if (!Number.isFinite(number)) throw httpError(400, "Invalid PR number");
+
+  const row = await env.DB.prepare("SELECT * FROM prs WHERE number = ?")
+    .bind(number)
+    .first();
+  if (!row) throw httpError(404, "PR not found");
+
+  const sha = row.merge_commit_sha || row.head_sha || null;
+  if (!sha) {
+    return { sha: null, branches: [], stale: false, computedAt: unixNow() };
+  }
+
+  const branches = await env.DB.prepare(
+    "SELECT name FROM branches WHERE head_sha = ? ORDER BY name ASC"
+  )
+    .bind(sha)
+    .all();
+
+  return {
+    sha,
+    branches: (branches.results || []).map((branch) => branch.name),
+    stale: false,
+    computedAt: unixNow(),
   };
 }
 
@@ -832,6 +1068,18 @@ async function scalar(env, sql, ...bindings) {
   return Number(row?.c || 0);
 }
 
+async function getCommitRow(env, sha) {
+  if (!sha) return null;
+  return env.DB.prepare(
+    `SELECT * FROM commits
+     WHERE sha = ? OR short_sha = ? OR sha LIKE ?
+     ORDER BY committed_at DESC
+     LIMIT 1`
+  )
+    .bind(sha, sha, `${sha}%`)
+    .first();
+}
+
 function toBranch(row) {
   return {
     type: "branch",
@@ -868,12 +1116,21 @@ function toPr(row) {
     author: row.author,
     baseRef: row.base_ref,
     headRef: row.head_ref,
+    headSha: row.head_sha,
+    mergeCommitSha: row.merge_commit_sha,
     createdAt: row.created_at ?? null,
     updatedAt: row.updated_at ?? null,
     mergedAt: row.merged_at ?? null,
     closedAt: row.closed_at ?? null,
     draft: !!row.draft,
     url: row.url || githubPrUrl(row.number),
+  };
+}
+
+function toPrDetail(row) {
+  return {
+    ...toPr(row),
+    body: row.body,
   };
 }
 
@@ -897,6 +1154,15 @@ function repoParts(env) {
     throw httpError(500, `GITHUB_REPO must be in owner/repo form, got: ${value}`);
   }
   return [owner, repo];
+}
+
+function decodePathParam(pathname, prefix) {
+  return pathname
+    .slice(prefix.length)
+    .split("/")
+    .filter(Boolean)
+    .map(decodeURIComponent)
+    .join("/");
 }
 
 function githubCommitUrl(sha) {
@@ -960,6 +1226,20 @@ function isShaPrefix(value) {
 function prNumber(value) {
   const match = value.match(/^#?(\d+)$/);
   return match ? Number(match[1]) : null;
+}
+
+function matchesCommitQuery(row, q) {
+  if (!q) return true;
+  return [
+    row.sha,
+    row.short_sha,
+    row.summary,
+    row.message,
+    row.author_name,
+    row.author_email,
+  ]
+    .filter(Boolean)
+    .some((value) => String(value).toLowerCase().includes(q));
 }
 
 function requireWrite(request, env) {
@@ -1056,26 +1336,3 @@ function httpError(status, message) {
   return error;
 }
 
-function dashboardHtml() {
-  return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>github-dashboard Worker</title>
-    <style>
-      body { background: #1d1d1d; color: #eee; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; }
-      main { margin: 0 auto; max-width: 720px; padding: 72px 20px; }
-      a { color: inherit; }
-      code { background: #111; border: 1px solid #333; padding: 2px 4px; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1>github-dashboard Worker</h1>
-      <p>This Worker serves the GitHub dashboard API. Use the static app page for the dashboard UI.</p>
-      <p>Health: <a href="/api/health"><code>/api/health</code></a></p>
-    </main>
-  </body>
-</html>`;
-}
