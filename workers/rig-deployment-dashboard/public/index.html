@@ -1328,14 +1328,10 @@
           rerenderForBuild(buildNumber);
         }
         try {
-          // ``silent`` background syncs normally force a fresh Buildkite
-          // fetch, but that spends the token — so only the operator forces.
-          // LAN viewers re-read the cached/stored attempts (kept current by
-          // the operator's snapshot refreshes) instead.
-          const useForce = silent && state.isOperator;
-          let url = `/api/builds/${buildNumber}/attempts`;
-          if (useForce) url += "?force_refresh=true";
-          const resp = await dashboardFetch(withSource(url));
+          // Automatic attempt refreshes use the server's cached/stored build
+          // detail. The manual dashboard Refresh button is the only polling
+          // action that asks the server to contact Buildkite immediately.
+          const resp = await dashboardFetch(withSource(`/api/builds/${buildNumber}/attempts`));
           if (!resp.ok) {
             const text = await resp.text();
             throw new Error(`HTTP ${resp.status}: ${text.slice(0, 200)}`);
@@ -1385,14 +1381,10 @@
         // loading state appears immediately, even if the network is fast.
         //
         // If we already have cached attempts data from a previous expansion
-        // of this same build, the cache is likely stale: snapshot refresh
-        // ticks only sync currently-open panels (see
-        // ``refreshOpenBuildAttempts``), so the data hasn't been touched
-        // since the panel was last closed. Force a silent refresh so step
-        // states catch up to whatever Buildkite is reporting now. ``silent``
-        // keeps the cached rows on screen while the request is in flight
-        // (no spinner flicker) and bypasses the server-side build-detail
-        // cache via ``?force_refresh=true``.
+        // of this same build, the cache may be stale: snapshot refresh ticks
+        // only sync currently-open panels (see ``refreshOpenBuildAttempts``),
+        // so the data hasn't been touched since the panel was last closed.
+        // Do a silent cached refresh so the UI catches up without flicker.
         const hasCachedData = !!(
           state.buildAttempts[buildNumber]
           && state.buildAttempts[buildNumber].data

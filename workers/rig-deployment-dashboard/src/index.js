@@ -9,6 +9,7 @@ const GITHUB_REPO = "core-stack";
 const HISTORY_SIZE = 10;
 const DEFAULT_CACHE_SECONDS = 10;
 const DEFAULT_REFRESH_LEASE_SECONDS = 25;
+const DEFAULT_BUILD_DETAIL_LEASE_SECONDS = 60;
 const BACKFILL_PER_PAGE = 100;
 const DEFAULT_BACKFILL_PAGES = 50;
 const MAX_BACKFILL_PAGES = 200;
@@ -255,13 +256,12 @@ async function refreshAllSources(env) {
 async function getSnapshot(env, source, { force, historySize = HISTORY_SIZE }) {
   const errors = [];
   let rateLimitedUntil = null;
-  const stale = await sourceNeedsRefresh(env, source.key);
 
-  if ((force || stale) && env.BUILDKITE_API_TOKEN) {
+  if (force && env.BUILDKITE_API_TOKEN) {
     const refresh = await refreshSource(env, source);
     errors.push(...refresh.errors);
     rateLimitedUntil = refresh.rate_limited_until;
-  } else if ((force || stale) && !env.BUILDKITE_API_TOKEN) {
+  } else if (force && !env.BUILDKITE_API_TOKEN) {
     errors.push("Worker secret BUILDKITE_API_TOKEN is not configured.");
   }
 
@@ -498,10 +498,26 @@ async function getBuildAttempts(env, source, buildNumber, { force }) {
     throw httpError(400, "build_number must be a positive integer");
   }
 
-  let raw = force ? null : await getBuild(env, source.key, buildNumber);
+  let raw = await getBuild(env, source.key, buildNumber);
   const errors = [];
   let rateLimitedUntil = null;
-  if (!raw || !Array.isArray(raw.jobs) || finishedBuildHasActiveJobs(raw)) {
+  const needsDetailFetch =
+    !raw ||
+    !Array.isArray(raw.jobs) ||
+    finishedBuildHasActiveJobs(raw) ||
+    (force && !(await buildDetailLeaseActive(env, source.key, buildNumber)));
+
+  if (needsDetailFetch) {
+    const lease = await acquireBuildDetailLease(env, source.key, buildNumber);
+    if (!lease.acquired) {
+      return raw
+        ? {
+            ...buildToAttempts(raw),
+            errors,
+            rate_limited_until: rateLimitedUntil,
+          }
+        : emptyBuildAttempts(buildNumber, errors, rateLimitedUntil);
+    }
     try {
       raw = await fetchBuildDetail(env, source, buildNumber);
       await saveBuildsWithSummary(env, source.key, [raw]);
@@ -512,23 +528,27 @@ async function getBuildAttempts(env, source, buildNumber, { force }) {
   }
 
   if (!raw) {
-    return {
-      build_number: buildNumber,
-      build_url: "",
-      rig: null,
-      state: "unknown",
-      branch: "",
-      commit: "",
-      commit_short: "",
-      jobs: [],
-      fetched_at: Math.floor(Date.now() / 1000),
-      errors,
-      rate_limited_until: rateLimitedUntil,
-    };
+    return emptyBuildAttempts(buildNumber, errors, rateLimitedUntil);
   }
 
   return {
     ...buildToAttempts(raw),
+    errors,
+    rate_limited_until: rateLimitedUntil,
+  };
+}
+
+function emptyBuildAttempts(buildNumber, errors, rateLimitedUntil) {
+  return {
+    build_number: buildNumber,
+    build_url: "",
+    rig: null,
+    state: "unknown",
+    branch: "",
+    commit: "",
+    commit_short: "",
+    jobs: [],
+    fetched_at: Math.floor(Date.now() / 1000),
     errors,
     rate_limited_until: rateLimitedUntil,
   };
@@ -765,20 +785,6 @@ async function storeStats(env, sourceKey) {
   };
 }
 
-async function countBuilds(env, sourceKey) {
-  const row = await env.DB.prepare(
-    `SELECT COUNT(*) AS total FROM builds WHERE source = ?`
-  ).bind(sourceKey).first();
-  return Number(row?.total || 0);
-}
-
-async function sourceNeedsRefresh(env, sourceKey) {
-  if (await refreshLeaseActive(env, sourceKey)) return false;
-  if ((await countBuilds(env, sourceKey)) === 0) return true;
-  const lastRefresh = Number(await getMeta(env, metaKey(sourceKey, "last_refresh_at"))) || 0;
-  return Date.now() / 1000 - lastRefresh >= cacheSeconds(env);
-}
-
 async function acquireRefreshLease(env, sourceKey) {
   if (await refreshLeaseActive(env, sourceKey)) {
     return { acquired: false };
@@ -790,6 +796,24 @@ async function acquireRefreshLease(env, sourceKey) {
 async function refreshLeaseActive(env, sourceKey) {
   const startedAt = Number(await getMeta(env, metaKey(sourceKey, "refresh_started_at"))) || 0;
   return Date.now() / 1000 - startedAt < refreshLeaseSeconds(env);
+}
+
+async function acquireBuildDetailLease(env, sourceKey, buildNumber) {
+  if (await buildDetailLeaseActive(env, sourceKey, buildNumber)) {
+    return { acquired: false };
+  }
+  await setMeta(
+    env,
+    metaKey(sourceKey, `build:${buildNumber}:detail_started_at`),
+    String(Math.floor(Date.now() / 1000))
+  );
+  return { acquired: true };
+}
+
+async function buildDetailLeaseActive(env, sourceKey, buildNumber) {
+  const startedAt =
+    Number(await getMeta(env, metaKey(sourceKey, `build:${buildNumber}:detail_started_at`))) || 0;
+  return Date.now() / 1000 - startedAt < buildDetailLeaseSeconds(env);
 }
 
 async function ensureSchema(env) {
@@ -1315,6 +1339,11 @@ function cacheSeconds(env) {
 function refreshLeaseSeconds(env) {
   const value = Number(env.REFRESH_LEASE_SECONDS || Math.max(cacheSeconds(env), DEFAULT_REFRESH_LEASE_SECONDS));
   return Math.max(5, Math.min(300, Number.isFinite(value) ? Math.floor(value) : DEFAULT_REFRESH_LEASE_SECONDS));
+}
+
+function buildDetailLeaseSeconds(env) {
+  const value = Number(env.BUILD_DETAIL_LEASE_SECONDS || DEFAULT_BUILD_DETAIL_LEASE_SECONDS);
+  return Math.max(10, Math.min(300, Number.isFinite(value) ? Math.floor(value) : DEFAULT_BUILD_DETAIL_LEASE_SECONDS));
 }
 
 function normalizePageCap(value) {
