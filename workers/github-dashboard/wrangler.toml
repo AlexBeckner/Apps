@@ -1,10 +1,12 @@
 name = "github-dashboard"
 main = "src/index.js"
 compatibility_date = "2026-06-29"
+keep_vars = true
 
 [vars]
 # Same-origin Worker-hosted app. Override to "*" in local `.dev.vars` if needed.
 ALLOWED_ORIGIN = "https://github-dashboard.dataspeedhashfinder.workers.dev"
+FROM_EMAIL = "alex.beckner@ext.applied.co"
 GITHUB_REPO = "AppliedNeuron/core-stack"
 SYNC_BRANCH_PAGES = "5"
 SYNC_COMMIT_PAGES = "3"
