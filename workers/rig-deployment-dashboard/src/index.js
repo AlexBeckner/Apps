@@ -63,7 +63,7 @@ const IN_PROGRESS_STATES = new Set([
 ]);
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     try {
       if (request.method === "OPTIONS") {
         return new Response(null, {
@@ -122,6 +122,7 @@ export default {
       if (request.method === "GET" && url.pathname === "/api/rigs") {
         const source = resolveSource(env, url.searchParams.get("source"));
         const historySize = snapshotHistorySize(url);
+        await refreshStaleSourceInBackground(env, source, ctx);
         return jsonResponse(
           request,
           env,
@@ -279,6 +280,29 @@ async function getSnapshot(env, source, { force, historySize = HISTORY_SIZE }) {
     errors,
     rate_limited_until: rateLimitedUntil,
   };
+}
+
+async function refreshStaleSourceInBackground(env, source, ctx) {
+  const lastRefreshAt = Number(await getMeta(env, metaKey(source.key, "last_refresh_at"))) || 0;
+  const now = Math.floor(Date.now() / 1000);
+  if (now - lastRefreshAt < cacheSeconds(env)) {
+    return;
+  }
+
+  const refreshPromise = refreshSource(env, source).catch((error) => {
+    console.error("rig-deployment-dashboard background refresh failed", {
+      source: source.key,
+      message: error.message || String(error),
+      stack: error.stack || null,
+    });
+  });
+
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(refreshPromise);
+    return;
+  }
+
+  await refreshPromise;
 }
 
 async function refreshSource(env, source) {

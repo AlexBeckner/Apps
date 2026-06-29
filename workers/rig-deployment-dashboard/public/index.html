@@ -362,14 +362,7 @@
             class="px-3 py-2 w-72"
           />
 
-          <label
-            id="autoRefreshLabel"
-            class="flex items-center gap-2 cursor-pointer select-none"
-            style="display: none"
-          >
-            <input id="autoRefresh" type="checkbox" checked class="rounded" />
-            Auto-refresh (10s)
-          </label>
+          <span class="text-[13px] opacity-70">Auto-refreshes every 10s</span>
 
           <button
             id="adminBtn"
@@ -531,12 +524,14 @@
         source: null,
         // Whether this client may use the write controls (Refresh / Sync)
         // and force server-side Buildkite fetches. Set from
-        // /api/client-context on load. LAN viewers stay read-only, but their
-        // normal polling still lets the Worker refresh stale Buildkite data.
+        // /api/client-context on load. LAN viewers stay read-only, but the
+        // normal 10s poll still lets the Worker refresh stale Buildkite data.
         // Defaults to false so a LAN viewer never flashes the controls before
         // the probe resolves.
         isOperator: false,
         autoRefreshTimer: null,
+        snapshotLoading: false,
+        snapshotRequestId: 0,
         history: null,
         historyLoading: false,
         fetchedAtMs: null,
@@ -544,18 +539,14 @@
         // Epoch seconds when the Buildkite rate limit resets, per the
         // latest server response. Null when we're not rate-limited.
         rateLimitedUntil: null,
-        // Handle returned by setTimeout for the scheduled auto-retry so we
-        // can clear it if a new fetch succeeds (or a new rate-limit window
-        // starts) before the retry fires.
-        rateLimitRetryTimer: null,
         // Build numbers whose retry/attempt panel is currently open
         // inline. Survives re-renders (auto-refresh, filter changes) so
         // an opened panel doesn't snap shut every 10s.
         expandedBuilds: new Set(),
         // Cache of attempts data per build number, keyed by build_number.
         // Shape: { [n]: { loading?: bool, error?: string, data?: object } }
-        // We hold onto results across re-renders and sync open panels
-        // during snapshot refreshes.
+        // We hold onto results across re-renders and refresh a cached build
+        // quietly when the user opens that row again.
         buildAttempts: {},
       };
 
@@ -1086,10 +1077,8 @@
         const trimmed = parseRigInput(rig);
         if (!trimmed) return;
         // User-initiated loads surface the loading state and update the
-        // input/URL so it's obvious something is happening. Silent
-        // refreshes (driven by the auto-refresh tick) keep the existing
-        // panel on screen while a fresh fetch is in flight, so re-renders
-        // don't flicker through a "Loading..." state every 10s.
+        // input/URL so it's obvious something is happening. Silent loads keep
+        // the existing panel on screen while a fresh fetch is in flight.
         if (!silent) {
           $("historyRigInput").value = trimmed;
           state.historyLoading = true;
@@ -1124,22 +1113,6 @@
         } finally {
           if (!silent) state.historyLoading = false;
           renderHistoryPanel();
-        }
-      }
-
-      function refreshOpenHistoryPanel() {
-        // After a snapshot refresh, re-pull the standalone rig deploy
-        // history so new deploys (and state transitions on existing ones)
-        // catch up without requiring the user to re-trigger the load.
-        // Mirrors ``refreshOpenBuildAttempts``. No-op when the panel is
-        // closed, or when a user-initiated load is already in flight (the
-        // pending response will render the panel itself).
-        if (
-          state.history
-          && state.history.rig
-          && !state.historyLoading
-        ) {
-          loadHistory(state.history.rig, { silent: true });
         }
       }
 
@@ -1313,9 +1286,8 @@
         { silent = false } = {},
       ) {
         const existing = state.buildAttempts[buildNumber];
-        // ``silent`` bypasses both client-side and server-side attempt caches,
-        // so a snapshot refresh can sync open panels (e.g. so a step that
-        // just transitioned to "failed" shows up without a page reload).
+        // ``silent`` refreshes cached data without replacing the current row
+        // with a spinner.
         if (existing && existing.data && !silent) {
           return;
         }
@@ -1328,9 +1300,6 @@
           rerenderForBuild(buildNumber);
         }
         try {
-          // Automatic attempt refreshes use the server's cached/stored build
-          // detail. The manual dashboard Refresh button is the only polling
-          // action that asks the server to contact Buildkite immediately.
           const resp = await dashboardFetch(withSource(`/api/builds/${buildNumber}/attempts`));
           if (!resp.ok) {
             const text = await resp.text();
@@ -1340,10 +1309,8 @@
           state.buildAttempts[buildNumber] = { data };
           applyRateLimit(data);
         } catch (err) {
-          // Surface errors only for user-initiated loads. A silent
-          // background refresh that fails should leave the previously
-          // rendered data alone so a transient blip doesn't blank out
-          // the panel; the next refresh tick will try again.
+          // Surface errors only for user-initiated loads. A silent refresh
+          // that fails should leave the previously-rendered data alone.
           if (!silent) {
             state.buildAttempts[buildNumber] = {
               error: String(err.message || err),
@@ -1351,18 +1318,6 @@
           }
         } finally {
           rerenderForBuild(buildNumber);
-        }
-      }
-
-      function refreshOpenBuildAttempts() {
-        // After a snapshot refresh, sync any inline-expanded build
-        // attempts panels so step states (e.g. "running" → "failed")
-        // catch up with the rest of the dashboard. Without this, the
-        // rig row updates but the open panel keeps showing stale step
-        // states. Silent mode reuses the on-screen data until fresh data
-        // arrives so there's no flicker.
-        for (const buildNumber of state.expandedBuilds) {
-          loadBuildAttempts(buildNumber, { silent: true });
         }
       }
 
@@ -1381,10 +1336,7 @@
         // loading state appears immediately, even if the network is fast.
         //
         // If we already have cached attempts data from a previous expansion
-        // of this same build, the cache may be stale: snapshot refresh ticks
-        // only sync currently-open panels (see ``refreshOpenBuildAttempts``),
-        // so the data hasn't been touched since the panel was last closed.
-        // Do a silent cached refresh so the UI catches up without flicker.
+        // of this same build, quietly refresh it when the user opens the row.
         const hasCachedData = !!(
           state.buildAttempts[buildNumber]
           && state.buildAttempts[buildNumber].data
@@ -1715,38 +1667,12 @@
         const until = response && response.rate_limited_until;
         if (typeof until === "number" && until * 1000 > Date.now()) {
           state.rateLimitedUntil = until;
-          scheduleRateLimitRetry(until);
         } else if (state.rateLimitedUntil != null) {
           // Upstream call succeeded (or returned no reset) — rate limit is
-          // no longer active; clear state and cancel any scheduled retry.
+          // no longer active; clear state.
           state.rateLimitedUntil = null;
-          if (state.rateLimitRetryTimer) {
-            clearTimeout(state.rateLimitRetryTimer);
-            state.rateLimitRetryTimer = null;
-          }
         }
         renderRateLimitBanner();
-      }
-
-      function scheduleRateLimitRetry(resetEpochSeconds) {
-        if (state.rateLimitRetryTimer) {
-          clearTimeout(state.rateLimitRetryTimer);
-          state.rateLimitRetryTimer = null;
-        }
-        // 2s buffer past the reset so we don't race the server clock.
-        const delayMs = Math.max(
-          1000,
-          resetEpochSeconds * 1000 - Date.now() + 2000,
-        );
-        state.rateLimitRetryTimer = setTimeout(() => {
-          state.rateLimitRetryTimer = null;
-          fetchSnapshot(false);
-          // If the history panel is open, also retry that so both views
-          // recover from the rate-limit hit together.
-          if (state.history && state.history.rig) {
-            loadHistory(state.history.rig);
-          }
-        }, delayMs);
       }
 
       function renderRateLimitBanner() {
@@ -1780,12 +1706,16 @@
       }
 
       async function fetchSnapshot(forceRefresh = false) {
+        if (state.snapshotLoading) return;
+
         // Only the operator may force a server-side refresh (POST
-        // /api/refresh, which spends the Buildkite token). LAN viewers use
-        // GET /api/rigs; the Worker refreshes from Buildkite when that
-        // snapshot is stale, so read-only clients still see deploys roll in.
+        // /api/refresh, which spends the Buildkite token). Automatic polling
+        // always uses the cached read path.
         const force = forceRefresh && state.isOperator;
-        setRefreshSpinning(true);
+        const requestId = ++state.snapshotRequestId;
+        const requestedSource = state.source;
+        state.snapshotLoading = true;
+        if (force) setRefreshSpinning(true);
         try {
           const resp = force
             ? await dashboardFetch(withSource("/api/refresh"), {
@@ -1796,6 +1726,9 @@
             throw new Error(`HTTP ${resp.status}`);
           }
           const snapshot = await resp.json();
+          if (requestId !== state.snapshotRequestId || requestedSource !== state.source) {
+            return;
+          }
           state.snapshot = snapshot;
           $("pipelineLink").href = `${snapshot.pipeline_url}/builds`;
           $("pipelineLink").textContent = `${snapshot.organization_slug}/${snapshot.pipeline_slug}`;
@@ -1810,19 +1743,10 @@
           renderErrors(snapshot);
           renderTable();
           renderFavicon(deriveFaviconState(snapshot));
-          // The snapshot refresh advanced the rig rows; nudge any open
-          // build attempts panels so their step states stay in sync.
-          refreshOpenBuildAttempts();
-          // Same idea for the standalone rig deploy history panel — it's
-          // backed by ``state.history`` rather than the snapshot, so
-          // without an explicit nudge new deploys (and state transitions
-          // on in-flight ones) don't show up until the user re-triggers
-          // the load.
-          refreshOpenHistoryPanel();
-          // The store gets a new batch of upserts every successful
-          // snapshot fetch, so the totals shift. Refresh the footer.
-          loadStoreStats();
         } catch (err) {
+          if (requestId !== state.snapshotRequestId || requestedSource !== state.source) {
+            return;
+          }
           // Keep whatever data we already have on screen so a transient
           // failure (network blip, server 5xx, Buildkite rate limit that
           // bubbled all the way up) doesn't wipe the dashboard. Just
@@ -1836,7 +1760,10 @@
           $("errorBanner").classList.remove("hidden");
           hideSyncBanner();
         } finally {
-          setRefreshSpinning(false);
+          if (requestId === state.snapshotRequestId) {
+            state.snapshotLoading = false;
+          }
+          if (force) setRefreshSpinning(false);
         }
       }
 
@@ -1971,88 +1898,21 @@
         }
       }
 
-      // Auto-refresh drives its 10s loop from a Web Worker instead of a plain
-      // setInterval on the page. Browsers aggressively throttle (and
-      // eventually freeze) main-thread timers in background/unfocused tabs —
-      // Chrome clamps a hidden tab to roughly one timer fire per minute after
-      // a few minutes — which is why the refresh only advanced while the tab
-      // was focused. Worker timers aren't subject to that background
-      // throttling, so the worker posts a "tick" every interval and the page
-      // does the actual fetch on receipt. (Only timer *scheduling* is
-      // throttled; the fetch itself runs fine in a background tab.)
       const AUTO_REFRESH_INTERVAL_MS = 10000;
 
       function autoRefreshTick() {
-        // Skip the tick while rate-limited; the dedicated retry timer handles
-        // resuming once the limit resets, so we don't hammer Buildkite and
-        // trigger the same 429 again. Automatic ticks use the cached read path;
-        // the manual Refresh button is the only client action that forces an
-        // immediate server-side Buildkite refresh.
-        if (isRateLimited()) return;
         fetchSnapshot(false);
       }
 
-      let autoRefreshWorker = null;
-      let autoRefreshWorkerTried = false;
-      function getAutoRefreshWorker() {
-        // Build the worker lazily on first use and cache the result (worker or
-        // null) so construction is only attempted once. The worker source is
-        // inlined via a Blob URL to keep everything in this single static file
-        // (the server sets no CSP, so blob: workers are allowed).
-        if (autoRefreshWorkerTried) return autoRefreshWorker;
-        autoRefreshWorkerTried = true;
-        try {
-          if (typeof Worker !== "undefined" && typeof Blob !== "undefined") {
-            const src =
-              "let t=null;" +
-              "onmessage=function(e){" +
-              "var d=e.data||{};" +
-              "if(d.cmd==='start'){" +
-              "if(t)clearInterval(t);" +
-              "t=setInterval(function(){postMessage('tick');},d.interval);" +
-              "}else if(d.cmd==='stop'){" +
-              "if(t){clearInterval(t);t=null;}" +
-              "}};";
-            const url = URL.createObjectURL(
-              new Blob([src], { type: "application/javascript" }),
-            );
-            const worker = new Worker(url);
-            URL.revokeObjectURL(url);
-            worker.onmessage = autoRefreshTick;
-            autoRefreshWorker = worker;
-          }
-        } catch (err) {
-          // No worker support (or blocked) — fall back to setInterval below.
-          autoRefreshWorker = null;
-        }
-        return autoRefreshWorker;
-      }
-
-      function setupAutoRefresh() {
-        const worker = getAutoRefreshWorker();
-        // Stop any existing loop first (worker tick and the fallback timer) so
-        // toggling — or re-running on access-mode changes — never leaves us
-        // double-ticking.
-        if (worker) worker.postMessage({ cmd: "stop" });
+      function startAutoRefresh() {
         if (state.autoRefreshTimer) {
           clearInterval(state.autoRefreshTimer);
           state.autoRefreshTimer = null;
         }
-        if (!$("autoRefresh").checked) return;
-        if (worker) {
-          worker.postMessage({
-            cmd: "start",
-            interval: AUTO_REFRESH_INTERVAL_MS,
-          });
-        } else {
-          // Fallback for environments without Web Worker support. Still
-          // subject to background-tab throttling, but better than no
-          // auto-refresh at all.
-          state.autoRefreshTimer = setInterval(
-            autoRefreshTick,
-            AUTO_REFRESH_INTERVAL_MS,
-          );
-        }
+        state.autoRefreshTimer = setInterval(
+          autoRefreshTick,
+          AUTO_REFRESH_INTERVAL_MS,
+        );
       }
 
       // ============================================================
@@ -2080,18 +1940,11 @@
         // These controls carry the `flex` utility (which also sets
         // `display`), so toggle the inline style rather than a `hidden`
         // class to avoid a display tug-of-war. "" reverts to the stylesheet.
-        for (const id of ["refreshBtn", "backfillBtn", "autoRefreshLabel"]) {
+        for (const id of ["refreshBtn", "backfillBtn"]) {
           const el = $(id);
           if (el) el.style.display = operator ? "" : "none";
         }
         updateAdminButton();
-        if (!operator) {
-          // Read-only viewers keep polling so deploys show up in real time;
-          // the toggle is hidden, so pin it on and (re)start the loop.
-          const auto = $("autoRefresh");
-          if (auto) auto.checked = true;
-          setupAutoRefresh();
-        }
       }
 
       async function initAccessMode() {
@@ -2221,15 +2074,13 @@
         state.expandedBuilds.clear();
         state.buildAttempts = {};
         state.history = null;
+        state.snapshotRequestId += 1;
+        state.snapshotLoading = false;
         const input = $("historyRigInput");
         if (input) input.value = "";
         $("historyClearBtn").classList.add("hidden");
         // Drop any rate-limit countdown carried over from the old source.
         state.rateLimitedUntil = null;
-        if (state.rateLimitRetryTimer) {
-          clearTimeout(state.rateLimitRetryTimer);
-          state.rateLimitRetryTimer = null;
-        }
         renderRateLimitBanner();
         // Reflect the choice in the URL (omit it for the default source so
         // the common case stays a clean URL), and clear the per-source rig.
@@ -2261,7 +2112,6 @@
       });
       $("adminBtn").addEventListener("click", unlockAdminControls);
       $("backfillBtn").addEventListener("click", runBackfill);
-      $("autoRefresh").addEventListener("change", setupAutoRefresh);
       $("search").addEventListener("input", (e) => {
         state.filter = e.target.value;
         renderTable();
@@ -2290,8 +2140,8 @@
       loadSources().then(() => {
         loadStoreStats();
         fetchSnapshot(false).then(loadHistoryFromUrl);
+        startAutoRefresh();
       });
-      setupAutoRefresh();
 
       if (typeof ResizeObserver !== "undefined") {
         const rw = document.getElementById("rigsTableWrap");
@@ -2309,13 +2159,7 @@
         updateLastUpdatedLabel();
         // Tick the rate-limit countdown (no-op when not rate-limited).
         if (state.rateLimitedUntil) {
-          if (state.rateLimitedUntil * 1000 <= Date.now()) {
-            // Reset time passed; let the scheduled retry clear state when
-            // it runs. Just show "retrying now" until then.
-            renderRateLimitBanner();
-          } else {
-            renderRateLimitBanner();
-          }
+          renderRateLimitBanner();
         }
       }, 1000);
 
