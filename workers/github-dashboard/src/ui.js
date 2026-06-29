@@ -72,6 +72,12 @@ export function dashboardHtml(env) {
       .btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elevated); padding: 6px 12px; color: var(--text); font-size: 14px; font-weight: 500; }
       .btn:hover { border-color: var(--accent); color: var(--accent); }
       .btn-danger { border-color: rgba(248, 81, 73, .4); background: rgba(248, 81, 73, .1); color: var(--danger); }
+      .token-popover { position: absolute; top: calc(100% + 8px); right: 0; z-index: 50; width: min(24rem, calc(100vw - 2rem)); border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elevated); padding: 12px; box-shadow: 0 18px 50px rgba(0, 0, 0, .35); }
+      .token-popover label { display: grid; gap: 6px; color: var(--text-subtle); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+      .token-popover input { width: 100%; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elevated-2); padding: 8px 10px; color: var(--text); outline: none; }
+      .token-popover input:focus { border-color: var(--accent); }
+      .token-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+      .token-help { margin-top: 8px; color: var(--text-subtle); font-size: 11px; line-height: 1.4; text-transform: none; letter-spacing: 0; }
       .sync-error-popover { position: absolute; top: calc(100% + 8px); right: 0; z-index: 50; width: min(28rem, calc(100vw - 2rem)); border: 1px solid rgba(248, 81, 73, .4); border-radius: 6px; background: var(--bg-elevated); padding: 12px; color: var(--danger); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; white-space: pre-wrap; box-shadow: 0 18px 50px rgba(0, 0, 0, .35); }
       .sync-banner { border-bottom: 1px solid rgba(79, 140, 255, .3); background: rgba(79, 140, 255, .05); color: var(--accent); padding: 8px 16px; font-size: 12px; }
       .pulse-dot { display: inline-block; width: 8px; height: 8px; margin-right: 12px; border-radius: 999px; background: var(--accent); animation: pulse 1.2s infinite; }
@@ -217,7 +223,8 @@ export function dashboardHtml(env) {
     searchTimer: null,
     searchResults: null,
     sync: null,
-    syncErrorOpen: false
+    syncErrorOpen: false,
+    adminTokenOpen: false
   };
 
   function escape(value) {
@@ -435,14 +442,16 @@ export function dashboardHtml(env) {
     var sync = state.sync || {};
     var running = sync.status === "running";
     var label = running ? labelForPhase(sync.phase) : "Sync now";
+    var hasAdminToken = !!localStorage.getItem(adminStorageKey);
     syncRoot.innerHTML =
       '<div class="last-sync"><div>Last synced</div><strong>' + shortRelative(sync.lastSyncAt) + '</strong></div>' +
       '<button class="btn" id="sync-button" ' + (running ? "disabled" : "") + '>' +
         '<svg class="' + (running ? "spin" : "") + '" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7 7 0 0 1 14.95 7.16a.75.75 0 1 1-1.49.178A5.501 5.501 0 0 0 8 2.5ZM1.705 8.005a.75.75 0 0 1 .834.656 5.501 5.501 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.001 7.001 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834Z"/></svg>' +
         label +
       '</button>' +
-      '<button class="btn" id="admin-button" title="Set manual sync token">Admin token</button>' +
+      '<button class="btn" id="admin-button" title="Set manual sync token">' + (hasAdminToken ? "Token saved" : "Admin token") + '</button>' +
       (sync.status === "error" && sync.error ? '<button class="btn btn-danger" id="sync-error-button">Error</button>' : '') +
+      (state.adminTokenOpen ? tokenPopover(hasAdminToken) : '') +
       (state.syncErrorOpen && sync.error ? '<div class="sync-error-popover">' + escape(sync.error) + '</div>' : '');
     document.getElementById("sync-button").addEventListener("click", function () {
       state.syncErrorOpen = false;
@@ -462,8 +471,12 @@ export function dashboardHtml(env) {
       });
     });
     document.getElementById("admin-button").addEventListener("click", function () {
-      promptForAdminToken();
+      state.adminTokenOpen = !state.adminTokenOpen;
+      state.syncErrorOpen = false;
+      renderSync();
+      focusAdminInput();
     });
+    bindTokenPopover();
     var errorButton = document.getElementById("sync-error-button");
     if (errorButton) {
       errorButton.addEventListener("click", function () {
@@ -475,20 +488,57 @@ export function dashboardHtml(env) {
 
   function getAdminToken() {
     var token = localStorage.getItem(adminStorageKey) || "";
-    return token || promptForAdminToken();
+    if (token) return token;
+    state.adminTokenOpen = true;
+    renderSync();
+    focusAdminInput();
+    return "";
   }
 
-  function promptForAdminToken() {
-    var current = localStorage.getItem(adminStorageKey) || "";
-    var value = window.prompt("Worker ADMIN_TOKEN for manual sync:", current);
-    if (value === null) return "";
-    value = value.trim();
-    if (value) {
+  function tokenPopover(hasAdminToken) {
+    return '<div class="token-popover" role="dialog" aria-label="Manual sync admin token">' +
+      '<label>ADMIN_TOKEN<input id="admin-token-input" type="password" autocomplete="off" placeholder="' + (hasAdminToken ? "Token is saved; enter a new one to replace it" : "Paste the Worker ADMIN_TOKEN") + '"></label>' +
+      '<div class="token-help">Saved only in this browser. It must match the Cloudflare Worker secret named ADMIN_TOKEN.</div>' +
+      '<div class="token-actions">' +
+        '<button class="btn" id="admin-token-clear" type="button">Clear</button>' +
+        '<button class="btn" id="admin-token-cancel" type="button">Cancel</button>' +
+        '<button class="btn" id="admin-token-save" type="button">Save token</button>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function bindTokenPopover() {
+    var input = document.getElementById("admin-token-input");
+    if (!input) return;
+    document.getElementById("admin-token-save").addEventListener("click", function () {
+      var value = input.value.trim();
+      if (!value) return;
       localStorage.setItem(adminStorageKey, value);
-    } else {
+      state.adminTokenOpen = false;
+      renderSync();
+    });
+    document.getElementById("admin-token-clear").addEventListener("click", function () {
       localStorage.removeItem(adminStorageKey);
-    }
-    return value;
+      state.adminTokenOpen = false;
+      renderSync();
+    });
+    document.getElementById("admin-token-cancel").addEventListener("click", function () {
+      state.adminTokenOpen = false;
+      renderSync();
+    });
+    input.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        document.getElementById("admin-token-save").click();
+      }
+    });
+  }
+
+  function focusAdminInput() {
+    setTimeout(function () {
+      var input = document.getElementById("admin-token-input");
+      if (input) input.focus();
+    }, 0);
   }
 
   function renderBanner() {
