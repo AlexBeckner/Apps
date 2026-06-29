@@ -1,0 +1,22 @@
+name = "github-dashboard"
+main = "src/index.js"
+compatibility_date = "2026-06-29"
+
+[vars]
+# Set this to the GitHub Pages origin after deployment, for example:
+# ALLOWED_ORIGIN = "https://alexbeckner.github.io"
+# Leave unset or use "*" during local testing.
+ALLOWED_ORIGIN = "*"
+GITHUB_REPO = "AppliedNeuron/core-stack"
+SYNC_BRANCH_PAGES = "5"
+SYNC_COMMIT_PAGES = "3"
+SYNC_PR_PAGES = "5"
+SYNC_TAG_PAGES = "3"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "github-dashboard"
+database_id = "d2b507b0-d616-41fe-a2cd-9f6e7c72011d"
+
+[triggers]
+crons = ["*/15 * * * *"]
