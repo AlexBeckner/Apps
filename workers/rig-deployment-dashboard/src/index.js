@@ -92,10 +92,8 @@ export default {
 
       const url = new URL(request.url);
       if (request.method === "GET" && isAssetRoute(url.pathname)) {
-        return env.ASSETS.fetch(request);
+        return assetResponse(request, env);
       }
-
-      await ensureSchema(env);
 
       if (request.method === "GET" && url.pathname === "/api/health") {
         return jsonResponse(request, env, await handleHealth(env));
@@ -241,7 +239,6 @@ async function handleHealth(env) {
 }
 
 async function refreshAllSources(env) {
-  await ensureSchema(env);
   const errors = [];
   for (const source of configuredSources(env)) {
     try {
@@ -1270,6 +1267,17 @@ function jsonResponse(request, env, body, init = {}) {
       "Content-Type": "application/json;charset=utf-8",
       ...(init.headers || {}),
     },
+  });
+}
+
+async function assetResponse(request, env) {
+  const response = await env.ASSETS.fetch(request);
+  const headers = new Headers(response.headers);
+  headers.set("Cache-Control", "no-store");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
   });
 }
 
