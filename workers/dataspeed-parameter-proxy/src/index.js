@@ -1,3 +1,6 @@
+import { requireCloudflareAccess } from "./access.js";
+import { dataspeedHashFinderHtml } from "./ui.js";
+
 const OWNER = "AppliedNeuron";
 const REPO = "core-stack";
 const PARAMETER_DIRECTORY =
@@ -20,6 +23,11 @@ export default {
         });
       }
 
+      const accessError = await requireCloudflareAccess(request, env);
+      if (accessError) {
+        return accessError;
+      }
+
       if (request.method !== "GET") {
         return jsonResponse(
           request,
@@ -39,6 +47,11 @@ export default {
         );
       }
 
+      const url = new URL(request.url);
+      if (url.pathname === "/") {
+        return htmlResponse(dataspeedHashFinderHtml());
+      }
+
       if (!env.GITHUB_TOKEN) {
         return jsonResponse(
           request,
@@ -48,7 +61,6 @@ export default {
         );
       }
 
-      const url = new URL(request.url);
       if (url.pathname === "/parameter-file") {
         return handleParameterFile(request, env, url);
       }
@@ -287,6 +299,17 @@ function jsonResponse(request, env, body, init = {}) {
     headers: {
       ...corsHeaders(request, env),
       "Content-Type": "application/json;charset=utf-8",
+      ...(init.headers || {}),
+    },
+  });
+}
+
+function htmlResponse(html, init = {}) {
+  return new Response(html, {
+    ...init,
+    headers: {
+      "Cache-Control": "no-store",
+      "Content-Type": "text/html;charset=utf-8",
       ...(init.headers || {}),
     },
   });

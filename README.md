@@ -1,6 +1,8 @@
 # Apps
 
-Static web tools hosted with GitHub Pages.
+Static launcher pages for internal tools. The tools themselves are served from
+Cloudflare Workers so Cloudflare Access can enforce company-only auth before any
+private GitHub or Buildkite data is returned.
 
 ## Apps
 
@@ -8,12 +10,13 @@ Static web tools hosted with GitHub Pages.
 - [buildkitedeploymentdashboard](./buildkitedeploymentdashboard/)
 - [githubdashboard](./githubdashboard/)
 
-## Notes
+## Company Access
 
-These tools are static pages. Tools that read private GitHub repositories should
-use a hosted backend proxy or pre-generated static data; GitHub tokens must not
-be embedded in the browser app.
+Production Worker URLs should be protected by Cloudflare Access with a one-time
+PIN policy that allows only emails ending in `@applied.co` or
+`@ext.applied.co`. Each Worker validates the `Cf-Access-Jwt-Assertion` header
+with `TEAM_DOMAIN` and `POLICY_AUD`; leave those values unset only for local
+development on `localhost`.
 
-`githubdashboard` is a static GitHub Pages app backed by the Cloudflare Worker
-in `workers/github-dashboard`; its GitHub token and D1 cache stay on the server
-side.
+Tools that read private GitHub repositories should use a hosted backend proxy or
+pre-generated static data; GitHub tokens must not be embedded in the browser app.

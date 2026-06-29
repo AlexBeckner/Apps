@@ -1,3 +1,5 @@
+import { requireCloudflareAccess } from "./access.js";
+
 const BUILDKITE_API_BASE = "https://api.buildkite.com/v2";
 const DEFAULT_ORG_SLUG = "mosaic";
 const DEFAULT_DEPLOYMENT_PIPELINE = "core-stack-deployment-pipeline";
@@ -61,14 +63,19 @@ const IN_PROGRESS_STATES = new Set([
 export default {
   async fetch(request, env) {
     try {
-      await ensureSchema(env);
-
       if (request.method === "OPTIONS") {
         return new Response(null, {
           status: 204,
           headers: corsHeaders(request, env),
         });
       }
+
+      const accessError = await requireCloudflareAccess(request, env);
+      if (accessError) {
+        return accessError;
+      }
+
+      await ensureSchema(env);
 
       const originError = validateOrigin(request, env);
       if (originError) {

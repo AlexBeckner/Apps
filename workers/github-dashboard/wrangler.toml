@@ -3,10 +3,8 @@ main = "src/index.js"
 compatibility_date = "2026-06-29"
 
 [vars]
-# Set this to the GitHub Pages origin after deployment, for example:
-# ALLOWED_ORIGIN = "https://alexbeckner.github.io"
-# Leave unset or use "*" during local testing.
-ALLOWED_ORIGIN = "*"
+# Same-origin Worker-hosted app. Override to "*" in local `.dev.vars` if needed.
+ALLOWED_ORIGIN = "https://github-dashboard.dataspeedhashfinder.workers.dev"
 GITHUB_REPO = "AppliedNeuron/core-stack"
 SYNC_BRANCH_PAGES = "5"
 SYNC_COMMIT_PAGES = "3"

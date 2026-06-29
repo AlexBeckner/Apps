@@ -3,12 +3,12 @@
 Cloudflare Worker backend for `githubdashboard`.
 
 The Worker keeps `GITHUB_TOKEN` server-side, syncs GitHub metadata into D1, and
-serves the JSON API used by the static GitHub Pages dashboard. Manual syncs
-require `ADMIN_TOKEN`; scheduled syncs run every 15 minutes.
+serves the dashboard UI plus JSON API from the same protected origin. Manual
+syncs require `ADMIN_TOKEN`; scheduled syncs run every 15 minutes.
 
 ## Endpoints
 
-- `GET /` - minimal Worker landing page
+- `GET /` - dashboard UI
 - `GET /api/health`
 - `GET /api/summary`
 - `GET /api/search?q=<query>&limit=<n>`
@@ -48,18 +48,31 @@ require `ADMIN_TOKEN`; scheduled syncs run every 15 minutes.
    npx wrangler secret put ADMIN_TOKEN
    ```
 
-6. Set `ALLOWED_ORIGIN` in `wrangler.toml` to the GitHub Pages origin that will
-   host the dashboard. `*` is convenient for testing, but the deployed Worker
-   should use the real Pages origin.
+6. Enable Cloudflare Access for the production Worker URL:
 
-7. Deploy after confirming the public target:
+   - In Cloudflare, open Workers & Pages > `github-dashboard` > Settings >
+     Domains & Routes.
+   - Enable Cloudflare Access for
+     `https://github-dashboard.dataspeedhashfinder.workers.dev/`.
+   - Configure an Allow policy for emails ending in `@applied.co` or
+     `@ext.applied.co`.
+   - Require the One-Time PIN login method.
+   - Copy the Access team domain and Application Audience (AUD) tag into
+     `TEAM_DOMAIN` and `POLICY_AUD` for this Worker.
+
+7. Keep `ALLOWED_ORIGIN` set to the Worker-hosted URL in `wrangler.toml`.
+   Override it to `*` in local `.dev.vars` if needed.
+
+8. Deploy after confirming the public target:
 
    ```sh
    npm run deploy
    ```
 
-8. Copy the deployed Worker URL into `githubdashboard/config.js` as
-   `apiBaseUrl`.
+   If `TEAM_DOMAIN` and `POLICY_AUD` were set in the Cloudflare dashboard
+   instead of `wrangler.toml`, deploy with `npm run deploy -- --keep-vars`.
+
+9. Point GitHub Pages launchers at the deployed Worker URL.
 
 ## Local Development
 
@@ -71,6 +84,9 @@ ADMIN_TOKEN=local-admin-token
 ALLOWED_ORIGIN=*
 GITHUB_REPO=AppliedNeuron/core-stack
 ```
+
+Leave `TEAM_DOMAIN` and `POLICY_AUD` unset for localhost development. Non-local
+requests fail closed unless those Cloudflare Access values are configured.
 
 Then run:
 

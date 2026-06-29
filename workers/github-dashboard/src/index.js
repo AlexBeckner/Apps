@@ -1,3 +1,4 @@
+import { requireCloudflareAccess } from "./access.js";
 import { dashboardHtml, isDashboardRoute } from "./ui.js";
 
 const GITHUB_API = "https://api.github.com";
@@ -77,14 +78,19 @@ CREATE INDEX IF NOT EXISTS idx_tags_deleted ON tags(deleted_at);
 export default {
   async fetch(request, env, ctx) {
     try {
-      await ensureSchema(env);
-
       if (request.method === "OPTIONS") {
         return new Response(null, {
           status: 204,
           headers: corsHeaders(request, env),
         });
       }
+
+      const accessError = await requireCloudflareAccess(request, env);
+      if (accessError) {
+        return accessError;
+      }
+
+      await ensureSchema(env);
 
       const originError = validateOrigin(request, env);
       if (originError) {

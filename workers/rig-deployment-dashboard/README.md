@@ -3,8 +3,8 @@
 Cloudflare Worker backend for buildkitedeploymentdashboard.
 
 The Worker keeps `BUILDKITE_API_TOKEN` server-side, stores deployment history in
-D1, refreshes snapshots on a cron trigger, and serves the JSON API used by the
-static GitHub Pages dashboard.
+D1, refreshes snapshots on a cron trigger, and serves the dashboard UI plus JSON
+API from the same protected origin.
 
 `GET /api/rigs` automatically refreshes Buildkite data when the stored snapshot
 is older than `CACHE_SECONDS` (10 seconds in `wrangler.toml`). The cron trigger
@@ -60,18 +60,31 @@ user clicks **Unlock controls** and enters the token. Do not put this token in
    npx wrangler secret put ADMIN_TOKEN
    ```
 
-6. Set `ALLOWED_ORIGIN` in `wrangler.toml` to the GitHub Pages origin that will
-   host the launcher. `*` is convenient for testing, but the deployed Worker
-   should use the real Pages origin.
+6. Enable Cloudflare Access for the production Worker URL:
 
-7. Deploy:
+   - In Cloudflare, open Workers & Pages > `rig-deployment-dashboard` >
+     Settings > Domains & Routes.
+   - Enable Cloudflare Access for
+     `https://rig-deployment-dashboard.dataspeedhashfinder.workers.dev/`.
+   - Configure an Allow policy for emails ending in `@applied.co` or
+     `@ext.applied.co`.
+   - Require the One-Time PIN login method.
+   - Copy the Access team domain and Application Audience (AUD) tag into
+     `TEAM_DOMAIN` and `POLICY_AUD` for this Worker.
+
+7. Keep `ALLOWED_ORIGIN` set to the Worker-hosted URL in `wrangler.toml`.
+   Override it to `*` in local `.dev.vars` if needed.
+
+8. Deploy after confirming the public target:
 
    ```sh
    npm run deploy
    ```
 
-8. Copy the deployed Worker URL into
-   `buildkitedeploymentdashboard/config.js` as `dashboardUrl`.
+   If `TEAM_DOMAIN` and `POLICY_AUD` were set in the Cloudflare dashboard
+   instead of `wrangler.toml`, deploy with `npm run deploy -- --keep-vars`.
+
+9. Point GitHub Pages launchers at the deployed Worker URL.
 
 ## Local Development
 
@@ -82,6 +95,9 @@ BUILDKITE_API_TOKEN=bkua_...
 ADMIN_TOKEN=local-admin-token
 ALLOWED_ORIGIN=*
 ```
+
+Leave `TEAM_DOMAIN` and `POLICY_AUD` unset for localhost development. Non-local
+requests fail closed unless those Cloudflare Access values are configured.
 
 Then run:
 
