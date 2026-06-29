@@ -46,19 +46,18 @@ syncs require `ADMIN_TOKEN`; scheduled syncs run every 15 minutes.
    ```sh
    npx wrangler secret put GITHUB_TOKEN
    npx wrangler secret put ADMIN_TOKEN
+   npx wrangler secret put AUTH_SECRET
    ```
 
-6. Enable Cloudflare Access for the production Worker URL:
+   `AUTH_SECRET` should be a long random string, at least 32 characters.
 
-   - In Cloudflare, open Workers & Pages > `github-dashboard` > Settings >
-     Domains & Routes.
-   - Enable Cloudflare Access for
-     `https://github-dashboard.dataspeedhashfinder.workers.dev/`.
-   - Configure an Allow policy for emails ending in `@applied.co` or
-     `@ext.applied.co`.
-   - Require the One-Time PIN login method.
-   - Copy the Access team domain and Application Audience (AUD) tag into
-     `TEAM_DOMAIN` and `POLICY_AUD` for this Worker.
+6. Configure Cloudflare Email Service:
+
+   - In Cloudflare, go to Compute > Email Service > Email Sending.
+   - Onboard the sending domain you want to use.
+   - Set `FROM_EMAIL` on the Worker to an address on that domain, for example
+     `internal-tools@example.com`.
+   - `wrangler.toml` already includes the `EMAIL` send binding.
 
 7. Keep `ALLOWED_ORIGIN` set to the Worker-hosted URL in `wrangler.toml`.
    Override it to `*` in local `.dev.vars` if needed.
@@ -69,8 +68,8 @@ syncs require `ADMIN_TOKEN`; scheduled syncs run every 15 minutes.
    npm run deploy
    ```
 
-   If `TEAM_DOMAIN` and `POLICY_AUD` were set in the Cloudflare dashboard
-   instead of `wrangler.toml`, deploy with `npm run deploy -- --keep-vars`.
+   If `FROM_EMAIL` was set in the Cloudflare dashboard instead of
+   `wrangler.toml`, deploy with `npm run deploy -- --keep-vars`.
 
 9. Point GitHub Pages launchers at the deployed Worker URL.
 
@@ -81,12 +80,11 @@ Create a local `.dev.vars` file:
 ```sh
 GITHUB_TOKEN=ghp_...
 ADMIN_TOKEN=local-admin-token
+AUTH_SECRET=local-dev-auth-secret-at-least-32-chars
+FROM_EMAIL=internal-tools@example.com
 ALLOWED_ORIGIN=*
 GITHUB_REPO=AppliedNeuron/core-stack
 ```
-
-Leave `TEAM_DOMAIN` and `POLICY_AUD` unset for localhost development. Non-local
-requests fail closed unless those Cloudflare Access values are configured.
 
 Then run:
 

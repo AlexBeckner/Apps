@@ -1,4 +1,4 @@
-import { requireCloudflareAccess } from "./access.js";
+import { companyAuthResponse } from "./company-auth.js";
 import { dashboardHtml, isDashboardRoute } from "./ui.js";
 
 const GITHUB_API = "https://api.github.com";
@@ -85,17 +85,21 @@ export default {
         });
       }
 
-      const accessError = await requireCloudflareAccess(request, env);
-      if (accessError) {
-        return accessError;
-      }
-
-      await ensureSchema(env);
-
       const originError = validateOrigin(request, env);
       if (originError) {
         return jsonResponse(request, env, { error: originError }, { status: 403 });
       }
+
+      const authResponse = await companyAuthResponse(
+        request,
+        env,
+        "GitHub Dashboard"
+      );
+      if (authResponse) {
+        return authResponse;
+      }
+
+      await ensureSchema(env);
 
       const url = new URL(request.url);
 

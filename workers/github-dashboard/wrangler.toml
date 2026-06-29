@@ -19,3 +19,7 @@ database_id = "d2b507b0-d616-41fe-a2cd-9f6e7c72011d"
 
 [triggers]
 crons = ["*/15 * * * *"]
+
+[[send_email]]
+name = "EMAIL"
+remote = true

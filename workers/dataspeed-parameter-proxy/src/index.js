@@ -1,4 +1,4 @@
-import { requireCloudflareAccess } from "./access.js";
+import { companyAuthResponse } from "../../github-dashboard/src/company-auth.js";
 
 const OWNER = "AppliedNeuron";
 const REPO = "core-stack";
@@ -22,9 +22,23 @@ export default {
         });
       }
 
-      const accessError = await requireCloudflareAccess(request, env);
-      if (accessError) {
-        return accessError;
+      const originError = validateOrigin(request, env);
+      if (originError) {
+        return jsonResponse(
+          request,
+          env,
+          { error: originError },
+          { status: 403 }
+        );
+      }
+
+      const authResponse = await companyAuthResponse(
+        request,
+        env,
+        "Dataspeed Hash Finder"
+      );
+      if (authResponse) {
+        return authResponse;
       }
 
       if (request.method !== "GET") {
@@ -33,16 +47,6 @@ export default {
           env,
           { error: "Method not allowed" },
           { status: 405 }
-        );
-      }
-
-      const originError = validateOrigin(request, env);
-      if (originError) {
-        return jsonResponse(
-          request,
-          env,
-          { error: originError },
-          { status: 403 }
         );
       }
 

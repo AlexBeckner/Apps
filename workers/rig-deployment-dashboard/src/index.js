@@ -1,4 +1,4 @@
-import { requireCloudflareAccess } from "./access.js";
+import { companyAuthResponse } from "../../github-dashboard/src/company-auth.js";
 
 const BUILDKITE_API_BASE = "https://api.buildkite.com/v2";
 const DEFAULT_ORG_SLUG = "mosaic";
@@ -70,11 +70,6 @@ export default {
         });
       }
 
-      const accessError = await requireCloudflareAccess(request, env);
-      if (accessError) {
-        return accessError;
-      }
-
       const originError = validateOrigin(request, env);
       if (originError) {
         return jsonResponse(
@@ -83,6 +78,15 @@ export default {
           { error: originError },
           { status: 403 }
         );
+      }
+
+      const authResponse = await companyAuthResponse(
+        request,
+        env,
+        "Deployment Dashboard"
+      );
+      if (authResponse) {
+        return authResponse;
       }
 
       const url = new URL(request.url);
