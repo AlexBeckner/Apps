@@ -286,14 +286,33 @@
 
       function friendlyLoadError(error) {
         const message = error?.message || "";
-        if (
-          error?.status === 404 ||
-          /\b(no commit found|branch not found|not found)\b/i.test(message)
-        ) {
+        if (isBranchNotFoundError(error, message)) {
           return "Branch not found.";
         }
 
+        if (message.length > 180) {
+          return "Unable to load branch.";
+        }
+
         return message || "Unable to load branch.";
+      }
+
+      function isBranchNotFoundError(error, message) {
+        if (error?.status === 404 || error?.status === 422) {
+          return true;
+        }
+
+        const normalized = message.toLowerCase();
+        if (
+          /\b(no commit found|branch not found|not found)\b/i.test(message) ||
+          normalized.includes("reference does not exist") ||
+          normalized.includes("could not resolve") ||
+          normalized.includes("invalid object name")
+        ) {
+          return true;
+        }
+
+        return error?.status === 500 && message.length > 500;
       }
 
       function downloadText(fileName, text) {

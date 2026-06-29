@@ -223,10 +223,6 @@ async function githubJson(url, accept, env, options = {}) {
   });
 
   if (!response.ok) {
-    if (response.status === 404 && options.notFoundMessage) {
-      throw httpError(404, options.notFoundMessage);
-    }
-
     const errorText = await response.text();
     let githubMessage = errorText;
     try {
@@ -234,13 +230,48 @@ async function githubJson(url, accept, env, options = {}) {
     } catch {
       // GitHub usually returns JSON errors, but keep the raw body if not.
     }
+
+    if (options.notFoundMessage && isMissingRefError(response.status, githubMessage)) {
+      throw httpError(404, options.notFoundMessage);
+    }
+
     throw httpError(
       response.status,
-      `${response.status} ${response.statusText}: ${githubMessage}`
+      `${response.status} ${response.statusText}: ${truncateErrorMessage(githubMessage)}`
     );
   }
 
   return response.json();
+}
+
+function isMissingRefError(status, message) {
+  if (status === 404 || status === 422) {
+    return true;
+  }
+
+  const normalized = String(message || "").toLowerCase();
+  if (
+    normalized.includes("no commit found") ||
+    normalized.includes("branch not found") ||
+    normalized.includes("reference does not exist") ||
+    normalized.includes("could not resolve") ||
+    normalized.includes("invalid object name")
+  ) {
+    return true;
+  }
+
+  // GitHub occasionally responds to invalid refs with a generic 500 and a
+  // very large body. Do not surface that upstream body in the UI.
+  return status === 500 && normalized.length > 500;
+}
+
+function truncateErrorMessage(message) {
+  const text = String(message || "").trim();
+  if (text.length <= 240) {
+    return text;
+  }
+
+  return `${text.slice(0, 240)}...`;
 }
 
 function decodeBase64Content(content) {
