@@ -12,6 +12,7 @@ SYNC_BRANCH_PAGES = "5"
 SYNC_COMMIT_PAGES = "3"
 SYNC_PR_PAGES = "5"
 SYNC_TAG_PAGES = "3"
+SYNC_HISTORY_PAGES = "10"
 
 [[d1_databases]]
 binding = "DB"

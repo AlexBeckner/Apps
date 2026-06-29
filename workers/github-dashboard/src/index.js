@@ -6,6 +6,7 @@ const DEFAULT_BRANCH_PAGES = 5;
 const DEFAULT_COMMIT_PAGES = 3;
 const DEFAULT_PR_PAGES = 5;
 const DEFAULT_TAG_PAGES = 3;
+const GITHUB_PAGE_SIZE = 100;
 const MAX_SYNC_PAGES = 100;
 const MAX_LIST_LIMIT = 500;
 const RUNNING_TTL_SECONDS = 2 * 60;
@@ -686,94 +687,123 @@ async function runSync(env, trigger) {
   await upsertTags(env, tagSync.items, now, tagSync.complete);
 
   await setSyncStatus(env, { phase: "commits", message: "Syncing recent commits" });
-  const commits = await fetchCommits(env, owner, repo, repoMeta.default_branch);
-  await upsertCommits(env, commits);
+  const commitSync = await fetchCommits(env, owner, repo, repoMeta.default_branch);
+  await upsertCommits(env, commitSync.items);
   await fillBranchCommitTimes(env);
 
   await setSyncStatus(env, { phase: "prs", message: "Syncing pull requests" });
-  const prs = await fetchPullRequests(env, owner, repo);
-  await upsertPrs(env, prs);
+  const prSync = await fetchPullRequests(env, owner, repo);
+  await upsertPrs(env, prSync.items);
+
+  const historySeed = await seedHistory(env, owner, repo, repoMeta.default_branch, now, {
+    branches: branchSync.complete,
+    tags: tagSync.complete,
+    commits: commitSync.complete,
+    prs: prSync.complete,
+  });
 
   await setMeta(env, "last_sync_at", String(unixNow()));
   await setSyncStatus(env, {
     status: "success",
     phase: "done",
-    message: `Synced ${branchSync.items.length} branches, ${tagSync.items.length} tags, ${commits.length} commits, ${prs.length} PRs`,
+    message:
+      `Synced ${branchSync.items.length + historySeed.branches.items} branches, ` +
+      `${tagSync.items.length + historySeed.tags.items} tags, ` +
+      `${commitSync.items.length + historySeed.commits.items} commits, ` +
+      `${prSync.items.length + historySeed.prs.items} PRs`,
     finished_at: unixNow(),
     error: null,
     trigger,
   });
 }
 
-async function fetchBranches(env, owner, repo, defaultBranch, now) {
-  const pages = syncPages(env.SYNC_BRANCH_PAGES, DEFAULT_BRANCH_PAGES);
+async function fetchBranches(env, owner, repo, defaultBranch, now, opts = {}) {
+  const pages = opts.pages || syncPages(env.SYNC_BRANCH_PAGES, DEFAULT_BRANCH_PAGES);
   const branches = [];
-  const complete = await eachGithubPage(env, `/repos/${owner}/${repo}/branches`, {}, pages, (items) => {
-    for (const item of items) {
-      if (!item?.name || !item?.commit?.sha) continue;
-      branches.push({
-        name: item.name,
-        headSha: item.commit.sha,
-        isDefault: item.name === defaultBranch ? 1 : 0,
-        lastCommitAt: null,
-        firstSeenAt: now,
-      });
+  const pageState = await eachGithubPage(
+    env,
+    `/repos/${owner}/${repo}/branches`,
+    {},
+    { pages, startPage: opts.startPage },
+    (items) => {
+      for (const item of items) {
+        if (!item?.name || !item?.commit?.sha) continue;
+        branches.push({
+          name: item.name,
+          headSha: item.commit.sha,
+          isDefault: item.name === defaultBranch ? 1 : 0,
+          lastCommitAt: null,
+          firstSeenAt: now,
+        });
+      }
     }
-  });
-  return { items: branches, complete };
+  );
+  return { items: branches, ...pageState };
 }
 
-async function fetchTags(env, owner, repo, now) {
-  const pages = syncPages(env.SYNC_TAG_PAGES, DEFAULT_TAG_PAGES);
+async function fetchTags(env, owner, repo, now, opts = {}) {
+  const pages = opts.pages || syncPages(env.SYNC_TAG_PAGES, DEFAULT_TAG_PAGES);
   const tags = [];
-  const complete = await eachGithubPage(env, `/repos/${owner}/${repo}/tags`, {}, pages, (items) => {
-    for (const item of items) {
-      if (!item?.name || !item?.commit?.sha) continue;
-      tags.push({
-        name: item.name,
-        targetSha: item.commit.sha,
-        isAnnotated: 0,
-        taggedAt: null,
-        message: null,
-        firstSeenAt: now,
-      });
+  const pageState = await eachGithubPage(
+    env,
+    `/repos/${owner}/${repo}/tags`,
+    {},
+    { pages, startPage: opts.startPage },
+    (items) => {
+      for (const item of items) {
+        if (!item?.name || !item?.commit?.sha) continue;
+        tags.push({
+          name: item.name,
+          targetSha: item.commit.sha,
+          isAnnotated: 0,
+          taggedAt: null,
+          message: null,
+          firstSeenAt: now,
+        });
+      }
     }
-  });
-  return { items: tags, complete };
+  );
+  return { items: tags, ...pageState };
 }
 
-async function fetchCommits(env, owner, repo, branch) {
-  const pages = syncPages(env.SYNC_COMMIT_PAGES, DEFAULT_COMMIT_PAGES);
+async function fetchCommits(env, owner, repo, branch, opts = {}) {
+  const pages = opts.pages || syncPages(env.SYNC_COMMIT_PAGES, DEFAULT_COMMIT_PAGES);
   const commits = [];
-  await eachGithubPage(env, `/repos/${owner}/${repo}/commits`, { sha: branch }, pages, (items) => {
-    for (const item of items) {
-      const commit = item?.commit;
-      if (!item?.sha || !commit) continue;
-      const message = commit.message || "";
-      commits.push({
-        sha: item.sha,
-        shortSha: item.sha.slice(0, 7),
-        authorName: commit.author?.name || item.author?.login || null,
-        authorEmail: commit.author?.email || null,
-        authoredAt: toUnix(commit.author?.date),
-        committedAt: toUnix(commit.committer?.date || commit.author?.date),
-        summary: message.split("\n")[0] || null,
-        message,
-        url: item.html_url || null,
-      });
+  const pageState = await eachGithubPage(
+    env,
+    `/repos/${owner}/${repo}/commits`,
+    { sha: branch },
+    { pages, startPage: opts.startPage },
+    (items) => {
+      for (const item of items) {
+        const commit = item?.commit;
+        if (!item?.sha || !commit) continue;
+        const message = commit.message || "";
+        commits.push({
+          sha: item.sha,
+          shortSha: item.sha.slice(0, 7),
+          authorName: commit.author?.name || item.author?.login || null,
+          authorEmail: commit.author?.email || null,
+          authoredAt: toUnix(commit.author?.date),
+          committedAt: toUnix(commit.committer?.date || commit.author?.date),
+          summary: message.split("\n")[0] || null,
+          message,
+          url: item.html_url || null,
+        });
+      }
     }
-  });
-  return commits;
+  );
+  return { items: commits, ...pageState };
 }
 
-async function fetchPullRequests(env, owner, repo) {
-  const pages = syncPages(env.SYNC_PR_PAGES, DEFAULT_PR_PAGES);
+async function fetchPullRequests(env, owner, repo, opts = {}) {
+  const pages = opts.pages || syncPages(env.SYNC_PR_PAGES, DEFAULT_PR_PAGES);
   const prs = [];
-  await eachGithubPage(
+  const pageState = await eachGithubPage(
     env,
     `/repos/${owner}/${repo}/pulls`,
     { state: "all", sort: "updated", direction: "desc" },
-    pages,
+    { pages, startPage: opts.startPage },
     (items) => {
       for (const pr of items) {
         if (!Number.isInteger(pr?.number)) continue;
@@ -797,21 +827,147 @@ async function fetchPullRequests(env, owner, repo) {
       }
     }
   );
-  return prs;
+  return { items: prs, ...pageState };
 }
 
-async function eachGithubPage(env, path, query, maxPages, onPage) {
-  for (let page = 1; page <= maxPages; page++) {
+async function seedHistory(env, owner, repo, defaultBranch, now, freshComplete) {
+  const results = {
+    branches: { items: 0, complete: freshComplete.branches },
+    tags: { items: 0, complete: freshComplete.tags },
+    commits: { items: 0, complete: freshComplete.commits },
+    prs: { items: 0, complete: freshComplete.prs },
+  };
+
+  results.branches = await seedGithubHistory(env, {
+    kind: "branches",
+    table: "branches",
+    freshComplete: freshComplete.branches,
+    freshPages: syncPages(env.SYNC_BRANCH_PAGES, DEFAULT_BRANCH_PAGES),
+    fetchPageRange: async (startPage, pages) => {
+      await setSyncStatus(env, {
+        phase: "branches",
+        message: `Seeding older branches from page ${startPage}`,
+      });
+      const result = await fetchBranches(env, owner, repo, defaultBranch, now, { startPage, pages });
+      await upsertBranches(env, result.items, now, false);
+      return result;
+    },
+  });
+
+  results.tags = await seedGithubHistory(env, {
+    kind: "tags",
+    table: "tags",
+    freshComplete: freshComplete.tags,
+    freshPages: syncPages(env.SYNC_TAG_PAGES, DEFAULT_TAG_PAGES),
+    fetchPageRange: async (startPage, pages) => {
+      await setSyncStatus(env, {
+        phase: "tags",
+        message: `Seeding older tags from page ${startPage}`,
+      });
+      const result = await fetchTags(env, owner, repo, now, { startPage, pages });
+      await upsertTags(env, result.items, now, false);
+      return result;
+    },
+  });
+
+  results.commits = await seedGithubHistory(env, {
+    kind: "commits",
+    table: "commits",
+    freshComplete: freshComplete.commits,
+    freshPages: syncPages(env.SYNC_COMMIT_PAGES, DEFAULT_COMMIT_PAGES),
+    fetchPageRange: async (startPage, pages) => {
+      await setSyncStatus(env, {
+        phase: "commits",
+        message: `Seeding older commits from page ${startPage}`,
+      });
+      const result = await fetchCommits(env, owner, repo, defaultBranch, { startPage, pages });
+      await upsertCommits(env, result.items);
+      await fillBranchCommitTimes(env);
+      return result;
+    },
+  });
+
+  results.prs = await seedGithubHistory(env, {
+    kind: "prs",
+    table: "prs",
+    freshComplete: freshComplete.prs,
+    freshPages: syncPages(env.SYNC_PR_PAGES, DEFAULT_PR_PAGES),
+    fetchPageRange: async (startPage, pages) => {
+      await setSyncStatus(env, {
+        phase: "prs",
+        message: `Seeding older pull requests from page ${startPage}`,
+      });
+      const result = await fetchPullRequests(env, owner, repo, { startPage, pages });
+      await upsertPrs(env, result.items);
+      return result;
+    },
+  });
+
+  return results;
+}
+
+async function seedGithubHistory(env, opts) {
+  const pages = historyPages(env, opts.freshPages);
+  if (opts.freshComplete) {
+    await setMeta(env, seedCompleteKey(opts.kind), "1");
+    return { items: 0, complete: true, skipped: true };
+  }
+  if ((await getMeta(env, seedCompleteKey(opts.kind))) === "1") {
+    return { items: 0, complete: true, skipped: true };
+  }
+
+  const startPage = await seedStartPage(env, opts.kind, opts.table, opts.freshPages);
+  const result = await opts.fetchPageRange(startPage, pages);
+  await setMeta(env, seedNextPageKey(opts.kind), String(result.nextPage));
+  await setMeta(env, seedCompleteKey(opts.kind), result.complete ? "1" : "0");
+
+  return {
+    items: result.items.length,
+    complete: result.complete,
+    nextPage: result.nextPage,
+    startPage,
+  };
+}
+
+async function seedStartPage(env, kind, table, freshPages) {
+  const saved = Number(await getMeta(env, seedNextPageKey(kind)));
+  if (Number.isFinite(saved) && saved >= 1) return Math.floor(saved);
+
+  const cachedItems = await scalar(env, `SELECT COUNT(*) AS c FROM ${table}`);
+  const nextCachedPage = Math.floor(cachedItems / GITHUB_PAGE_SIZE) + 1;
+  return Math.max(freshPages + 1, nextCachedPage);
+}
+
+function historyPages(env, fallbackPages) {
+  return syncPages(env.SYNC_HISTORY_PAGES, fallbackPages);
+}
+
+function seedNextPageKey(kind) {
+  return `seed_${kind}_next_page`;
+}
+
+function seedCompleteKey(kind) {
+  return `seed_${kind}_complete`;
+}
+
+async function eachGithubPage(env, path, query, opts, onPage) {
+  const maxPages = opts.pages;
+  const startPage = opts.startPage || 1;
+  for (let page = startPage; page < startPage + maxPages; page++) {
     const items = await githubJson(env, path, {
       ...query,
-      per_page: "100",
+      per_page: String(GITHUB_PAGE_SIZE),
       page: String(page),
     });
-    if (!Array.isArray(items) || items.length === 0) return true;
+    if (!Array.isArray(items) || items.length === 0) {
+      return { complete: true, nextPage: page };
+    }
     onPage(items, page);
-    if (items.length < 100) return true;
+    if (items.length < GITHUB_PAGE_SIZE) {
+      return { complete: true, nextPage: page + 1 };
+    }
   }
-  return false;
+  return { complete: false, nextPage: startPage + maxPages };
 }
 
 async function upsertBranches(env, branches, now, markMissingDeleted) {

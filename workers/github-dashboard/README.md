@@ -85,11 +85,18 @@ Do not commit `.dev.vars`; it contains secrets.
 
 Cloudflare Workers cannot use the local filesystem git mirror, native
 `better-sqlite3`, or the `git` CLI used by the Next.js dashboard. This Worker
-uses GitHub's HTTP API instead and stores a bounded cache in D1:
+uses GitHub's HTTP API instead and stores the cache in D1. Each sync refreshes
+the newest pages first:
 
 - `SYNC_BRANCH_PAGES` pages of branches, default 5
 - `SYNC_TAG_PAGES` pages of tags, default 3
 - `SYNC_COMMIT_PAGES` pages of recent commits on the default branch, default 3
 - `SYNC_PR_PAGES` pages of pull requests sorted by update time, default 5
 
-Increase those values in `wrangler.toml` if the dashboard needs a wider cache.
+After that fresh pass, the Worker seeds older GitHub pages using D1 `meta`
+cursors named `seed_<kind>_next_page`. The historical pass advances on every
+manual or scheduled sync until GitHub returns the end of each list, so the cache
+can fill in the rest of the repository history without re-fetching the same
+bounded window forever. Set `SYNC_HISTORY_PAGES` in `wrangler.toml` to control
+how many older pages each resource backfills per sync; if unset, it uses the
+resource's normal page count.
