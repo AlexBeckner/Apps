@@ -350,14 +350,6 @@ export function dashboardHtml(env) {
   }
 
   function renderSearch() {
-    var menu = "";
-    if (state.searchOpen && state.searchValue.trim()) {
-      if (!state.searchResults) {
-        menu = '<div class="search-menu"><div class="empty">Searching...</div></div>';
-      } else {
-        menu = '<div class="search-menu">' + searchPreview(state.searchResults) + '</div>';
-      }
-    }
     searchRoot.innerHTML =
       '<form role="search" id="search-form">' +
         '<label class="search-label">' +
@@ -365,7 +357,7 @@ export function dashboardHtml(env) {
           '<input id="search-input" class="search-input" type="search" spellcheck="false" autocomplete="off" placeholder="Search branches, tags, commits (sha or message), PRs (#123 or title)..." value="' + attr(state.searchValue) + '">' +
           '<kbd class="kbd">/</kbd>' +
         '</label>' +
-      '</form>' + menu;
+      '</form><div id="search-menu-root"></div>';
     var input = document.getElementById("search-input");
     input.addEventListener("input", function (event) {
       state.searchValue = event.target.value;
@@ -373,13 +365,11 @@ export function dashboardHtml(env) {
       state.searchResults = null;
       clearTimeout(state.searchTimer);
       state.searchTimer = setTimeout(loadSearchPreview, 150);
-      renderSearch();
-      document.getElementById("search-input").focus();
+      renderSearchMenu();
     });
     input.addEventListener("focus", function () {
       state.searchOpen = true;
-      renderSearch();
-      document.getElementById("search-input").focus();
+      renderSearchMenu();
     });
     document.getElementById("search-form").addEventListener("submit", function (event) {
       event.preventDefault();
@@ -389,23 +379,38 @@ export function dashboardHtml(env) {
         navigate("/search?q=" + encodeURIComponent(q));
       }
     });
+    renderSearchMenu();
+  }
+
+  function renderSearchMenu() {
+    var menuRoot = document.getElementById("search-menu-root");
+    if (!menuRoot) return;
+    if (!state.searchOpen || !state.searchValue.trim()) {
+      menuRoot.innerHTML = "";
+      return;
+    }
+    menuRoot.innerHTML = !state.searchResults
+      ? '<div class="search-menu"><div class="empty">Searching...</div></div>'
+      : '<div class="search-menu">' + searchPreview(state.searchResults) + '</div>';
   }
 
   function loadSearchPreview() {
     var q = state.searchValue.trim();
     if (!q) {
       state.searchResults = null;
-      renderSearch();
+      renderSearchMenu();
       return;
     }
     api("/api/search?" + qs({ q: q, limit: 10 })).then(function (data) {
       if (state.searchValue.trim() === q) {
         state.searchResults = data;
-        renderSearch();
+        renderSearchMenu();
       }
     }).catch(function () {
-      state.searchResults = { query: q, branches: [], tags: [], commits: [], prs: [] };
-      renderSearch();
+      if (state.searchValue.trim() === q) {
+        state.searchResults = { query: q, branches: [], tags: [], commits: [], prs: [] };
+        renderSearchMenu();
+      }
     });
   }
 
@@ -922,14 +927,14 @@ export function dashboardHtml(env) {
   document.addEventListener("mousedown", function (event) {
     if (!searchRoot.contains(event.target)) {
       state.searchOpen = false;
-      renderSearch();
+      renderSearchMenu();
     }
   });
 
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape") {
       state.searchOpen = false;
-      renderSearch();
+      renderSearchMenu();
     }
     if (event.key === "/" && document.activeElement && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) {
       event.preventDefault();
