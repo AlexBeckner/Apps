@@ -1748,7 +1748,7 @@
         );
         state.rateLimitRetryTimer = setTimeout(() => {
           state.rateLimitRetryTimer = null;
-          fetchSnapshot(true);
+          fetchSnapshot(false);
           // If the history panel is open, also retry that so both views
           // recover from the rate-limit hit together.
           if (state.history && state.history.rig) {
@@ -1993,12 +1993,11 @@
       function autoRefreshTick() {
         // Skip the tick while rate-limited; the dedicated retry timer handles
         // resuming once the limit resets, so we don't hammer Buildkite and
-        // trigger the same 429 again. Each tick fetches the last 10 deploys
-        // per rig because the persistent store covers older history, so 10s
-        // is well within Buildkite's 100/min limit. Normal read-only ticks
-        // also advance the server cache once its 10s freshness window expires.
+        // trigger the same 429 again. Automatic ticks use the cached read path;
+        // the manual Refresh button is the only client action that forces an
+        // immediate server-side Buildkite refresh.
         if (isRateLimited()) return;
-        fetchSnapshot(true);
+        fetchSnapshot(false);
       }
 
       let autoRefreshWorker = null;

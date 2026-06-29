@@ -8,6 +8,7 @@ const GITHUB_OWNER = "AppliedNeuron";
 const GITHUB_REPO = "core-stack";
 const HISTORY_SIZE = 10;
 const DEFAULT_CACHE_SECONDS = 10;
+const DEFAULT_REFRESH_LEASE_SECONDS = 25;
 const BACKFILL_PER_PAGE = 100;
 const DEFAULT_BACKFILL_PAGES = 50;
 const MAX_BACKFILL_PAGES = 200;
@@ -191,6 +192,11 @@ export default {
       return jsonResponse(request, env, { error: "Not found" }, { status: 404 });
     } catch (error) {
       const status = Number.isInteger(error.status) ? error.status : 500;
+      console.error("rig-deployment-dashboard request failed", {
+        status,
+        message: error.message || String(error),
+        stack: error.stack || null,
+      });
       return jsonResponse(
         request,
         env,
@@ -279,6 +285,11 @@ async function getSnapshot(env, source, { force, historySize = HISTORY_SIZE }) {
 }
 
 async function refreshSource(env, source) {
+  const lease = await acquireRefreshLease(env, source.key);
+  if (!lease.acquired) {
+    return { errors: [], rate_limited_until: null, skipped: true };
+  }
+
   const errors = [];
   let rateLimitedUntil = null;
   let builds = [];
@@ -297,7 +308,13 @@ async function refreshSource(env, source) {
     if (!rateLimitedUntil && rescue.rate_limited_until) {
       rateLimitedUntil = rescue.rate_limited_until;
     }
-    await saveBuildsWithSummary(env, source.key, builds);
+    try {
+      await saveBuildsWithSummary(env, source.key, builds);
+    } catch (error) {
+      const message = `D1 write failed during refresh: ${error.message || error}`;
+      console.error(message);
+      errors.push(message.slice(0, 300));
+    }
   }
 
   await setMeta(env, metaKey(source.key, "last_refresh_at"), String(Math.floor(Date.now() / 1000)));
@@ -759,9 +776,23 @@ async function countBuilds(env, sourceKey) {
 }
 
 async function sourceNeedsRefresh(env, sourceKey) {
+  if (await refreshLeaseActive(env, sourceKey)) return false;
   if ((await countBuilds(env, sourceKey)) === 0) return true;
   const lastRefresh = Number(await getMeta(env, metaKey(sourceKey, "last_refresh_at"))) || 0;
   return Date.now() / 1000 - lastRefresh >= cacheSeconds(env);
+}
+
+async function acquireRefreshLease(env, sourceKey) {
+  if (await refreshLeaseActive(env, sourceKey)) {
+    return { acquired: false };
+  }
+  await setMeta(env, metaKey(sourceKey, "refresh_started_at"), String(Math.floor(Date.now() / 1000)));
+  return { acquired: true };
+}
+
+async function refreshLeaseActive(env, sourceKey) {
+  const startedAt = Number(await getMeta(env, metaKey(sourceKey, "refresh_started_at"))) || 0;
+  return Date.now() / 1000 - startedAt < refreshLeaseSeconds(env);
 }
 
 async function ensureSchema(env) {
@@ -1271,6 +1302,11 @@ function snapshotHistorySize(url) {
 function cacheSeconds(env) {
   const value = Number(env.CACHE_SECONDS || DEFAULT_CACHE_SECONDS);
   return Math.max(10, Number.isFinite(value) ? Math.floor(value) : DEFAULT_CACHE_SECONDS);
+}
+
+function refreshLeaseSeconds(env) {
+  const value = Number(env.REFRESH_LEASE_SECONDS || Math.max(cacheSeconds(env), DEFAULT_REFRESH_LEASE_SECONDS));
+  return Math.max(5, Math.min(300, Number.isFinite(value) ? Math.floor(value) : DEFAULT_REFRESH_LEASE_SECONDS));
 }
 
 function normalizePageCap(value) {
