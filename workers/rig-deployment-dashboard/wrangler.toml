@@ -15,3 +15,8 @@ database_id = "a1ee14ef-c799-4caa-a42f-7653919f0ea3"
 
 [triggers]
 crons = ["* * * * *"]
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true

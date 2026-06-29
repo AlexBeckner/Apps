@@ -1,5 +1,4 @@
 import { requireCloudflareAccess } from "./access.js";
-import { dataspeedHashFinderHtml } from "./ui.js";
 
 const OWNER = "AppliedNeuron";
 const REPO = "core-stack";
@@ -48,8 +47,8 @@ export default {
       }
 
       const url = new URL(request.url);
-      if (url.pathname === "/") {
-        return htmlResponse(dataspeedHashFinderHtml());
+      if (isAssetRoute(url.pathname)) {
+        return env.ASSETS.fetch(request);
       }
 
       if (!env.GITHUB_TOKEN) {
@@ -313,6 +312,10 @@ function htmlResponse(html, init = {}) {
       ...(init.headers || {}),
     },
   });
+}
+
+function isAssetRoute(pathname) {
+  return pathname === "/" || pathname === "/config.js";
 }
 
 function httpError(status, message) {

@@ -75,8 +75,6 @@ export default {
         return accessError;
       }
 
-      await ensureSchema(env);
-
       const originError = validateOrigin(request, env);
       if (originError) {
         return jsonResponse(
@@ -88,9 +86,11 @@ export default {
       }
 
       const url = new URL(request.url);
-      if (request.method === "GET" && url.pathname === "/") {
-        return htmlResponse(dashboardHtml(), request, env);
+      if (request.method === "GET" && isAssetRoute(url.pathname)) {
+        return env.ASSETS.fetch(request);
       }
+
+      await ensureSchema(env);
 
       if (request.method === "GET" && url.pathname === "/api/health") {
         return jsonResponse(request, env, await handleHealth(env));
@@ -1288,6 +1288,10 @@ function chunked(values, size) {
     chunks.push(values.slice(i, i + size));
   }
   return chunks;
+}
+
+function isAssetRoute(pathname) {
+  return pathname === "/" || !pathname.startsWith("/api/");
 }
 
 function dashboardHtml() {
