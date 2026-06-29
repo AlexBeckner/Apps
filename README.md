@@ -12,11 +12,9 @@ any private GitHub or Buildkite data is returned.
 
 ## Company Access
 
-Production Worker URLs use an app-level one-time code flow. Users enter an
-`@applied.co` or `@ext.applied.co` email address, receive a code through
-Cloudflare Email Service, and get a signed session cookie after verification.
-Each Worker needs an `EMAIL` send binding, a `FROM_EMAIL` variable, and an
-`AUTH_SECRET` secret.
+Production Worker URLs use an app-level shared-password flow. Users enter the
+access password and get a signed session cookie after verification. Each Worker
+needs an `ACCESS_PASSWORD` secret and an `AUTH_SECRET` secret.
 
 Tools that read private GitHub repositories should use a hosted backend proxy or
 pre-generated static data; GitHub tokens must not be embedded in the browser app.

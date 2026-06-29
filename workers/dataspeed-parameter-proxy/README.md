@@ -31,31 +31,22 @@ Only these parameter files are allowed:
    ```sh
    npx wrangler secret put GITHUB_TOKEN
    npx wrangler secret put AUTH_SECRET
+   npx wrangler secret put ACCESS_PASSWORD
    ```
 
    `AUTH_SECRET` should be a long random string, at least 32 characters.
+   `ACCESS_PASSWORD` is the shared password for the app login page.
 
-4. Configure Cloudflare Email Service:
-
-   - In Cloudflare, go to Compute > Email Service > Email Sending.
-   - Onboard the sending domain you want to use.
-   - Set `FROM_EMAIL` on the Worker to an address on that domain, for example
-     `internal-tools@example.com`.
-   - `wrangler.toml` already includes the `EMAIL` send binding.
-
-5. Keep `ALLOWED_ORIGIN` set to the Worker-hosted URL in `wrangler.toml`.
+4. Keep `ALLOWED_ORIGIN` set to the Worker-hosted URL in `wrangler.toml`.
    Override it to `*` in local `.dev.vars` if needed.
 
-6. Deploy the Worker after confirming the public target:
+5. Deploy the Worker after confirming the public target:
 
    ```sh
    npx wrangler deploy
    ```
 
-   If `FROM_EMAIL` was set in the Cloudflare dashboard instead of
-   `wrangler.toml`, deploy with `npx wrangler deploy --keep-vars`.
-
-7. Point GitHub Pages launchers at the deployed Worker URL.
+6. Point GitHub Pages launchers at the deployed Worker URL.
 
 ## Local Development
 
@@ -64,7 +55,7 @@ Create a local `.dev.vars` file:
 ```sh
 GITHUB_TOKEN=github_pat_...
 AUTH_SECRET=local-dev-auth-secret-at-least-32-chars
-FROM_EMAIL=internal-tools@example.com
+ACCESS_PASSWORD=local-dev-access-password
 ALLOWED_ORIGIN=*
 ```
 

@@ -47,31 +47,22 @@ syncs require `ADMIN_TOKEN`; scheduled syncs run every 15 minutes.
    npx wrangler secret put GITHUB_TOKEN
    npx wrangler secret put ADMIN_TOKEN
    npx wrangler secret put AUTH_SECRET
+   npx wrangler secret put ACCESS_PASSWORD
    ```
 
    `AUTH_SECRET` should be a long random string, at least 32 characters.
+   `ACCESS_PASSWORD` is the shared password for the app login page.
 
-6. Configure Cloudflare Email Service:
-
-   - In Cloudflare, go to Compute > Email Service > Email Sending.
-   - Onboard the sending domain you want to use.
-   - Set `FROM_EMAIL` on the Worker to an address on that domain, for example
-     `internal-tools@example.com`.
-   - `wrangler.toml` already includes the `EMAIL` send binding.
-
-7. Keep `ALLOWED_ORIGIN` set to the Worker-hosted URL in `wrangler.toml`.
+6. Keep `ALLOWED_ORIGIN` set to the Worker-hosted URL in `wrangler.toml`.
    Override it to `*` in local `.dev.vars` if needed.
 
-8. Deploy after confirming the public target:
+7. Deploy after confirming the public target:
 
    ```sh
    npm run deploy
    ```
 
-   If `FROM_EMAIL` was set in the Cloudflare dashboard instead of
-   `wrangler.toml`, deploy with `npm run deploy -- --keep-vars`.
-
-9. Point GitHub Pages launchers at the deployed Worker URL.
+8. Point GitHub Pages launchers at the deployed Worker URL.
 
 ## Local Development
 
@@ -81,7 +72,7 @@ Create a local `.dev.vars` file:
 GITHUB_TOKEN=ghp_...
 ADMIN_TOKEN=local-admin-token
 AUTH_SECRET=local-dev-auth-secret-at-least-32-chars
-FROM_EMAIL=internal-tools@example.com
+ACCESS_PASSWORD=local-dev-access-password
 ALLOWED_ORIGIN=*
 GITHUB_REPO=AppliedNeuron/core-stack
 ```

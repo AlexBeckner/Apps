@@ -1,18 +1,12 @@
-const ALLOWED_EMAIL_DOMAINS = new Set(["applied.co", "ext.applied.co"]);
 const AUTH_PATH_PREFIX = "/auth/";
-const CHALLENGE_COOKIE = "company_auth_challenge";
 const SESSION_COOKIE = "company_auth_session";
-const CHALLENGE_TTL_SECONDS = 10 * 60;
 const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 export async function companyAuthResponse(request, env, appName) {
   const url = new URL(request.url);
 
-  if (url.pathname === "/auth/request-code") {
-    return handleRequestCode(request, env, appName);
-  }
-  if (url.pathname === "/auth/verify-code") {
-    return handleVerifyCode(request, env);
+  if (url.pathname === "/auth/login") {
+    return handleLogin(request, env);
   }
   if (url.pathname === "/auth/logout") {
     return handleLogout();
@@ -23,7 +17,7 @@ export async function companyAuthResponse(request, env, appName) {
   }
 
   const session = await readSignedCookie(request, env, SESSION_COOKIE);
-  if (session && session.email && session.exp > nowSeconds()) {
+  if (session && session.authenticated && session.exp > nowSeconds()) {
     return null;
   }
 
@@ -34,7 +28,7 @@ export async function companyAuthResponse(request, env, appName) {
   return jsonResponse({ error: "Authentication required." }, { status: 401 });
 }
 
-async function handleRequestCode(request, env, appName) {
+async function handleLogin(request, env) {
   if (request.method !== "POST") {
     return jsonResponse({ error: "Method not allowed" }, { status: 405 });
   }
@@ -45,79 +39,16 @@ async function handleRequestCode(request, env, appName) {
   }
 
   const body = await request.json().catch(() => ({}));
-  const email = normalizeEmail(body.email);
-  if (!email || !isAllowedEmail(email)) {
-    return jsonResponse(
-      { error: "Use an @applied.co or @ext.applied.co email address." },
-      { status: 400 }
-    );
-  }
-
-  const code = verificationCode();
-  const nonce = crypto.randomUUID();
-  const expiresAt = nowSeconds() + CHALLENGE_TTL_SECONDS;
-  const challenge = await signToken(
-    {
-      email,
-      nonce,
-      codeHash: await codeHash(email, code, nonce, env.AUTH_SECRET),
-      exp: expiresAt,
-    },
-    env
-  );
-
-  await env.EMAIL.send({
-    to: email,
-    from: env.FROM_EMAIL,
-    subject: `${appName} sign-in code`,
-    text: `Your ${appName} sign-in code is ${code}. It expires in 10 minutes.`,
-    html: `<p>Your <strong>${escapeHtml(appName)}</strong> sign-in code is <strong>${code}</strong>.</p><p>It expires in 10 minutes.</p>`,
-  });
-
-  return jsonResponse(
-    { ok: true },
-    {
-      headers: {
-        "Set-Cookie": cookie(CHALLENGE_COOKIE, challenge, CHALLENGE_TTL_SECONDS),
-      },
-    }
-  );
-}
-
-async function handleVerifyCode(request, env) {
-  if (request.method !== "POST") {
-    return jsonResponse({ error: "Method not allowed" }, { status: 405 });
-  }
-
-  const configError = validateAuthConfig(env, { skipEmail: true });
-  if (configError) {
-    return configError;
-  }
-
-  const body = await request.json().catch(() => ({}));
-  const code = String(body.code || "").trim();
-  if (!/^\d{6}$/.test(code)) {
-    return jsonResponse({ error: "Enter the 6-digit code." }, { status: 400 });
-  }
-
-  const challenge = await readSignedCookie(request, env, CHALLENGE_COOKIE);
-  if (!challenge || challenge.exp <= nowSeconds()) {
-    return jsonResponse({ error: "The code expired. Request a new one." }, { status: 400 });
-  }
-
-  const expectedHash = await codeHash(
-    challenge.email,
-    code,
-    challenge.nonce,
-    env.AUTH_SECRET
-  );
-  if (!constantTimeEqual(expectedHash, challenge.codeHash)) {
-    return jsonResponse({ error: "Invalid code." }, { status: 400 });
+  const password = String(body.password || "");
+  const passwordHash = await sha256Base64Url(password);
+  const expectedHash = await sha256Base64Url(env.ACCESS_PASSWORD);
+  if (!constantTimeEqual(passwordHash, expectedHash)) {
+    return jsonResponse({ error: "Invalid password." }, { status: 401 });
   }
 
   const session = await signToken(
     {
-      email: challenge.email,
+      authenticated: true,
       iat: nowSeconds(),
       exp: nowSeconds() + SESSION_TTL_SECONDS,
       nonce: crypto.randomUUID(),
@@ -128,10 +59,7 @@ async function handleVerifyCode(request, env) {
   return jsonResponse(
     { ok: true },
     {
-      cookies: [
-        cookie(SESSION_COOKIE, session, SESSION_TTL_SECONDS),
-        expiredCookie(CHALLENGE_COOKIE),
-      ],
+      cookies: [cookie(SESSION_COOKIE, session, SESSION_TTL_SECONDS)],
     }
   );
 }
@@ -140,43 +68,25 @@ function handleLogout() {
   return jsonResponse(
     { ok: true },
     {
-      cookies: [
-        expiredCookie(SESSION_COOKIE),
-        expiredCookie(CHALLENGE_COOKIE),
-      ],
+      cookies: [expiredCookie(SESSION_COOKIE)],
     }
   );
 }
 
-function validateAuthConfig(env, options = {}) {
+function validateAuthConfig(env) {
   if (!env.AUTH_SECRET || env.AUTH_SECRET.length < 32) {
     return jsonResponse(
       { error: "AUTH_SECRET is not configured for this Worker." },
       { status: 500 }
     );
   }
-  if (!options.skipEmail && !env.EMAIL) {
+  if (!env.ACCESS_PASSWORD) {
     return jsonResponse(
-      { error: "EMAIL binding is not configured for this Worker." },
-      { status: 500 }
-    );
-  }
-  if (!options.skipEmail && !env.FROM_EMAIL) {
-    return jsonResponse(
-      { error: "FROM_EMAIL is not configured for this Worker." },
+      { error: "ACCESS_PASSWORD is not configured for this Worker." },
       { status: 500 }
     );
   }
   return null;
-}
-
-function normalizeEmail(email) {
-  return String(email || "").trim().toLowerCase();
-}
-
-function isAllowedEmail(email) {
-  const domain = email.split("@")[1] || "";
-  return ALLOWED_EMAIL_DOMAINS.has(domain);
 }
 
 function constantTimeEqual(left, right) {
@@ -189,16 +99,6 @@ function constantTimeEqual(left, right) {
     difference |= leftValue.charCodeAt(index) ^ rightValue.charCodeAt(index);
   }
   return difference === 0;
-}
-
-function verificationCode() {
-  const bytes = new Uint32Array(1);
-  crypto.getRandomValues(bytes);
-  return String(100000 + (bytes[0] % 900000));
-}
-
-async function codeHash(email, code, nonce, secret) {
-  return sha256Base64Url(`${email}:${code}:${nonce}:${secret}`);
 }
 
 async function signToken(payload, env) {
@@ -333,23 +233,17 @@ function loginHtml(appName) {
   <body>
     <main>
       <h1>${escapeHtml(appName)}</h1>
-      <p class="muted">Sign in with an @applied.co or @ext.applied.co email address.</p>
-      <form id="email-form">
-        <label for="email">Email</label>
-        <input id="email" name="email" autocomplete="email" required>
-        <button type="submit">Send code</button>
-      </form>
-      <form id="code-form" hidden>
-        <label for="code">Verification code</label>
-        <input id="code" name="code" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" required>
+      <p class="muted">Sign in with the shared access password.</p>
+      <form id="login-form">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
         <button type="submit">Sign in</button>
       </form>
       <p id="status" class="muted" role="status"></p>
     </main>
     <script>
       const statusEl = document.querySelector("#status");
-      const emailForm = document.querySelector("#email-form");
-      const codeForm = document.querySelector("#code-form");
+      const loginForm = document.querySelector("#login-form");
       function setStatus(message, className) {
         statusEl.textContent = message;
         statusEl.className = className || "muted";
@@ -364,24 +258,11 @@ function loginHtml(appName) {
         if (!response.ok) throw new Error(data.error || "Request failed");
         return data;
       }
-      emailForm.addEventListener("submit", async (event) => {
+      loginForm.addEventListener("submit", async (event) => {
         event.preventDefault();
-        setStatus("Sending code...");
+        setStatus("Signing in...");
         try {
-          await post("/auth/request-code", { email: emailForm.email.value });
-          emailForm.hidden = true;
-          codeForm.hidden = false;
-          codeForm.code.focus();
-          setStatus("Check your email for a 6-digit code.", "ok");
-        } catch (error) {
-          setStatus(error.message, "error");
-        }
-      });
-      codeForm.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        setStatus("Checking code...");
-        try {
-          await post("/auth/verify-code", { code: codeForm.code.value });
+          await post("/auth/login", { password: loginForm.password.value });
           location.reload();
         } catch (error) {
           setStatus(error.message, "error");

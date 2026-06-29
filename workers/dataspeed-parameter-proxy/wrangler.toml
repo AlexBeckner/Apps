@@ -6,13 +6,8 @@ keep_vars = true
 [vars]
 # Same-origin Worker-hosted app. Override to "*" in local `.dev.vars` if needed.
 ALLOWED_ORIGIN = "https://dataspeed-parameter-proxy.dataspeedhashfinder.workers.dev"
-FROM_EMAIL = "alex.beckner@ext.applied.co"
 
 [assets]
 directory = "./public"
 binding = "ASSETS"
 run_worker_first = true
-
-[[send_email]]
-name = "EMAIL"
-remote = true
