@@ -122,11 +122,11 @@ export default {
       if (request.method === "GET" && url.pathname === "/api/rigs") {
         const source = resolveSource(env, url.searchParams.get("source"));
         const historySize = snapshotHistorySize(url);
-        await refreshStaleSourceInBackground(env, source, ctx);
+        scheduleStaleSourceRefresh(env, source, ctx);
         return jsonResponse(
           request,
           env,
-          await getSnapshot(env, source, { force: false, historySize })
+          await getCachedSnapshot(env, source, historySize)
         );
       }
 
@@ -262,14 +262,32 @@ async function getSnapshot(env, source, { force, historySize = HISTORY_SIZE }) {
     const refresh = await refreshSource(env, source);
     errors.push(...refresh.errors);
     rateLimitedUntil = refresh.rate_limited_until;
+    const cached = await readCachedSnapshot(env, source.key, historySize);
+    if (cached) {
+      return {
+        ...cached,
+        errors: cached.errors || errors,
+        rate_limited_until: rateLimitedUntil || cached.rate_limited_until || null,
+      };
+    }
   } else if (force && !env.BUILDKITE_API_TOKEN) {
     errors.push("Worker secret BUILDKITE_API_TOKEN is not configured.");
   }
 
+  return buildSnapshotPayload(env, source, {
+    historySize,
+    errors,
+    rateLimitedUntil,
+  });
+}
+
+async function buildSnapshotPayload(
+  env,
+  source,
+  { historySize = HISTORY_SIZE, errors = [], rateLimitedUntil = null } = {}
+) {
   const aggregate = await aggregateSnapshot(env, source.key, historySize);
-  const fetchedAt =
-    Number(await getMeta(env, metaKey(source.key, "last_refresh_at"))) ||
-    Math.floor(Date.now() / 1000);
+  const fetchedAt = Math.floor(Date.now() / 1000);
   return {
     rigs: aggregate.rigs,
     fetched_at: fetchedAt,
@@ -277,19 +295,71 @@ async function getSnapshot(env, source, { force, historySize = HISTORY_SIZE }) {
     organization_slug: source.organization_slug,
     pipeline_slug: source.pipeline_slug,
     unassigned_build_count: aggregate.unassigned_build_count,
-    errors,
+    errors: [...errors],
     rate_limited_until: rateLimitedUntil,
   };
 }
 
-async function refreshStaleSourceInBackground(env, source, ctx) {
-  const lastRefreshAt = Number(await getMeta(env, metaKey(source.key, "last_refresh_at"))) || 0;
-  const now = Math.floor(Date.now() / 1000);
-  if (now - lastRefreshAt < cacheSeconds(env)) {
-    return;
-  }
+async function getCachedSnapshot(env, source, historySize = HISTORY_SIZE) {
+  const cached = await readCachedSnapshot(env, source.key, historySize);
+  if (cached) return cached;
 
-  const refreshPromise = refreshSource(env, source).catch((error) => {
+  return {
+    rigs: [],
+    fetched_at:
+      Number(await getMeta(env, metaKey(source.key, "last_refresh_at"))) ||
+      Math.floor(Date.now() / 1000),
+    pipeline_url: pipelineUrl(source.organization_slug, source.pipeline_slug),
+    organization_slug: source.organization_slug,
+    pipeline_slug: source.pipeline_slug,
+    unassigned_build_count: 0,
+    errors: ["Snapshot cache is warming up. Data will appear after the next refresh."],
+    rate_limited_until: null,
+  };
+}
+
+async function readCachedSnapshot(env, sourceKey, historySize = HISTORY_SIZE) {
+  const raw = await getMeta(env, snapshotCacheKey(sourceKey));
+  if (!raw) return null;
+
+  try {
+    return trimSnapshotHistory(JSON.parse(raw), historySize);
+  } catch (error) {
+    console.error("rig-deployment-dashboard cached snapshot decode failed", {
+      source: sourceKey,
+      message: error.message || String(error),
+    });
+    return null;
+  }
+}
+
+async function writeCachedSnapshot(env, source, errors = [], rateLimitedUntil = null) {
+  const snapshot = await buildSnapshotPayload(env, source, {
+    historySize: HISTORY_SIZE,
+    errors,
+    rateLimitedUntil,
+  });
+  await setMeta(env, snapshotCacheKey(source.key), JSON.stringify(snapshot));
+  return snapshot;
+}
+
+function trimSnapshotHistory(snapshot, historySize = HISTORY_SIZE) {
+  const limit = Math.max(1, Math.min(HISTORY_SIZE, Number(historySize) || HISTORY_SIZE));
+  return {
+    ...snapshot,
+    rigs: Array.isArray(snapshot.rigs)
+      ? snapshot.rigs.map((rig) => ({
+          ...rig,
+          history: Array.isArray(rig.history) ? rig.history.slice(0, limit) : [],
+        }))
+      : [],
+    errors: Array.isArray(snapshot.errors) ? snapshot.errors : [],
+    rate_limited_until: snapshot.rate_limited_until || null,
+  };
+}
+
+function scheduleStaleSourceRefresh(env, source, ctx) {
+  const refreshPromise = refreshStaleSource(env, source).catch((error) => {
     console.error("rig-deployment-dashboard background refresh failed", {
       source: source.key,
       message: error.message || String(error),
@@ -299,10 +369,17 @@ async function refreshStaleSourceInBackground(env, source, ctx) {
 
   if (ctx && typeof ctx.waitUntil === "function") {
     ctx.waitUntil(refreshPromise);
+  }
+}
+
+async function refreshStaleSource(env, source) {
+  const lastRefreshAt = Number(await getMeta(env, metaKey(source.key, "last_refresh_at"))) || 0;
+  const now = Math.floor(Date.now() / 1000);
+  if (now - lastRefreshAt < cacheSeconds(env)) {
     return;
   }
 
-  await refreshPromise;
+  await refreshSource(env, source);
 }
 
 async function refreshSource(env, source) {
@@ -340,6 +417,7 @@ async function refreshSource(env, source) {
 
   await setMeta(env, metaKey(source.key, "last_refresh_at"), String(Math.floor(Date.now() / 1000)));
   await setMeta(env, metaKey(source.key, "last_refresh_errors"), JSON.stringify(errors));
+  await writeCachedSnapshot(env, source, errors, rateLimitedUntil);
   return { errors, rate_limited_until: rateLimitedUntil };
 }
 
@@ -1381,6 +1459,10 @@ function parseBoolean(value) {
 
 function metaKey(sourceKey, name) {
   return `${sourceKey}:${name}`;
+}
+
+function snapshotCacheKey(sourceKey) {
+  return metaKey(sourceKey, "snapshot_json");
 }
 
 function chunked(values, size) {

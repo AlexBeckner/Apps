@@ -17,6 +17,10 @@ database_id = "a1ee14ef-c799-4caa-a42f-7653919f0ea3"
 [triggers]
 crons = ["* * * * *"]
 
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 [assets]
 directory = "./public"
 binding = "ASSETS"
