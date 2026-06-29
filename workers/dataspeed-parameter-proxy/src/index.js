@@ -5,6 +5,7 @@ const REPO = "core-stack";
 const PARAMETER_DIRECTORY =
   "onroad/controls/dbw/dataspeed_v2/parameters";
 const MAX_REF_LENGTH = 200;
+const BRANCH_NOT_FOUND_MESSAGE = "Branch not found.";
 
 const PARAMETER_FILES = new Map([
   ["FORD_GE1 Gateway.json", "Gateway"],
@@ -104,7 +105,8 @@ async function handleParameterFile(request, env, url) {
   const metadata = await githubJson(
     contentsApiUrl(ref, fileName),
     "application/vnd.github.object+json",
-    env
+    env,
+    { notFoundMessage: BRANCH_NOT_FOUND_MESSAGE }
   );
 
   if (metadata.type !== "file" || metadata.encoding !== "base64") {
@@ -210,7 +212,7 @@ function encodedPath(path) {
   return path.split("/").map(encodeURIComponent).join("/");
 }
 
-async function githubJson(url, accept, env) {
+async function githubJson(url, accept, env, options = {}) {
   const response = await fetch(url, {
     headers: {
       Accept: accept,
@@ -221,6 +223,10 @@ async function githubJson(url, accept, env) {
   });
 
   if (!response.ok) {
+    if (response.status === 404 && options.notFoundMessage) {
+      throw httpError(404, options.notFoundMessage);
+    }
+
     const errorText = await response.text();
     let githubMessage = errorText;
     try {

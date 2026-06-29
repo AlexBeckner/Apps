@@ -284,13 +284,27 @@
         }
 
         if (!response.ok) {
-          throw new Error(
+          const error = new Error(
             data.error ||
               `${response.status} ${response.statusText}: ${responseText}`
           );
+          error.status = response.status;
+          throw error;
         }
 
         return data;
+      }
+
+      function friendlyLoadError(error) {
+        const message = error?.message || "";
+        if (
+          error?.status === 404 ||
+          /\b(no commit found|branch not found|not found)\b/i.test(message)
+        ) {
+          return "Branch not found.";
+        }
+
+        return message || "Unable to load branch.";
       }
 
       function downloadText(fileName, text) {
@@ -480,7 +494,7 @@
           if (result.status === "fulfilled") {
             column.files.set(result.value.module, result.value);
           } else {
-            column.errors.set(file.module, result.reason.message);
+            column.errors.set(file.module, friendlyLoadError(result.reason));
           }
         }
 
