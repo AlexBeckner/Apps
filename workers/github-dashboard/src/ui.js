@@ -199,6 +199,7 @@ export function dashboardHtml(env) {
   var searchRoot = document.getElementById("search-root");
   var syncRoot = document.getElementById("sync-root");
   var bannerRoot = document.getElementById("sync-banner");
+  var adminStorageKey = "githubdashboard.adminToken";
   var navLinks = [
     { href: "/", label: "Home" },
     { href: "/branches", label: "Branches" },
@@ -243,8 +244,8 @@ export function dashboardHtml(env) {
     });
   }
 
-  function postApi(path) {
-    return fetch(path, { method: "POST" }).then(function (res) {
+  function postApi(path, init) {
+    return fetch(path, { method: "POST", ...(init || {}) }).then(function (res) {
       return res.json().catch(function () { return null; }).then(function (body) {
         if (!res.ok) throw new Error((body && body.error) || "Request failed");
         return body;
@@ -440,11 +441,16 @@ export function dashboardHtml(env) {
         '<svg class="' + (running ? "spin" : "") + '" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7 7 0 0 1 14.95 7.16a.75.75 0 1 1-1.49.178A5.501 5.501 0 0 0 8 2.5ZM1.705 8.005a.75.75 0 0 1 .834.656 5.501 5.501 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.001 7.001 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834Z"/></svg>' +
         label +
       '</button>' +
+      '<button class="btn" id="admin-button" title="Set manual sync token">Admin token</button>' +
       (sync.status === "error" && sync.error ? '<button class="btn btn-danger" id="sync-error-button">Error</button>' : '') +
       (state.syncErrorOpen && sync.error ? '<div class="sync-error-popover">' + escape(sync.error) + '</div>' : '');
     document.getElementById("sync-button").addEventListener("click", function () {
       state.syncErrorOpen = false;
-      postApi("/api/sync").then(function (data) {
+      var adminToken = getAdminToken();
+      if (!adminToken) return;
+      postApi("/api/sync", {
+        headers: { "X-Dashboard-Admin-Token": adminToken }
+      }).then(function (data) {
         state.sync = data;
         renderSync();
         renderBanner();
@@ -455,6 +461,9 @@ export function dashboardHtml(env) {
         renderSync();
       });
     });
+    document.getElementById("admin-button").addEventListener("click", function () {
+      promptForAdminToken();
+    });
     var errorButton = document.getElementById("sync-error-button");
     if (errorButton) {
       errorButton.addEventListener("click", function () {
@@ -462,6 +471,24 @@ export function dashboardHtml(env) {
         renderSync();
       });
     }
+  }
+
+  function getAdminToken() {
+    var token = localStorage.getItem(adminStorageKey) || "";
+    return token || promptForAdminToken();
+  }
+
+  function promptForAdminToken() {
+    var current = localStorage.getItem(adminStorageKey) || "";
+    var value = window.prompt("Worker ADMIN_TOKEN for manual sync:", current);
+    if (value === null) return "";
+    value = value.trim();
+    if (value) {
+      localStorage.setItem(adminStorageKey, value);
+    } else {
+      localStorage.removeItem(adminStorageKey);
+    }
+    return value;
   }
 
   function renderBanner() {
