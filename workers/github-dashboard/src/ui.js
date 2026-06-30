@@ -219,7 +219,7 @@ export function dashboardHtml(env) {
   ];
   var state = {
     branch: { includeDeleted: false, sort: "last_commit_at", filter: "" },
-    branchDetail: { name: "", commitsPage: 0, commitsFilter: "", prsFromPage: 0, prsFromFilter: "", prsToPage: 0, prsToFilter: "", focusId: "" },
+    branchDetail: { name: "", commitsPage: 0, commitsFilter: "", prsFromPage: 0, prsFromFilter: "", prsToPage: 0, prsToFilter: "" },
     tag: { includeDeleted: false, sort: "tagged_at", filter: "" },
     commits: { page: 0, filter: "" },
     prs: { page: 0, state: "all", filter: "" },
@@ -231,6 +231,8 @@ export function dashboardHtml(env) {
     syncErrorOpen: false,
     adminTokenOpen: false
   };
+
+  var inputRestore = null;
 
   function escape(value) {
     return String(value == null ? "" : value)
@@ -273,6 +275,26 @@ export function dashboardHtml(env) {
       }
     });
     return search.toString();
+  }
+
+  function rememberInputSelection(event) {
+    var input = event.target;
+    inputRestore = {
+      id: input.id,
+      start: input.selectionStart,
+      end: input.selectionEnd
+    };
+  }
+
+  function restoreInputSelection(id) {
+    if (!inputRestore || inputRestore.id !== id) return;
+    var input = document.getElementById(id);
+    if (!input) return;
+    input.focus();
+    if (typeof input.setSelectionRange === "function" && inputRestore.start !== null && inputRestore.end !== null) {
+      var length = input.value.length;
+      input.setSelectionRange(Math.min(inputRestore.start, length), Math.min(inputRestore.end, length));
+    }
   }
 
   function branchHref(name) {
@@ -635,8 +657,9 @@ export function dashboardHtml(env) {
     }).join("") : empty("No PRs fetched yet."));
   }
 
-  function renderBranches() {
-    setLoading();
+  function renderBranches(opts) {
+    opts = opts || {};
+    if (!opts.keepContent) setLoading();
     api("/api/branches?" + qs({ sort: state.branch.sort, includeDeleted: state.branch.includeDeleted ? "1" : "0", limit: 500 })).then(function (data) {
       var filter = state.branch.filter.toLowerCase();
       var rows = (data.branches || []).filter(function (b) { return !filter || b.name.toLowerCase().indexOf(filter) !== -1; });
@@ -656,6 +679,7 @@ export function dashboardHtml(env) {
           })) +
         '</div>';
       bindBranchControls();
+      if (opts.restoreFocusId) restoreInputSelection(opts.restoreFocusId);
     }).catch(function (error) { setError(error.message); });
   }
 
@@ -664,14 +688,18 @@ export function dashboardHtml(env) {
     var sort = document.getElementById("branch-sort");
     var deleted = document.getElementById("branch-deleted");
     sort.value = state.branch.sort;
-    filter.addEventListener("input", function (event) { state.branch.filter = event.target.value; renderBranches(); });
+    filter.addEventListener("input", function (event) {
+      state.branch.filter = event.target.value;
+      rememberInputSelection(event);
+      renderBranches({ keepContent: true, restoreFocusId: "branch-filter" });
+    });
     sort.addEventListener("change", function (event) { state.branch.sort = event.target.value; renderBranches(); });
     deleted.addEventListener("change", function (event) { state.branch.includeDeleted = event.target.checked; renderBranches(); });
-    filter.focus();
   }
 
-  function renderTags() {
-    setLoading();
+  function renderTags(opts) {
+    opts = opts || {};
+    if (!opts.keepContent) setLoading();
     api("/api/tags?" + qs({ sort: state.tag.sort, includeDeleted: state.tag.includeDeleted ? "1" : "0", limit: 500 })).then(function (data) {
       var filter = state.tag.filter.toLowerCase();
       var rows = (data.tags || []).filter(function (t) { return !filter || t.name.toLowerCase().indexOf(filter) !== -1; });
@@ -691,6 +719,7 @@ export function dashboardHtml(env) {
           })) +
         '</div>';
       bindTagControls();
+      if (opts.restoreFocusId) restoreInputSelection(opts.restoreFocusId);
     }).catch(function (error) { setError(error.message); });
   }
 
@@ -699,14 +728,18 @@ export function dashboardHtml(env) {
     var sort = document.getElementById("tag-sort");
     var deleted = document.getElementById("tag-deleted");
     sort.value = state.tag.sort;
-    filter.addEventListener("input", function (event) { state.tag.filter = event.target.value; renderTags(); });
+    filter.addEventListener("input", function (event) {
+      state.tag.filter = event.target.value;
+      rememberInputSelection(event);
+      renderTags({ keepContent: true, restoreFocusId: "tag-filter" });
+    });
     sort.addEventListener("change", function (event) { state.tag.sort = event.target.value; renderTags(); });
     deleted.addEventListener("change", function (event) { state.tag.includeDeleted = event.target.checked; renderTags(); });
-    filter.focus();
   }
 
-  function renderCommits() {
-    setLoading();
+  function renderCommits(opts) {
+    opts = opts || {};
+    if (!opts.keepContent) setLoading();
     var pageSize = 100;
     var offset = state.commits.page * pageSize;
     api("/api/commits?" + qs({ limit: pageSize, offset: offset })).then(function (data) {
@@ -728,21 +761,26 @@ export function dashboardHtml(env) {
           pager(offset, pageSize, data.total, state.commits.page, totalPages, "commit") +
         '</div>';
       bindCommitControls(totalPages);
+      if (opts.restoreFocusId) restoreInputSelection(opts.restoreFocusId);
     }).catch(function (error) { setError(error.message); });
   }
 
   function bindCommitControls(totalPages) {
     var filter = document.getElementById("commit-filter");
-    filter.addEventListener("input", function (event) { state.commits.filter = event.target.value; renderCommits(); });
+    filter.addEventListener("input", function (event) {
+      state.commits.filter = event.target.value;
+      rememberInputSelection(event);
+      renderCommits({ keepContent: true, restoreFocusId: "commit-filter" });
+    });
     bindPager("commit", function (delta) {
       state.commits.page = Math.max(0, Math.min(totalPages - 1, state.commits.page + delta));
       renderCommits();
     });
-    filter.focus();
   }
 
-  function renderPrs() {
-    setLoading();
+  function renderPrs(opts) {
+    opts = opts || {};
+    if (!opts.keepContent) setLoading();
     var pageSize = 100;
     var offset = state.prs.page * pageSize;
     api("/api/prs?" + qs({ state: state.prs.state, limit: pageSize, offset: offset })).then(function (data) {
@@ -757,6 +795,7 @@ export function dashboardHtml(env) {
           pager(offset, pageSize, data.total, state.prs.page, totalPages, "pr") +
         '</div>';
       bindPrControls(totalPages);
+      if (opts.restoreFocusId) restoreInputSelection(opts.restoreFocusId);
     }).catch(function (error) { setError(error.message); });
   }
 
@@ -772,7 +811,11 @@ export function dashboardHtml(env) {
 
   function bindPrControls(totalPages) {
     var filter = document.getElementById("pr-filter");
-    filter.addEventListener("input", function (event) { state.prs.filter = event.target.value; renderPrs(); });
+    filter.addEventListener("input", function (event) {
+      state.prs.filter = event.target.value;
+      rememberInputSelection(event);
+      renderPrs({ keepContent: true, restoreFocusId: "pr-filter" });
+    });
     document.querySelectorAll("[data-pr-state]").forEach(function (button) {
       button.addEventListener("click", function () {
         state.prs.state = button.getAttribute("data-pr-state");
@@ -784,7 +827,6 @@ export function dashboardHtml(env) {
       state.prs.page = Math.max(0, Math.min(totalPages - 1, state.prs.page + delta));
       renderPrs();
     });
-    filter.focus();
   }
 
   function renderSearchPage() {
@@ -813,10 +855,11 @@ export function dashboardHtml(env) {
     return panel(title, '<span class="panel-link">' + rows.length + '</span>', rows.length ? rows.map(renderRow).join("") : empty("No matching " + title.toLowerCase() + "."), "search-result-panel");
   }
 
-  function renderBranchDetail(name) {
-    setLoading();
+  function renderBranchDetail(name, opts) {
+    opts = opts || {};
+    if (!opts.keepContent) setLoading();
     if (state.branchDetail.name !== name) {
-      state.branchDetail = { name: name, commitsPage: 0, commitsFilter: "", prsFromPage: 0, prsFromFilter: "", prsToPage: 0, prsToFilter: "", focusId: "" };
+      state.branchDetail = { name: name, commitsPage: 0, commitsFilter: "", prsFromPage: 0, prsFromFilter: "", prsToPage: 0, prsToFilter: "" };
     }
     var encoded = name.split("/").map(encodeURIComponent).join("/");
     var pageSize = 100;
@@ -851,7 +894,7 @@ export function dashboardHtml(env) {
             '</div>' +
           '</div>' +
         '</div>';
-      bindBranchDetailControls(name, commitsPage, prsFromPage, prsToPage, pageSize);
+      bindBranchDetailControls(name, commitsPage, prsFromPage, prsToPage, pageSize, opts.restoreFocusId);
     }).catch(function (error) { setError(error.message); });
   }
 
@@ -891,7 +934,7 @@ export function dashboardHtml(env) {
     );
   }
 
-  function bindBranchDetailControls(name, commitsPage, prsFromPage, prsToPage, pageSize) {
+  function bindBranchDetailControls(name, commitsPage, prsFromPage, prsToPage, pageSize, restoreFocusId) {
     var commitFilter = document.getElementById("branch-commit-filter");
     var prFromFilter = document.getElementById("branch-pr-from-filter");
     var prToFilter = document.getElementById("branch-pr-to-filter");
@@ -899,48 +942,39 @@ export function dashboardHtml(env) {
       commitFilter.addEventListener("input", function (event) {
         state.branchDetail.commitsFilter = event.target.value;
         state.branchDetail.commitsPage = 0;
-        state.branchDetail.focusId = "branch-commit-filter";
-        renderBranchDetail(name);
+        rememberInputSelection(event);
+        renderBranchDetail(name, { keepContent: true, restoreFocusId: "branch-commit-filter" });
       });
     }
     if (prFromFilter) {
       prFromFilter.addEventListener("input", function (event) {
         state.branchDetail.prsFromFilter = event.target.value;
         state.branchDetail.prsFromPage = 0;
-        state.branchDetail.focusId = "branch-pr-from-filter";
-        renderBranchDetail(name);
+        rememberInputSelection(event);
+        renderBranchDetail(name, { keepContent: true, restoreFocusId: "branch-pr-from-filter" });
       });
     }
     if (prToFilter) {
       prToFilter.addEventListener("input", function (event) {
         state.branchDetail.prsToFilter = event.target.value;
         state.branchDetail.prsToPage = 0;
-        state.branchDetail.focusId = "branch-pr-to-filter";
-        renderBranchDetail(name);
+        rememberInputSelection(event);
+        renderBranchDetail(name, { keepContent: true, restoreFocusId: "branch-pr-to-filter" });
       });
     }
     bindPager("branch-commit", function (delta) {
       state.branchDetail.commitsPage = Math.max(0, Math.min(Math.ceil((commitsPage.total || 0) / pageSize) - 1, state.branchDetail.commitsPage + delta));
-      state.branchDetail.focusId = "";
       renderBranchDetail(name);
     });
     bindPager("branch-pr-from", function (delta) {
       state.branchDetail.prsFromPage = Math.max(0, Math.min(Math.ceil((prsFromPage.total || 0) / pageSize) - 1, state.branchDetail.prsFromPage + delta));
-      state.branchDetail.focusId = "";
       renderBranchDetail(name);
     });
     bindPager("branch-pr-to", function (delta) {
       state.branchDetail.prsToPage = Math.max(0, Math.min(Math.ceil((prsToPage.total || 0) / pageSize) - 1, state.branchDetail.prsToPage + delta));
-      state.branchDetail.focusId = "";
       renderBranchDetail(name);
     });
-    if (state.branchDetail.focusId) {
-      var focusInput = document.getElementById(state.branchDetail.focusId);
-      if (focusInput) {
-        focusInput.focus();
-        focusInput.setSelectionRange(focusInput.value.length, focusInput.value.length);
-      }
-    }
+    if (restoreFocusId) restoreInputSelection(restoreFocusId);
   }
 
   function renderTagDetail(name) {
