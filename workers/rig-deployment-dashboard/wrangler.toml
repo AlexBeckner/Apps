@@ -14,6 +14,14 @@ binding = "DB"
 database_name = "rig-deployment-dashboard"
 database_id = "a1ee14ef-c799-4caa-a42f-7653919f0ea3"
 
+[[durable_objects.bindings]]
+name = "REFRESH_SCHEDULER"
+class_name = "RefreshScheduler"
+
+[[migrations]]
+tag = "refresh_scheduler_v1"
+new_sqlite_classes = ["RefreshScheduler"]
+
 [triggers]
 crons = ["* * * * *"]
 

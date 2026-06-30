@@ -1,3 +1,4 @@
+import { DurableObject } from "cloudflare:workers";
 import { companyAuthResponse } from "../../github-dashboard/src/company-auth.js";
 
 const BUILDKITE_API_BASE = "https://api.buildkite.com/v2";
@@ -14,6 +15,7 @@ const BACKFILL_PER_PAGE = 100;
 const DEFAULT_BACKFILL_PAGES = 50;
 const MAX_BACKFILL_PAGES = 200;
 const MAX_STALE_ACTIVE_RECHECKS = 10;
+const REFRESH_SCHEDULER_NAME = "global-refresh-scheduler";
 const AWAITING_DEPLOY = "awaiting_deploy";
 
 const PR_NUMBER_RE = /\(#(\d+)\)/g;
@@ -61,6 +63,36 @@ const IN_PROGRESS_STATES = new Set([
   "canceling",
   AWAITING_DEPLOY,
 ]);
+
+export class RefreshScheduler extends DurableObject {
+  async start() {
+    const intervalMs = refreshIntervalMs(this.env);
+    const currentAlarm = await this.ctx.storage.getAlarm();
+    if (!currentAlarm || currentAlarm > Date.now() + intervalMs * 2) {
+      await this.ctx.storage.setAlarm(Date.now() + 1000);
+    }
+    return {
+      configured: true,
+      interval_seconds: cacheSeconds(this.env),
+      alarm_at: await this.ctx.storage.getAlarm(),
+    };
+  }
+
+  async status() {
+    return {
+      configured: true,
+      interval_seconds: cacheSeconds(this.env),
+      alarm_at: await this.ctx.storage.getAlarm(),
+      last_started_at: await getMeta(this.env, schedulerMetaKey("last_started_at")),
+      last_finished_at: await getMeta(this.env, schedulerMetaKey("last_finished_at")),
+      last_error: await getMeta(this.env, schedulerMetaKey("last_error")),
+    };
+  }
+
+  async alarm() {
+    await runRefreshSchedulerAlarm(this.ctx, this.env);
+  }
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -122,7 +154,7 @@ export default {
       if (request.method === "GET" && url.pathname === "/api/rigs") {
         const source = resolveSource(env, url.searchParams.get("source"));
         const historySize = snapshotHistorySize(url);
-        scheduleStaleSourceRefresh(env, source, ctx);
+        ctx.waitUntil(ensureRefreshScheduler(env));
         return jsonResponse(
           request,
           env,
@@ -207,7 +239,7 @@ export default {
   },
 
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(refreshAllSources(env));
+    ctx.waitUntil(ensureRefreshScheduler(env, { fallbackToRefresh: true }));
   },
 };
 
@@ -231,6 +263,7 @@ async function handleHealth(env) {
     pipeline_url: primary?.pipeline_url || pipelineUrl(DEFAULT_ORG_SLUG, DEFAULT_DEPLOYMENT_PIPELINE),
     snapshot_size: snapshotSize(env),
     cache_seconds: cacheSeconds(env),
+    refresh_scheduler: await refreshSchedulerStatus(env),
     rigs_dir: null,
     db_path: "cloudflare-d1",
     db_total_builds: primary?.db_total_builds || 0,
@@ -251,6 +284,75 @@ async function refreshAllSources(env) {
   }
   if (errors.length) {
     throw new Error(errors.join("; "));
+  }
+}
+
+async function ensureRefreshScheduler(env, { fallbackToRefresh = false } = {}) {
+  const stub = refreshSchedulerStub(env);
+  if (!stub) {
+    if (fallbackToRefresh) {
+      await refreshAllSources(env);
+    }
+    return { configured: false };
+  }
+
+  try {
+    return await stub.start();
+  } catch (error) {
+    console.error("rig-deployment-dashboard refresh scheduler start failed", {
+      message: error.message || String(error),
+      stack: error.stack || null,
+    });
+    if (fallbackToRefresh) {
+      await refreshAllSources(env);
+    }
+    return { configured: true, error: error.message || String(error) };
+  }
+}
+
+async function refreshSchedulerStatus(env) {
+  const stub = refreshSchedulerStub(env);
+  if (!stub) {
+    return { configured: false, interval_seconds: cacheSeconds(env) };
+  }
+
+  try {
+    return await stub.status();
+  } catch (error) {
+    return {
+      configured: true,
+      interval_seconds: cacheSeconds(env),
+      error: error.message || String(error),
+    };
+  }
+}
+
+function refreshSchedulerStub(env) {
+  return env.REFRESH_SCHEDULER
+    ? env.REFRESH_SCHEDULER.getByName(REFRESH_SCHEDULER_NAME)
+    : null;
+}
+
+async function runRefreshSchedulerAlarm(ctx, env) {
+  try {
+    await setMeta(env, schedulerMetaKey("last_started_at"), String(Math.floor(Date.now() / 1000)));
+    await refreshAllSources(env);
+    await setMeta(env, schedulerMetaKey("last_finished_at"), String(Math.floor(Date.now() / 1000)));
+    await setMeta(env, schedulerMetaKey("last_error"), "");
+  } catch (error) {
+    console.error("rig-deployment-dashboard scheduled refresh failed", {
+      message: error.message || String(error),
+      stack: error.stack || null,
+    });
+    try {
+      await setMeta(env, schedulerMetaKey("last_error"), String(error.message || error).slice(0, 300));
+    } catch (metaError) {
+      console.error("rig-deployment-dashboard scheduler metadata write failed", {
+        message: metaError.message || String(metaError),
+      });
+    }
+  } finally {
+    await ctx.storage.setAlarm(Date.now() + refreshIntervalMs(env));
   }
 }
 
@@ -358,30 +460,6 @@ function trimSnapshotHistory(snapshot, historySize = HISTORY_SIZE) {
   };
 }
 
-function scheduleStaleSourceRefresh(env, source, ctx) {
-  const refreshPromise = refreshStaleSource(env, source).catch((error) => {
-    console.error("rig-deployment-dashboard background refresh failed", {
-      source: source.key,
-      message: error.message || String(error),
-      stack: error.stack || null,
-    });
-  });
-
-  if (ctx && typeof ctx.waitUntil === "function") {
-    ctx.waitUntil(refreshPromise);
-  }
-}
-
-async function refreshStaleSource(env, source) {
-  const lastRefreshAt = Number(await getMeta(env, metaKey(source.key, "last_refresh_at"))) || 0;
-  const now = Math.floor(Date.now() / 1000);
-  if (now - lastRefreshAt < cacheSeconds(env)) {
-    return;
-  }
-
-  await refreshSource(env, source);
-}
-
 async function refreshSource(env, source) {
   const lease = await acquireRefreshLease(env, source.key);
   if (!lease.acquired) {
@@ -393,32 +471,36 @@ async function refreshSource(env, source) {
   let builds = [];
 
   try {
-    builds = await fetchRecentBuilds(env, source);
-  } catch (error) {
-    errors.push(buildkiteErrorMessage(error));
-    rateLimitedUntil = error.rateLimitedUntil || null;
-  }
-
-  if (builds.length) {
-    const rescue = await refreshStaleActiveBuilds(env, source, builds);
-    builds = builds.concat(rescue.builds);
-    errors.push(...rescue.errors);
-    if (!rateLimitedUntil && rescue.rate_limited_until) {
-      rateLimitedUntil = rescue.rate_limited_until;
-    }
     try {
-      await saveBuildsWithSummary(env, source.key, builds);
+      builds = await fetchRecentBuilds(env, source);
     } catch (error) {
-      const message = `D1 write failed during refresh: ${error.message || error}`;
-      console.error(message);
-      errors.push(message.slice(0, 300));
+      errors.push(buildkiteErrorMessage(error));
+      rateLimitedUntil = error.rateLimitedUntil || null;
     }
-  }
 
-  await setMeta(env, metaKey(source.key, "last_refresh_at"), String(Math.floor(Date.now() / 1000)));
-  await setMeta(env, metaKey(source.key, "last_refresh_errors"), JSON.stringify(errors));
-  await writeCachedSnapshot(env, source, errors, rateLimitedUntil);
-  return { errors, rate_limited_until: rateLimitedUntil };
+    if (builds.length) {
+      const rescue = await refreshStaleActiveBuilds(env, source, builds);
+      builds = builds.concat(rescue.builds);
+      errors.push(...rescue.errors);
+      if (!rateLimitedUntil && rescue.rate_limited_until) {
+        rateLimitedUntil = rescue.rate_limited_until;
+      }
+      try {
+        await saveBuildsWithSummary(env, source.key, builds);
+      } catch (error) {
+        const message = `D1 write failed during refresh: ${error.message || error}`;
+        console.error(message);
+        errors.push(message.slice(0, 300));
+      }
+    }
+
+    await setMeta(env, metaKey(source.key, "last_refresh_at"), String(Math.floor(Date.now() / 1000)));
+    await setMeta(env, metaKey(source.key, "last_refresh_errors"), JSON.stringify(errors));
+    await writeCachedSnapshot(env, source, errors, rateLimitedUntil);
+    return { errors, rate_limited_until: rateLimitedUntil };
+  } finally {
+    await releaseRefreshLease(env, source.key, lease);
+  }
 }
 
 async function fetchRecentBuilds(env, source) {
@@ -891,13 +973,29 @@ async function acquireRefreshLease(env, sourceKey) {
   if (await refreshLeaseActive(env, sourceKey)) {
     return { acquired: false };
   }
-  await setMeta(env, metaKey(sourceKey, "refresh_started_at"), String(Math.floor(Date.now() / 1000)));
-  return { acquired: true };
+  const startedAt = String(Math.floor(Date.now() / 1000));
+  await setMeta(env, metaKey(sourceKey, "refresh_started_at"), startedAt);
+  return { acquired: true, started_at: startedAt };
 }
 
 async function refreshLeaseActive(env, sourceKey) {
   const startedAt = Number(await getMeta(env, metaKey(sourceKey, "refresh_started_at"))) || 0;
   return Date.now() / 1000 - startedAt < refreshLeaseSeconds(env);
+}
+
+async function releaseRefreshLease(env, sourceKey, lease) {
+  if (!lease?.started_at) return;
+  try {
+    const key = metaKey(sourceKey, "refresh_started_at");
+    if ((await getMeta(env, key)) === lease.started_at) {
+      await setMeta(env, key, "0");
+    }
+  } catch (error) {
+    console.error("rig-deployment-dashboard refresh lease release failed", {
+      source: sourceKey,
+      message: error.message || String(error),
+    });
+  }
 }
 
 async function acquireBuildDetailLease(env, sourceKey, buildNumber) {
@@ -1438,6 +1536,10 @@ function cacheSeconds(env) {
   return Math.max(10, Number.isFinite(value) ? Math.floor(value) : DEFAULT_CACHE_SECONDS);
 }
 
+function refreshIntervalMs(env) {
+  return cacheSeconds(env) * 1000;
+}
+
 function refreshLeaseSeconds(env) {
   const value = Number(env.REFRESH_LEASE_SECONDS || Math.max(cacheSeconds(env), DEFAULT_REFRESH_LEASE_SECONDS));
   return Math.max(5, Math.min(300, Number.isFinite(value) ? Math.floor(value) : DEFAULT_REFRESH_LEASE_SECONDS));
@@ -1463,6 +1565,10 @@ function metaKey(sourceKey, name) {
 
 function snapshotCacheKey(sourceKey) {
   return metaKey(sourceKey, "snapshot_json");
+}
+
+function schedulerMetaKey(name) {
+  return metaKey("refresh_scheduler", name);
 }
 
 function chunked(values, size) {

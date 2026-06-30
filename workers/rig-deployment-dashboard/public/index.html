@@ -362,7 +362,7 @@
             class="px-3 py-2 w-72"
           />
 
-          <span class="text-[13px] opacity-70">Auto-refreshes every 10s</span>
+          <span class="text-[13px] opacity-70">Checks cached updates every 10s</span>
 
           <button
             id="adminBtn"
@@ -524,8 +524,8 @@
         source: null,
         // Whether this client may use the write controls (Refresh / Sync)
         // and force server-side Buildkite fetches. Set from
-        // /api/client-context on load. LAN viewers stay read-only, but the
-        // normal 10s poll still lets the Worker refresh stale Buildkite data.
+        // /api/client-context on load. LAN viewers stay read-only; automatic
+        // Buildkite refreshes happen server-side on the Worker alarm.
         // Defaults to false so a LAN viewer never flashes the controls before
         // the probe resolves.
         isOperator: false,
@@ -1709,8 +1709,9 @@
         if (state.snapshotLoading) return;
 
         // Only the operator may force a server-side refresh (POST
-        // /api/refresh, which spends the Buildkite token). Automatic polling
-        // always uses the cached read path.
+        // /api/refresh, which spends the Buildkite token immediately).
+        // Automatic polling always uses the cached read path; the Worker alarm
+        // owns the 10s Buildkite refresh cadence independently of page views.
         const force = forceRefresh && state.isOperator;
         const requestId = ++state.snapshotRequestId;
         const requestedSource = state.source;
@@ -1920,8 +1921,8 @@
       // ============================================================
       // Only an unlocked admin client gets the Refresh / Sync controls and
       // the ability to force Buildkite refreshes. Everyone else gets a
-      // read-only view that still auto-updates through GET /api/rigs; the
-      // Worker refreshes stale snapshots itself. The server is the source of
+      // read-only view that still checks GET /api/rigs for cached updates.
+      // The server-side alarm refreshes snapshots. The server is the source of
       // truth for whether this client is an operator, and we fall back to a
       // hostname check if that probe can't be reached.
       function looksLikeLocalhost() {

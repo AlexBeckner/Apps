@@ -3,12 +3,12 @@
 Cloudflare Worker backend for buildkitedeploymentdashboard.
 
 The Worker keeps `BUILDKITE_API_TOKEN` server-side, stores deployment history in
-D1, refreshes snapshots on a cron trigger, and serves the dashboard UI plus JSON
-API from the same protected origin.
+D1, refreshes snapshots from a Durable Object alarm every `CACHE_SECONDS`, and
+serves the dashboard UI plus JSON API from the same protected origin.
 
-`GET /api/rigs` automatically refreshes Buildkite data when the stored snapshot
-is older than `CACHE_SECONDS` (10 seconds in `wrangler.toml`). The cron trigger
-runs every minute as a fallback when no dashboard client is open.
+Automatic Buildkite refreshes are page-independent. The cron trigger runs every
+minute only as a watchdog to arm the Durable Object alarm if needed; the
+dashboard's 10-second browser poll only reads the latest cached snapshot.
 
 ## Endpoints
 
