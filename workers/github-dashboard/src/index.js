@@ -9,8 +9,12 @@ const DEFAULT_PR_PAGES = 5;
 const DEFAULT_TAG_PAGES = 3;
 const GITHUB_PAGE_SIZE = 100;
 const MAX_SYNC_PAGES = 100;
+const DEFAULT_SEED_PAGE_BUDGET = 1000;
+const MAX_SEED_PAGE_BUDGET = 5000;
 const MAX_LIST_LIMIT = 500;
-const RUNNING_TTL_SECONDS = 2 * 60;
+const DEFAULT_RUNNING_TTL_SECONDS = 30 * 60;
+const MAX_RUNNING_TTL_SECONDS = 24 * 60 * 60;
+const SEED_PLAN_VERSION = "full-history-2026-06-30";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -647,7 +651,7 @@ async function startSync(env, ctx, trigger) {
   if (
     current.status === "running" &&
     current.startedAt &&
-    now - current.startedAt < RUNNING_TTL_SECONDS
+    now - current.startedAt < runningTtlSeconds(env)
   ) {
     return current;
   }
@@ -679,6 +683,9 @@ async function startSync(env, ctx, trigger) {
 async function runSync(env, trigger) {
   const [owner, repo] = repoParts(env);
   const now = unixNow();
+  await ensureSeedPlan(env, owner, repo);
+  const previousSyncAt = unixOrNull(await getMeta(env, "last_sync_at"));
+  const seeded = await seedComplete(env);
 
   await setSyncStatus(env, {
     phase: "repo",
@@ -697,13 +704,18 @@ async function runSync(env, trigger) {
   await upsertTags(env, tagSync.items, now, tagSync.complete);
 
   await setSyncStatus(env, { phase: "commits", message: "Syncing recent commits" });
-  const commitSync = await fetchCommits(env, owner, repo, repoMeta.default_branch);
+  const commitSync = await fetchCommits(env, owner, repo, repoMeta.default_branch, {
+    stopWhenKnown: seeded && !!previousSyncAt,
+  });
   await upsertCommits(env, commitSync.items);
   await fillBranchCommitTimes(env);
 
   await setSyncStatus(env, { phase: "prs", message: "Syncing pull requests" });
-  const prSync = await fetchPullRequests(env, owner, repo);
+  const prSync = await fetchPullRequests(env, owner, repo, {
+    updatedAfter: seeded ? previousSyncAt : null,
+  });
   await upsertPrs(env, prSync.items);
+  await setMeta(env, "last_sync_at", String(unixNow()));
 
   const historySeed = await seedHistory(env, owner, repo, repoMeta.default_branch, now, {
     branches: branchSync.complete,
@@ -784,12 +796,13 @@ async function fetchCommits(env, owner, repo, branch, opts = {}) {
     `/repos/${owner}/${repo}/commits`,
     { sha: branch },
     { pages, startPage: opts.startPage },
-    (items) => {
+    async (items) => {
+      const pageCommits = [];
       for (const item of items) {
         const commit = item?.commit;
         if (!item?.sha || !commit) continue;
         const message = commit.message || "";
-        commits.push({
+        pageCommits.push({
           sha: item.sha,
           shortSha: item.sha.slice(0, 7),
           authorName: commit.author?.name || item.author?.login || null,
@@ -801,6 +814,11 @@ async function fetchCommits(env, owner, repo, branch, opts = {}) {
           url: item.html_url || null,
         });
       }
+      commits.push(...pageCommits);
+      if (opts.stopWhenKnown && pageCommits.length > 0) {
+        return !(await allCommitsExist(env, pageCommits));
+      }
+      return true;
     }
   );
   return { items: commits, ...pageState };
@@ -815,9 +833,10 @@ async function fetchPullRequests(env, owner, repo, opts = {}) {
     { state: "all", sort: "updated", direction: "desc" },
     { pages, startPage: opts.startPage },
     (items) => {
+      const pagePrs = [];
       for (const pr of items) {
         if (!Number.isInteger(pr?.number)) continue;
-        prs.push({
+        pagePrs.push({
           number: pr.number,
           title: pr.title || "",
           state: pr.merged_at ? "merged" : pr.state || "closed",
@@ -835,6 +854,11 @@ async function fetchPullRequests(env, owner, repo, opts = {}) {
           body: pr.body || null,
         });
       }
+      prs.push(...pagePrs);
+      if (opts.updatedAfter && pagePrs.length > 0) {
+        return pagePrs.some((pr) => (pr.updatedAt || 0) > opts.updatedAfter);
+      }
+      return true;
     }
   );
   return { items: prs, ...pageState };
@@ -917,7 +941,8 @@ async function seedHistory(env, owner, repo, defaultBranch, now, freshComplete) 
 }
 
 async function seedGithubHistory(env, opts) {
-  const pages = historyPages(env, opts.freshPages);
+  const pagesPerBatch = historyPages(env, opts.freshPages);
+  const pageBudget = seedPageBudget(env);
   if (opts.freshComplete) {
     await setMeta(env, seedCompleteKey(opts.kind), "1");
     return { items: 0, complete: true, skipped: true };
@@ -926,16 +951,32 @@ async function seedGithubHistory(env, opts) {
     return { items: 0, complete: true, skipped: true };
   }
 
-  const startPage = await seedStartPage(env, opts.kind, opts.table, opts.freshPages);
-  const result = await opts.fetchPageRange(startPage, pages);
-  await setMeta(env, seedNextPageKey(opts.kind), String(result.nextPage));
-  await setMeta(env, seedCompleteKey(opts.kind), result.complete ? "1" : "0");
+  const initialStartPage = await seedStartPage(env, opts.kind, opts.table, opts.freshPages);
+  let startPage = initialStartPage;
+  let totalItems = 0;
+  let totalPages = 0;
+  let result = null;
+
+  while (totalPages < pageBudget) {
+    const pages = Math.min(pagesPerBatch, pageBudget - totalPages);
+    result = await opts.fetchPageRange(startPage, pages);
+    totalItems += result.items.length;
+    totalPages += Math.max(0, result.nextPage - startPage);
+
+    await setMeta(env, seedNextPageKey(opts.kind), String(result.nextPage));
+    await setMeta(env, seedCompleteKey(opts.kind), result.complete ? "1" : "0");
+
+    if (result.complete) break;
+    if (result.nextPage <= startPage) break;
+    startPage = result.nextPage;
+  }
 
   return {
-    items: result.items.length,
-    complete: result.complete,
-    nextPage: result.nextPage,
-    startPage,
+    items: totalItems,
+    complete: !!result?.complete,
+    nextPage: result?.nextPage ?? startPage,
+    startPage: initialStartPage,
+    pageBudget,
   };
 }
 
@@ -950,6 +991,38 @@ async function seedStartPage(env, kind, table, freshPages) {
 
 function historyPages(env, fallbackPages) {
   return syncPages(env.SYNC_HISTORY_PAGES, fallbackPages);
+}
+
+function seedPageBudget(env) {
+  return positiveInt(env.SYNC_SEED_PAGE_BUDGET, DEFAULT_SEED_PAGE_BUDGET, MAX_SEED_PAGE_BUDGET);
+}
+
+async function ensureSeedPlan(env, owner, repo) {
+  const expected = `${owner}/${repo}:${SEED_PLAN_VERSION}`;
+  if ((await getMeta(env, "seed_plan_version")) === expected) return;
+
+  const nextPages = {
+    branches: syncPages(env.SYNC_BRANCH_PAGES, DEFAULT_BRANCH_PAGES) + 1,
+    tags: syncPages(env.SYNC_TAG_PAGES, DEFAULT_TAG_PAGES) + 1,
+    commits: syncPages(env.SYNC_COMMIT_PAGES, DEFAULT_COMMIT_PAGES) + 1,
+    prs: syncPages(env.SYNC_PR_PAGES, DEFAULT_PR_PAGES) + 1,
+  };
+
+  for (const kind of Object.keys(nextPages)) {
+    await setMeta(env, seedNextPageKey(kind), String(nextPages[kind]));
+    await setMeta(env, seedCompleteKey(kind), "0");
+  }
+  await setMeta(env, "seed_plan_version", expected);
+}
+
+async function seedComplete(env) {
+  const complete = await Promise.all([
+    getMeta(env, seedCompleteKey("branches")),
+    getMeta(env, seedCompleteKey("tags")),
+    getMeta(env, seedCompleteKey("commits")),
+    getMeta(env, seedCompleteKey("prs")),
+  ]);
+  return complete.every((value) => value === "1");
 }
 
 function seedNextPageKey(kind) {
@@ -972,12 +1045,31 @@ async function eachGithubPage(env, path, query, opts, onPage) {
     if (!Array.isArray(items) || items.length === 0) {
       return { complete: true, nextPage: page };
     }
-    onPage(items, page);
+    const shouldContinue = await onPage(items, page);
     if (items.length < GITHUB_PAGE_SIZE) {
       return { complete: true, nextPage: page + 1 };
     }
+    if (shouldContinue === false) {
+      return { complete: false, nextPage: page + 1, stoppedEarly: true };
+    }
   }
   return { complete: false, nextPage: startPage + maxPages };
+}
+
+async function allCommitsExist(env, commits) {
+  if (!commits.length) return false;
+  const existing = new Set();
+  for (let i = 0; i < commits.length; i += 50) {
+    const chunk = commits.slice(i, i + 50);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const rows = await env.DB.prepare(
+      `SELECT sha FROM commits WHERE sha IN (${placeholders})`
+    )
+      .bind(...chunk.map((commit) => commit.sha))
+      .all();
+    for (const row of rows.results || []) existing.add(row.sha);
+  }
+  return commits.every((commit) => existing.has(commit.sha));
 }
 
 async function upsertBranches(env, branches, now, markMissingDeleted) {
@@ -1182,11 +1274,31 @@ async function syncStatus(env) {
     getMeta(env, "last_sync_at"),
     getMeta(env, "sync_trigger"),
   ]);
+  const normalizedStatus = status || "idle";
+  const normalizedStartedAt = unixOrNull(startedAt);
+  if (
+    normalizedStatus === "running" &&
+    normalizedStartedAt &&
+    unixNow() - normalizedStartedAt >= runningTtlSeconds(env)
+  ) {
+    const minutes = Math.round(runningTtlSeconds(env) / 60);
+    return {
+      status: "error",
+      phase: "error",
+      message: "Previous sync timed out",
+      startedAt: normalizedStartedAt,
+      finishedAt: unixOrNull(finishedAt),
+      lastSyncAt: unixOrNull(lastSyncAt),
+      error: `Previous sync was marked running for more than ${minutes} minutes. Start a new sync to resume from the saved cursors.`,
+      trigger: trigger || null,
+    };
+  }
+
   return {
-    status: status || "idle",
+    status: normalizedStatus,
     phase: phase || "idle",
     message: message || "",
-    startedAt: unixOrNull(startedAt),
+    startedAt: normalizedStartedAt,
     finishedAt: unixOrNull(finishedAt),
     lastSyncAt: unixOrNull(lastSyncAt),
     error: error || null,
@@ -1360,9 +1472,21 @@ function normalizedOffset(value) {
 }
 
 function syncPages(value, fallback) {
+  return positiveInt(value, fallback, MAX_SYNC_PAGES);
+}
+
+function runningTtlSeconds(env) {
+  return positiveInt(
+    env.SYNC_RUNNING_TTL_SECONDS,
+    DEFAULT_RUNNING_TTL_SECONDS,
+    MAX_RUNNING_TTL_SECONDS
+  );
+}
+
+function positiveInt(value, fallback, max) {
   const parsed = Number(value ?? fallback);
   if (!Number.isFinite(parsed)) return fallback;
-  return Math.max(1, Math.min(MAX_SYNC_PAGES, Math.floor(parsed)));
+  return Math.max(1, Math.min(max, Math.floor(parsed)));
 }
 
 function toUnix(value) {
