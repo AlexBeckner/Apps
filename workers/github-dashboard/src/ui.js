@@ -109,13 +109,16 @@ export function dashboardHtml(env) {
       .panel { min-height: 200px; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elevated); }
       .panel-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); padding: 8px 16px; }
       .panel-body { min-height: 0; }
+      .panel-stack { display: grid; gap: 16px; }
       .panel-link { color: var(--text-muted); font-size: 12px; }
       .empty { padding: 24px 16px; color: var(--text-subtle); font-size: 14px; text-align: center; }
+      .list-scroll { max-height: 600px; overflow: auto; }
       .list-row { display: block; border-bottom: 1px solid rgba(42, 49, 64, .6); padding: 10px 16px; }
       .list-row:last-child { border-bottom: 0; }
       .row-meta { justify-content: space-between; gap: 8px; margin-top: 3px; color: var(--text-subtle); font-size: 11px; }
       .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
       .input, .select, .filter-input { border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elevated); padding: 6px 10px; font-size: 14px; outline: none; }
+      .input-sm { max-width: 16rem; padding: 4px 8px; font-size: 12px; }
       .input:focus, .select:focus, .filter-input:focus { border-color: var(--accent); }
       .check { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elevated); padding: 6px 10px; font-size: 14px; }
       .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elevated); }
@@ -137,7 +140,8 @@ export function dashboardHtml(env) {
       .segment { border: 0; border-right: 1px solid var(--border); background: transparent; padding: 7px 12px; color: var(--text-muted); font-size: 14px; }
       .segment:last-child { border-right: 0; }
       .segment.active { background: rgba(79, 140, 255, .15); color: var(--accent); }
-      .pager { justify-content: space-between; gap: 12px; }
+      .pr-list { list-style: none; margin: 0; padding: 0; }
+      .pager { justify-content: space-between; gap: 12px; border-top: 1px solid rgba(42, 49, 64, .6); padding: 8px 16px; }
       .alert { border: 1px solid rgba(248, 81, 73, .4); border-radius: 8px; background: rgba(248, 81, 73, .1); padding: 16px; color: var(--danger); font-size: 14px; }
       .welcome { border: 1px solid rgba(79, 140, 255, .4); border-radius: 10px; background: rgba(79, 140, 255, .05); padding: 24px; }
       .warning { border: 1px solid rgba(210, 153, 34, .4); border-radius: 8px; background: rgba(210, 153, 34, .1); padding: 16px; color: var(--warning); font-size: 14px; }
@@ -215,6 +219,7 @@ export function dashboardHtml(env) {
   ];
   var state = {
     branch: { includeDeleted: false, sort: "last_commit_at", filter: "" },
+    branchDetail: { name: "", commitsPage: 0, commitsFilter: "", prsFromPage: 0, prsFromFilter: "", prsToPage: 0, prsToFilter: "", focusId: "" },
     tag: { includeDeleted: false, sort: "tagged_at", filter: "" },
     commits: { page: 0, filter: "" },
     prs: { page: 0, state: "all", filter: "" },
@@ -810,7 +815,24 @@ export function dashboardHtml(env) {
 
   function renderBranchDetail(name) {
     setLoading();
-    api("/api/branches/" + name.split("/").map(encodeURIComponent).join("/")).then(function (data) {
+    if (state.branchDetail.name !== name) {
+      state.branchDetail = { name: name, commitsPage: 0, commitsFilter: "", prsFromPage: 0, prsFromFilter: "", prsToPage: 0, prsToFilter: "", focusId: "" };
+    }
+    var encoded = name.split("/").map(encodeURIComponent).join("/");
+    var pageSize = 100;
+    var commitsOffset = state.branchDetail.commitsPage * pageSize;
+    var prsFromOffset = state.branchDetail.prsFromPage * pageSize;
+    var prsToOffset = state.branchDetail.prsToPage * pageSize;
+    Promise.all([
+      api("/api/branches/" + encoded),
+      api("/api/branch-commits/" + encoded + "?" + qs({ limit: pageSize, offset: commitsOffset, q: state.branchDetail.commitsFilter.trim() })),
+      api("/api/branch-prs/" + encoded + "?" + qs({ direction: "from", limit: pageSize, offset: prsFromOffset, q: state.branchDetail.prsFromFilter.trim() })),
+      api("/api/branch-prs/" + encoded + "?" + qs({ direction: "to", limit: pageSize, offset: prsToOffset, q: state.branchDetail.prsToFilter.trim() }))
+    ]).then(function (results) {
+      var data = results[0];
+      var commitsPage = results[1];
+      var prsFromPage = results[2];
+      var prsToPage = results[3];
       var b = data.branch;
       app.innerHTML =
         '<div class="page">' +
@@ -822,11 +844,103 @@ export function dashboardHtml(env) {
             stat("Default branch", '<span class="muted mono">' + escape(data.defaultBranch || "-") + '</span>') +
           '</div>' +
           '<div class="two-grid">' +
-            panel("Commits (" + data.totalCommits + ")", "", data.commits && data.commits.length ? data.commits.map(function (c) { return listRow("/commits/" + c.sha, '<span class="mono small muted">' + escape(c.shortSha) + '</span> ' + escape(c.summary || "(no message)")); }).join("") : empty("Only branch metadata is cached in the Worker.")) +
-            panel("Pull requests", "", '<div class="panel-body">' + (data.prsFromBranchCount || data.prsToBranchCount ? '<div class="stat-grid" style="padding:16px">' + stat("From this branch", data.prsFromBranchCount) + stat("Into this branch", data.prsToBranchCount) + '</div>' : empty("No PRs reference this branch.")) + '</div>') +
+            branchCommitsPanel(commitsPage, data.totalCommits, commitsOffset, pageSize) +
+            '<div class="panel-stack">' +
+              branchPrsPanel("PRs from this branch", "from", prsFromPage, prsFromOffset, pageSize, "No PRs were opened from this branch.") +
+              branchPrsPanel("PRs into this branch", "to", prsToPage, prsToOffset, pageSize, "No PRs targeted this branch.") +
+            '</div>' +
           '</div>' +
         '</div>';
+      bindBranchDetailControls(name, commitsPage, prsFromPage, prsToPage, pageSize);
     }).catch(function (error) { setError(error.message); });
+  }
+
+  function branchCommitsPanel(data, totalCommits, offset, pageSize) {
+    var filter = state.branchDetail.commitsFilter.trim();
+    var title = filter
+      ? "Commits (" + Number(data.total || 0).toLocaleString() + " matching - " + Number(totalCommits || 0).toLocaleString() + " total)"
+      : "Commits (" + Number(totalCommits || data.total || 0).toLocaleString() + ")";
+    var totalPages = Math.max(1, Math.ceil((data.total || 0) / pageSize));
+    var body = data.commits && data.commits.length
+      ? '<div class="list-scroll">' + data.commits.map(function (c) {
+          return listRow("/commits/" + c.sha, '<div><span class="mono small muted">' + escape(c.shortSha) + '</span> <span class="text-sm">' + escape(c.summary || "(no message)") + '</span></div><div class="row-meta"><span class="truncate">' + escape(c.authorName || "?") + '</span><span>' + relativeTime(c.committedAt) + '</span></div>');
+        }).join("") + '</div>'
+      : empty(filter ? "No commits on this branch match your filter." : "No commits found on this ref.");
+    return panel(
+      title,
+      '<input id="branch-commit-filter" class="input input-sm" placeholder="Search sha, summary, author..." value="' + attr(state.branchDetail.commitsFilter) + '">',
+      body + pager(offset, pageSize, data.total || 0, state.branchDetail.commitsPage, totalPages, "branch-commit")
+    );
+  }
+
+  function branchPrsPanel(title, direction, data, offset, pageSize, emptyText) {
+    var filterKey = direction === "from" ? "prsFromFilter" : "prsToFilter";
+    var pageKey = direction === "from" ? "prsFromPage" : "prsToPage";
+    var pagerKey = direction === "from" ? "branch-pr-from" : "branch-pr-to";
+    var inputId = direction === "from" ? "branch-pr-from-filter" : "branch-pr-to-filter";
+    var filter = state.branchDetail[filterKey].trim();
+    var totalPages = Math.max(1, Math.ceil((data.total || 0) / pageSize));
+    var heading = title + " (" + Number(data.total || 0).toLocaleString() + (filter ? " matching" : "") + ")";
+    var body = data.prs && data.prs.length
+      ? '<ul class="list-scroll pr-list">' + data.prs.map(prListItem).join("") + '</ul>'
+      : empty(filter ? "No PRs match your filter." : emptyText);
+    return panel(
+      heading,
+      '<input id="' + inputId + '" class="input input-sm" placeholder="Search PRs..." value="' + attr(state.branchDetail[filterKey]) + '">',
+      body + pager(offset, pageSize, data.total || 0, state.branchDetail[pageKey], totalPages, pagerKey)
+    );
+  }
+
+  function bindBranchDetailControls(name, commitsPage, prsFromPage, prsToPage, pageSize) {
+    var commitFilter = document.getElementById("branch-commit-filter");
+    var prFromFilter = document.getElementById("branch-pr-from-filter");
+    var prToFilter = document.getElementById("branch-pr-to-filter");
+    if (commitFilter) {
+      commitFilter.addEventListener("input", function (event) {
+        state.branchDetail.commitsFilter = event.target.value;
+        state.branchDetail.commitsPage = 0;
+        state.branchDetail.focusId = "branch-commit-filter";
+        renderBranchDetail(name);
+      });
+    }
+    if (prFromFilter) {
+      prFromFilter.addEventListener("input", function (event) {
+        state.branchDetail.prsFromFilter = event.target.value;
+        state.branchDetail.prsFromPage = 0;
+        state.branchDetail.focusId = "branch-pr-from-filter";
+        renderBranchDetail(name);
+      });
+    }
+    if (prToFilter) {
+      prToFilter.addEventListener("input", function (event) {
+        state.branchDetail.prsToFilter = event.target.value;
+        state.branchDetail.prsToPage = 0;
+        state.branchDetail.focusId = "branch-pr-to-filter";
+        renderBranchDetail(name);
+      });
+    }
+    bindPager("branch-commit", function (delta) {
+      state.branchDetail.commitsPage = Math.max(0, Math.min(Math.ceil((commitsPage.total || 0) / pageSize) - 1, state.branchDetail.commitsPage + delta));
+      state.branchDetail.focusId = "";
+      renderBranchDetail(name);
+    });
+    bindPager("branch-pr-from", function (delta) {
+      state.branchDetail.prsFromPage = Math.max(0, Math.min(Math.ceil((prsFromPage.total || 0) / pageSize) - 1, state.branchDetail.prsFromPage + delta));
+      state.branchDetail.focusId = "";
+      renderBranchDetail(name);
+    });
+    bindPager("branch-pr-to", function (delta) {
+      state.branchDetail.prsToPage = Math.max(0, Math.min(Math.ceil((prsToPage.total || 0) / pageSize) - 1, state.branchDetail.prsToPage + delta));
+      state.branchDetail.focusId = "";
+      renderBranchDetail(name);
+    });
+    if (state.branchDetail.focusId) {
+      var focusInput = document.getElementById(state.branchDetail.focusId);
+      if (focusInput) {
+        focusInput.focus();
+        focusInput.setSelectionRange(focusInput.value.length, focusInput.value.length);
+      }
+    }
   }
 
   function renderTagDetail(name) {

@@ -14,7 +14,8 @@ const MAX_SEED_PAGE_BUDGET = 5000;
 const MAX_LIST_LIMIT = 500;
 const DEFAULT_RUNNING_TTL_SECONDS = 30 * 60;
 const MAX_RUNNING_TTL_SECONDS = 24 * 60 * 60;
-const SEED_PLAN_VERSION = "full-history-2026-06-30";
+const SEED_PLAN_VERSION = "full-history-with-parents-2026-06-30";
+const SCHEMA_UPGRADE_VERSION = "commit-parents-2026-06-30";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -44,6 +45,14 @@ CREATE TABLE IF NOT EXISTS commits (
 );
 CREATE INDEX IF NOT EXISTS idx_commits_committed ON commits(committed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_commits_short ON commits(short_sha);
+CREATE TABLE IF NOT EXISTS commit_parents (
+  child_sha  TEXT NOT NULL,
+  parent_sha TEXT NOT NULL,
+  ordinal    INTEGER NOT NULL,
+  PRIMARY KEY (child_sha, parent_sha)
+);
+CREATE INDEX IF NOT EXISTS idx_commit_parents_child ON commit_parents(child_sha);
+CREATE INDEX IF NOT EXISTS idx_commit_parents_parent ON commit_parents(parent_sha);
 CREATE TABLE IF NOT EXISTS prs (
   number            INTEGER PRIMARY KEY,
   title             TEXT,
@@ -65,6 +74,8 @@ CREATE INDEX IF NOT EXISTS idx_prs_updated ON prs(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_prs_state ON prs(state);
 CREATE INDEX IF NOT EXISTS idx_prs_merge_sha ON prs(merge_commit_sha);
 CREATE INDEX IF NOT EXISTS idx_prs_head_sha ON prs(head_sha);
+CREATE INDEX IF NOT EXISTS idx_prs_head_ref ON prs(head_ref);
+CREATE INDEX IF NOT EXISTS idx_prs_base_ref ON prs(base_ref);
 CREATE TABLE IF NOT EXISTS tags (
   name           TEXT PRIMARY KEY,
   target_sha     TEXT NOT NULL,
@@ -196,8 +207,6 @@ export default {
 
 async function ensureSchema(env) {
   if (!env.DB) throw httpError(500, "D1 binding DB is not configured.");
-  if ((await getMeta(env, "schema_initialized")) === "1") return;
-
   const metaTable = await env.DB.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
   ).first();
@@ -208,7 +217,31 @@ async function ensureSchema(env) {
     );
   }
 
-  await setMeta(env, "schema_initialized", "1");
+  if ((await getMeta(env, "schema_upgrade_version")) !== SCHEMA_UPGRADE_VERSION) {
+    await ensureSchemaUpgrades(env);
+    await setMeta(env, "schema_upgrade_version", SCHEMA_UPGRADE_VERSION);
+  }
+  if ((await getMeta(env, "schema_initialized")) !== "1") {
+    await setMeta(env, "schema_initialized", "1");
+  }
+}
+
+async function ensureSchemaUpgrades(env) {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS commit_parents (
+       child_sha  TEXT NOT NULL,
+       parent_sha TEXT NOT NULL,
+       ordinal    INTEGER NOT NULL,
+       PRIMARY KEY (child_sha, parent_sha)
+     )`,
+    "CREATE INDEX IF NOT EXISTS idx_commit_parents_child ON commit_parents(child_sha)",
+    "CREATE INDEX IF NOT EXISTS idx_commit_parents_parent ON commit_parents(parent_sha)",
+    "CREATE INDEX IF NOT EXISTS idx_prs_head_ref ON prs(head_ref)",
+    "CREATE INDEX IF NOT EXISTS idx_prs_base_ref ON prs(base_ref)",
+  ];
+  for (const statement of statements) {
+    await env.DB.prepare(statement).run();
+  }
 }
 
 async function handleHealth(env) {
@@ -339,7 +372,7 @@ async function handleBranchDetail(env, name) {
     .first();
   if (!row) throw httpError(404, "Branch not found");
 
-  const commit = await getCommitRow(env, row.head_sha);
+  const commitCount = await countBranchCommits(env, row, "");
   const directionCounts = await Promise.all([
     scalar(env, "SELECT COUNT(*) AS c FROM prs WHERE head_ref = ?", name),
     scalar(env, "SELECT COUNT(*) AS c FROM prs WHERE base_ref = ?", name),
@@ -349,11 +382,10 @@ async function handleBranchDetail(env, name) {
     branch: toBranch(row),
     branchedFrom: null,
     defaultBranch: await getMeta(env, "default_branch"),
-    totalCommits: commit ? 1 : 0,
+    totalCommits: commitCount,
     walkError: null,
     prsFromBranchCount: directionCounts[0],
     prsToBranchCount: directionCounts[1],
-    commits: commit ? [toCommit(commit)] : [],
   };
 }
 
@@ -366,18 +398,130 @@ async function handleBranchCommits(env, url, name) {
   const q = (url.searchParams.get("q") || "").trim().toLowerCase();
   const offset = normalizedOffset(url.searchParams.get("offset"));
   const limit = normalizedLimit(url.searchParams.get("limit"), 100);
-  const commit = await getCommitRow(env, branch.head_sha);
-  const commits =
-    commit && matchesCommitQuery(commit, q) ? [toCommit(commit)] : [];
+  const result = await listBranchCommits(env, branch, { q, limit, offset });
 
   return {
-    total: commits.length,
+    total: result.total,
     offset,
     limit,
     q,
-    source: "sql",
+    source: result.source,
     walkError: null,
-    commits: commits.slice(offset, offset + limit),
+    commits: result.commits,
+  };
+}
+
+async function countBranchCommits(env, branch, q) {
+  const result = await listBranchCommits(env, branch, {
+    q,
+    limit: 1,
+    offset: 0,
+    countOnly: true,
+  });
+  return result.total;
+}
+
+async function listBranchCommits(env, branch, opts) {
+  const q = (opts.q || "").trim().toLowerCase();
+  const limit = normalizedLimit(opts.limit, 100);
+  const offset = normalizedOffset(opts.offset);
+  const mode = await branchCommitMode(env, branch);
+  const filter = branchCommitFilter(q);
+
+  if (mode === "dag") {
+    const reachableCte = `
+      WITH RECURSIVE reachable(sha) AS (
+        SELECT ?
+        UNION
+        SELECT cp.parent_sha
+        FROM commit_parents cp
+        JOIN reachable r ON cp.child_sha = r.sha
+      )`;
+    const total = await scalar(
+      env,
+      `${reachableCte}
+       SELECT COUNT(*) AS c
+       FROM commits c
+       JOIN reachable r ON c.sha = r.sha
+       ${filter.where}`,
+      branch.head_sha,
+      ...filter.bindings
+    );
+    if (opts.countOnly) return { total, source: "sql", commits: [] };
+    const rows = await env.DB.prepare(
+      `${reachableCte}
+       SELECT c.*
+       FROM commits c
+       JOIN reachable r ON c.sha = r.sha
+       ${filter.where}
+       ORDER BY c.committed_at DESC
+       LIMIT ? OFFSET ?`
+    )
+      .bind(branch.head_sha, ...filter.bindings, limit, offset)
+      .all();
+    return {
+      total,
+      source: "sql",
+      commits: (rows.results || []).map(toCommit),
+    };
+  }
+
+  if (mode === "default") {
+    const total = await scalar(
+      env,
+      `SELECT COUNT(*) AS c FROM commits c ${filter.where}`,
+      ...filter.bindings
+    );
+    if (opts.countOnly) return { total, source: "sql", commits: [] };
+    const rows = await env.DB.prepare(
+      `SELECT c.*
+       FROM commits c
+       ${filter.where}
+       ORDER BY c.committed_at DESC
+       LIMIT ? OFFSET ?`
+    )
+      .bind(...filter.bindings, limit, offset)
+      .all();
+    return {
+      total,
+      source: "sql",
+      commits: (rows.results || []).map(toCommit),
+    };
+  }
+
+  const commit = await getCommitRow(env, branch.head_sha);
+  const commits =
+    commit && matchesCommitQuery(commit, q) ? [toCommit(commit)] : [];
+  return {
+    total: commits.length,
+    source: "sql",
+    commits: opts.countOnly ? [] : commits.slice(offset, offset + limit),
+  };
+}
+
+async function branchCommitMode(env, branch) {
+  const parentEdges = await scalar(
+    env,
+    "SELECT COUNT(*) AS c FROM commit_parents WHERE child_sha = ?",
+    branch.head_sha
+  );
+  if (parentEdges > 0) return "dag";
+
+  const defaultBranch = await getMeta(env, "default_branch");
+  if (defaultBranch && branch.name === defaultBranch) return "default";
+  return "head";
+}
+
+function branchCommitFilter(q) {
+  if (!q) return { where: "", bindings: [] };
+  const like = likeParam(q);
+  return {
+    where:
+      `WHERE LOWER(c.sha) LIKE ? ESCAPE '\\'
+         OR LOWER(c.short_sha) LIKE ? ESCAPE '\\'
+         OR LOWER(COALESCE(c.summary, '')) LIKE ? ESCAPE '\\'
+         OR LOWER(COALESCE(c.author_name, '')) LIKE ? ESCAPE '\\'`,
+    bindings: [like, like, like, like],
   };
 }
 
@@ -391,10 +535,18 @@ async function handleBranchPrs(env, url, name) {
   let filterSql = "";
 
   if (q) {
-    const like = likeParam(q);
+    const like = likeParam(q.toLowerCase());
+    const numericLike = likeParam(q.replace(/^#/, ""));
     filterSql =
-      " AND (title LIKE ? ESCAPE '\\' OR author LIKE ? ESCAPE '\\' OR CAST(number AS TEXT) LIKE ? ESCAPE '\\')";
-    bindings.push(like, like, like);
+      ` AND (
+          CAST(number AS TEXT) LIKE ? ESCAPE '\\'
+          OR LOWER(COALESCE(title, '')) LIKE ? ESCAPE '\\'
+          OR LOWER(COALESCE(author, '')) LIKE ? ESCAPE '\\'
+          OR LOWER(COALESCE(head_ref, '')) LIKE ? ESCAPE '\\'
+          OR LOWER(COALESCE(base_ref, '')) LIKE ? ESCAPE '\\'
+          OR LOWER(COALESCE(state, '')) LIKE ? ESCAPE '\\'
+        )`;
+    bindings.push(numericLike, like, like, like, like, like);
   }
 
   const total = await scalar(
@@ -812,6 +964,11 @@ async function fetchCommits(env, owner, repo, branch, opts = {}) {
           summary: message.split("\n")[0] || null,
           message,
           url: item.html_url || null,
+          parents: Array.isArray(item.parents)
+            ? item.parents
+                .map((parent) => parent?.sha)
+                .filter(Boolean)
+            : [],
         });
       }
       commits.push(...pageCommits);
@@ -1143,6 +1300,21 @@ async function upsertCommits(env, commits) {
       )
     )
   );
+  const parentStatements = [];
+  for (const commit of commits) {
+    const parents = Array.isArray(commit.parents) ? commit.parents : [];
+    for (let i = 0; i < parents.length; i++) {
+      parentStatements.push(
+        env.DB.prepare(
+          `INSERT INTO commit_parents (child_sha, parent_sha, ordinal)
+           VALUES (?, ?, ?)
+           ON CONFLICT(child_sha, parent_sha) DO UPDATE SET
+             ordinal = excluded.ordinal`
+        ).bind(commit.sha, parents[i], i)
+      );
+    }
+  }
+  await chunkedBatch(env, parentStatements);
 }
 
 async function fillBranchCommitTimes(env) {
