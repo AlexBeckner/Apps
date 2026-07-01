@@ -197,34 +197,50 @@ Files:
 - `.github/workflows/sync-commits.yml` - runs hourly (and on demand). It keeps a
   cached, blobless (`--filter=blob:none`) bare clone of `refs/heads/*` (all
   commits + all trees, no file blobs) and runs `git log --all` to list every
-  commit with its author, dates, subject, and parent SHAs. Blobless (not
-  treeless) is required so `git log` never has to lazily fetch a tree mid-walk -
-  a treeless clone would, and that fetch fails because credentials aren't
-  persisted on the cached repo.
+  commit with its author, dates, and subject. Blobless (not treeless) is required
+  so `git log` never has to lazily fetch a tree mid-walk - a treeless clone would,
+  and that fetch fails because credentials aren't persisted on the cached repo.
 - `workers/github-dashboard/scripts/ingest-commits.mjs` - streams that output and
-  upserts it into the `commits` / `commit_parents` tables in batches. It stores
-  **metadata + subject only** (no message body, to keep D1 lean) and uses
-  `INSERT ... ON CONFLICT DO NOTHING` so it never overwrites the richer rows the
-  Worker writes for default-branch commits. It writes `default_commit_count` and
-  `commit_total_count` to `meta`, and advances a `commit_git_synced_at` watermark
-  so each run only enumerates commits since the last one (the first run, or
-  `FULL=1` / the workflow's **full** input, ingests the entire history). Run with
+  upserts it into the `commits` table in batches. It stores **metadata + subject
+  only** (no message body, to keep D1 lean) and uses `INSERT ... ON CONFLICT DO
+  NOTHING` so it never overwrites the richer rows the Worker writes for
+  default-branch commits. It writes `default_commit_count` and `commit_total_count`
+  to `meta`, and advances a `commit_git_synced_at` watermark so each run only
+  enumerates commits since the last one (the first run, or `FULL=1` / the
+  workflow's **full** input, ingests the entire history). Run with
   `DRY_RUN=1 REPO_DIR=<path-to-a-clone> GITHUB_REPO=owner/name` to preview the SQL
   without touching D1.
 
 Required Actions secrets are the same as the branch sync (`CORE_STACK_TOKEN`,
 `CLOUDFLARE_API_TOKEN`); the account id and D1 id are inlined in the workflow.
 
+### Storage model (fitting D1's 500 MB free-plan cap)
+
+A full monorepo (hundreds of thousands of commits, tens of thousands of branches
++ PRs) does not fit in the 500 MB free-plan database if we store a commit parent
+DAG and full PR bodies. So the schema is deliberately lean:
+
+- **No commit parent DAG.** The old `commit_parents` table (~100 MB with indexes)
+  is dropped. Instead, commits carry an `on_default` flag: the Worker sets it for
+  every default-branch commit it syncs, and the git ingest leaves it 0 for
+  off-branch commits.
+- **PR bodies are not stored in bulk** (they were ~90 MB). `upsertPrs` writes
+  `NULL` for `body`; the body is fetched from GitHub and cached the first time a
+  PR is opened.
+
 How it surfaces in the dashboard:
 
-- **Branch pages** walk the commit DAG (`commit_parents`) from the branch head,
-  so they now show the branch's full history and an accurate commit count.
-- **Search** matches commits on any branch.
-- The **Commits tab** and the summary `commitCount` stay scoped to the default
-  branch (they walk the default head's ancestry); the summary also exposes
-  `allBranchCommitCount` (every commit across all branches).
-- **Commit detail** for an off-branch commit lazily fetches its full message from
-  GitHub the first time it is opened and caches it back into D1.
+- The **Commits tab** and the summary `commitCount` are scoped to the default
+  branch via `WHERE on_default = 1` (no DAG walk); the summary also exposes
+  `allBranchCommitCount` (`commit_total_count`, every commit across all branches).
+- **Branch pages**: the default branch is served from D1 (`on_default`); every
+  other branch fetches its commit list live from the GitHub API (one request for
+  the exact count via the `Link` header, one or two for the visible page).
+- **Search** matches commit metadata on any branch (all are in the `commits`
+  table). Per-branch search on non-default branches is best-effort over the
+  fetched page, since GitHub's commits API has no text search.
+- **Commit detail** for an off-branch commit and **PR detail** bodies are lazily
+  fetched from GitHub on first view and cached back into D1.
 
 No Worker env changes are required: the Worker keeps syncing default-branch
 commits for near-real-time freshness, and the Action fills in the rest.

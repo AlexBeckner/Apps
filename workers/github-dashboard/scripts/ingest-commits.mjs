@@ -13,8 +13,12 @@
 //   - Metadata only: sha, short sha, author, dates, subject, url. The full commit
 //     MESSAGE body is intentionally NOT stored here (keeps D1 lean); the Worker
 //     lazily fetches + caches the body the first time a commit detail is viewed.
+//   - No parent/DAG edges: the commit_parents table was dropped to fit D1's 500 MB
+//     free-plan cap. off-branch commits are inserted with on_default = 0 (the
+//     Worker owns the on_default flag for the default branch); branch pages fetch
+//     their commit lists live from GitHub instead of walking a stored DAG.
 //   - INSERT ... ON CONFLICT DO NOTHING: never clobber the richer rows the Worker
-//     writes for default-branch commits (which include the full message).
+//     writes for default-branch commits (which include the full message + on_default).
 //   - Incremental: a `commit_git_synced_at` watermark in D1 limits each run to
 //     commits since the last run (with an overlap window). The first run (no
 //     watermark, or FULL=1) ingests the entire history.
@@ -34,7 +38,6 @@ import { spawn, spawnSync } from "node:child_process";
 import readline from "node:readline";
 
 const COMMIT_BATCH = 200;
-const PARENT_BATCH = 400;
 const US = "\x1f"; // unit separator between git log fields
 const SHA_RE = /^[0-9a-f]{7,64}$/i;
 const DRY_RUN = /^(1|true|yes)$/i.test(process.env.DRY_RUN || "");
@@ -121,13 +124,12 @@ function gitCount(ref) {
 
 function parseLine(line) {
   const parts = line.split(US);
-  if (parts.length < 8) return null;
-  const [sha, short, an, ae, at, ct, parentField] = parts;
-  const subject = parts.slice(7).join(US);
+  if (parts.length < 7) return null;
+  const [sha, short, an, ae, at, ct] = parts;
+  const subject = parts.slice(6).join(US);
   if (!SHA_RE.test(sha)) return null;
   const authoredAt = Number.parseInt(at, 10);
   const committedAt = Number.parseInt(ct, 10);
-  const parents = parentField ? parentField.split(" ").filter((p) => SHA_RE.test(p)) : [];
   return {
     sha,
     short: short || sha.slice(0, 7),
@@ -136,7 +138,6 @@ function parseLine(line) {
     authoredAt: Number.isFinite(authoredAt) ? authoredAt : null,
     committedAt: Number.isFinite(committedAt) ? committedAt : null,
     subject: subject || "",
-    parents,
   };
 }
 
@@ -150,24 +151,12 @@ async function flush(batch) {
         `${nullableStr(c.subject)}, NULL, ${sqlStr(COMMIT_URL_BASE + c.sha)})`
     )
     .join(",");
+  // on_default is left at its column default (0); the Worker owns that flag for
+  // the default branch. message stays NULL (lazy-fetched on first view).
   await d1(
     `INSERT INTO commits (sha, short_sha, author_name, author_email, authored_at, committed_at, summary, message, url) ` +
       `VALUES ${values} ON CONFLICT(sha) DO NOTHING;`
   );
-
-  const edges = [];
-  for (const c of batch) {
-    for (let i = 0; i < c.parents.length; i++) {
-      edges.push(`(${sqlStr(c.sha)}, ${sqlStr(c.parents[i])}, ${i})`);
-    }
-  }
-  for (let i = 0; i < edges.length; i += PARENT_BATCH) {
-    const chunk = edges.slice(i, i + PARENT_BATCH).join(",");
-    await d1(
-      `INSERT INTO commit_parents (child_sha, parent_sha, ordinal) ` +
-        `VALUES ${chunk} ON CONFLICT(child_sha, parent_sha) DO NOTHING;`
-    );
-  }
 }
 
 async function setMeta(key, value) {
@@ -200,7 +189,7 @@ async function main() {
   const logArgs = ["-C", REPO_DIR, "log", "--all", "--no-color"];
   if (sinceArg) logArgs.push(`--since=${sinceArg}`);
   logArgs.push(
-    "--pretty=tformat:%H%x1f%h%x1f%an%x1f%ae%x1f%at%x1f%ct%x1f%P%x1f%s"
+    "--pretty=tformat:%H%x1f%h%x1f%an%x1f%ae%x1f%at%x1f%ct%x1f%s"
   );
 
   console.log(

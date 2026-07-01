@@ -37,7 +37,7 @@ const DEFAULT_BRANCH_SWEEP_PAGES = 12;
 const MAX_BRANCH_SWEEP_PAGES = 100;
 const BRANCH_GRAPHQL_PAGE_SIZE = 100;
 const SEED_PLAN_VERSION = "full-history-with-parents-2026-06-30";
-const SCHEMA_UPGRADE_VERSION = "branch-last-seen-2026-07-01";
+const SCHEMA_UPGRADE_VERSION = "commits-on-default-2026-07-01";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -65,18 +65,12 @@ CREATE TABLE IF NOT EXISTS commits (
   committed_at  INTEGER,
   summary       TEXT,
   message       TEXT,
-  url           TEXT
+  url           TEXT,
+  on_default    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_commits_committed ON commits(committed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_commits_short ON commits(short_sha);
-CREATE TABLE IF NOT EXISTS commit_parents (
-  child_sha  TEXT NOT NULL,
-  parent_sha TEXT NOT NULL,
-  ordinal    INTEGER NOT NULL,
-  PRIMARY KEY (child_sha, parent_sha)
-);
-CREATE INDEX IF NOT EXISTS idx_commit_parents_child ON commit_parents(child_sha);
-CREATE INDEX IF NOT EXISTS idx_commit_parents_parent ON commit_parents(parent_sha);
+CREATE INDEX IF NOT EXISTS idx_commits_default ON commits(committed_at DESC) WHERE on_default = 1;
 CREATE TABLE IF NOT EXISTS prs (
   number            INTEGER PRIMARY KEY,
   title             TEXT,
@@ -252,15 +246,12 @@ async function ensureSchema(env) {
 
 async function ensureSchemaUpgrades(env) {
   await ensureColumn(env, "branches", "last_seen_at", "INTEGER");
+  // on_default marks commits reachable from the default branch. It replaces the
+  // old commit_parents DAG (dropped to fit D1's 500 MB free-plan cap): the global
+  // Commits tab / summary filter on it instead of walking parent edges.
+  await ensureColumn(env, "commits", "on_default", "INTEGER NOT NULL DEFAULT 0");
   const statements = [
-    `CREATE TABLE IF NOT EXISTS commit_parents (
-       child_sha  TEXT NOT NULL,
-       parent_sha TEXT NOT NULL,
-       ordinal    INTEGER NOT NULL,
-       PRIMARY KEY (child_sha, parent_sha)
-     )`,
-    "CREATE INDEX IF NOT EXISTS idx_commit_parents_child ON commit_parents(child_sha)",
-    "CREATE INDEX IF NOT EXISTS idx_commit_parents_parent ON commit_parents(parent_sha)",
+    "CREATE INDEX IF NOT EXISTS idx_commits_default ON commits(committed_at DESC) WHERE on_default = 1",
     "CREATE INDEX IF NOT EXISTS idx_prs_head_ref ON prs(head_ref)",
     "CREATE INDEX IF NOT EXISTS idx_prs_base_ref ON prs(base_ref)",
     "CREATE INDEX IF NOT EXISTS idx_branches_last_seen ON branches(last_seen_at)",
@@ -450,7 +441,7 @@ async function handleBranchCommits(env, url, name) {
     limit,
     q,
     source: result.source,
-    walkError: null,
+    walkError: result.error || null,
     commits: result.commits,
   };
 }
@@ -469,103 +460,128 @@ async function listBranchCommits(env, branch, opts) {
   const q = (opts.q || "").trim().toLowerCase();
   const limit = normalizedLimit(opts.limit, 100);
   const offset = normalizedOffset(opts.offset);
-  const mode = await branchCommitMode(env, branch);
-  const filter = branchCommitFilter(q);
-
-  if (mode === "dag") {
-    const reachableCte = `
-      WITH RECURSIVE reachable(sha) AS (
-        SELECT ?
-        UNION
-        SELECT cp.parent_sha
-        FROM commit_parents cp
-        JOIN reachable r ON cp.child_sha = r.sha
-      )`;
-    const total = await scalar(
-      env,
-      `${reachableCte}
-       SELECT COUNT(*) AS c
-       FROM commits c
-       JOIN reachable r ON c.sha = r.sha
-       ${filter.where}`,
-      branch.head_sha,
-      ...filter.bindings
-    );
-    if (opts.countOnly) return { total, source: "sql", commits: [] };
-    const rows = await env.DB.prepare(
-      `${reachableCte}
-       SELECT c.*
-       FROM commits c
-       JOIN reachable r ON c.sha = r.sha
-       ${filter.where}
-       ORDER BY c.committed_at DESC
-       LIMIT ? OFFSET ?`
-    )
-      .bind(branch.head_sha, ...filter.bindings, limit, offset)
-      .all();
-    return {
-      total,
-      source: "sql",
-      commits: (rows.results || []).map(toCommit),
-    };
-  }
-
-  if (mode === "default") {
-    const total = await scalar(
-      env,
-      `SELECT COUNT(*) AS c FROM commits c ${filter.where}`,
-      ...filter.bindings
-    );
-    if (opts.countOnly) return { total, source: "sql", commits: [] };
-    const rows = await env.DB.prepare(
-      `SELECT c.*
-       FROM commits c
-       ${filter.where}
-       ORDER BY c.committed_at DESC
-       LIMIT ? OFFSET ?`
-    )
-      .bind(...filter.bindings, limit, offset)
-      .all();
-    return {
-      total,
-      source: "sql",
-      commits: (rows.results || []).map(toCommit),
-    };
-  }
-
-  const commit = await getCommitRow(env, branch.head_sha);
-  const commits =
-    commit && matchesCommitQuery(commit, q) ? [toCommit(commit)] : [];
-  return {
-    total: commits.length,
-    source: "sql",
-    commits: opts.countOnly ? [] : commits.slice(offset, offset + limit),
-  };
-}
-
-async function branchCommitMode(env, branch) {
-  const parentEdges = await scalar(
-    env,
-    "SELECT COUNT(*) AS c FROM commit_parents WHERE child_sha = ?",
-    branch.head_sha
-  );
-  if (parentEdges > 0) return "dag";
-
   const defaultBranch = await getMeta(env, "default_branch");
-  if (defaultBranch && branch.name === defaultBranch) return "default";
-  return "head";
+
+  // The default branch's full history lives in D1 (on_default = 1). Every other
+  // branch is fetched live from GitHub: D1 stores off-branch commit metadata but
+  // no branch-membership mapping (the commit_parents DAG that used to answer
+  // "which commits are on this branch" was dropped to fit the 500 MB free cap).
+  if (defaultBranch && branch.name === defaultBranch) {
+    const like = q ? likeParam(q) : null;
+    const cond = q
+      ? `on_default = 1 AND (LOWER(sha) LIKE ? ESCAPE '\\'
+           OR LOWER(short_sha) LIKE ? ESCAPE '\\'
+           OR LOWER(COALESCE(summary, '')) LIKE ? ESCAPE '\\'
+           OR LOWER(COALESCE(author_name, '')) LIKE ? ESCAPE '\\')`
+      : "on_default = 1";
+    const binds = q ? [like, like, like, like] : [];
+    const total = await scalar(
+      env,
+      `SELECT COUNT(*) AS c FROM commits WHERE ${cond}`,
+      ...binds
+    );
+    if (opts.countOnly) return { total, source: "sql", commits: [] };
+    const rows = await env.DB.prepare(
+      `SELECT * FROM commits WHERE ${cond} ORDER BY committed_at DESC LIMIT ? OFFSET ?`
+    )
+      .bind(...binds, limit, offset)
+      .all();
+    return { total, source: "sql", commits: (rows.results || []).map(toCommit) };
+  }
+
+  return await listBranchCommitsFromGitHub(env, branch.name, {
+    q,
+    limit,
+    offset,
+    countOnly: opts.countOnly,
+  });
 }
 
-function branchCommitFilter(q) {
-  if (!q) return { where: "", bindings: [] };
-  const like = likeParam(q);
+// Off-branch commit listings come straight from GitHub. One request yields the
+// exact total (via the Link header) and one or two more cover the requested
+// window. Human branch browsing is low-volume, so this stays well within the
+// authenticated 5k req/hour budget.
+async function listBranchCommitsFromGitHub(env, branchName, opts) {
+  const q = (opts.q || "").trim().toLowerCase();
+  const limit = normalizedLimit(opts.limit, 100);
+  const offset = normalizedOffset(opts.offset);
+  const [owner, repo] = repoParts(env);
+
+  let total = 0;
+  try {
+    total = await githubRefCommitCount(env, owner, repo, branchName);
+  } catch {
+    total = 0;
+  }
+  if (opts.countOnly) return { total, source: "github", commits: [] };
+
+  const commits = [];
+  const within = offset % GITHUB_PAGE_SIZE;
+  try {
+    const startPage = Math.floor(offset / GITHUB_PAGE_SIZE) + 1;
+    const pagesNeeded = Math.ceil((within + limit) / GITHUB_PAGE_SIZE);
+    for (let i = 0; i < pagesNeeded; i++) {
+      const items = await githubJson(env, `/repos/${owner}/${repo}/commits`, {
+        sha: branchName,
+        per_page: String(GITHUB_PAGE_SIZE),
+        page: String(startPage + i),
+      });
+      if (!Array.isArray(items) || items.length === 0) break;
+      for (const item of items) {
+        const row = githubCommitToRow(item);
+        if (row) commits.push(row);
+      }
+      if (items.length < GITHUB_PAGE_SIZE) break;
+    }
+    let windowed = commits.slice(within, within + limit);
+    // GitHub's commits API has no text search, so per-branch q is a best-effort
+    // filter over the fetched window (the global Search tab covers all commits).
+    if (q) windowed = windowed.filter((row) => matchesCommitQuery(row, q));
+    return { total, source: "github", commits: windowed.map(toCommit) };
+  } catch (error) {
+    return { total, source: "github", commits: [], error: error.message };
+  }
+}
+
+// Total commits reachable from a ref via the commits API Link header
+// (per_page=1 => the "last" page number equals the commit count).
+async function githubRefCommitCount(env, owner, repo, ref) {
+  const url = new URL(`${GITHUB_API}/repos/${owner}/${repo}/commits`);
+  url.searchParams.set("sha", ref);
+  url.searchParams.set("per_page", "1");
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+      "User-Agent": "github-dashboard-worker",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  if (!response.ok) {
+    throw httpError(response.status, `${response.status} ${response.statusText}`);
+  }
+  const link = response.headers.get("link") || "";
+  const match = link.match(/[?&]page=(\d+)>;\s*rel="last"/);
+  if (match) return Number.parseInt(match[1], 10);
+  const items = await response.json();
+  return Array.isArray(items) ? items.length : 0;
+}
+
+// Shape a GitHub commits-API item into the row form our D1 mappers expect.
+function githubCommitToRow(item) {
+  const commit = item?.commit;
+  if (!item?.sha || !commit) return null;
+  const message = commit.message || "";
   return {
-    where:
-      `WHERE LOWER(c.sha) LIKE ? ESCAPE '\\'
-         OR LOWER(c.short_sha) LIKE ? ESCAPE '\\'
-         OR LOWER(COALESCE(c.summary, '')) LIKE ? ESCAPE '\\'
-         OR LOWER(COALESCE(c.author_name, '')) LIKE ? ESCAPE '\\'`,
-    bindings: [like, like, like, like],
+    sha: item.sha,
+    short_sha: item.sha.slice(0, 7),
+    author_name: commit.author?.name || item.author?.login || null,
+    author_email: commit.author?.email || null,
+    authored_at: toUnix(commit.author?.date),
+    committed_at: toUnix(commit.committer?.date || commit.author?.date),
+    summary: message.split("\n")[0] || null,
+    message,
+    url: item.html_url || null,
   };
 }
 
@@ -711,6 +727,19 @@ async function handlePrDetail(env, number) {
     .first();
   if (!row) throw httpError(404, "PR not found");
 
+  // PR bodies are not stored in bulk (they dominated D1's size). Fetch + cache the
+  // body the first time a PR is opened; storing an empty string keeps us from
+  // re-fetching description-less PRs.
+  if (row.body == null) {
+    const body = await fetchPrBodyFromGitHub(env, number);
+    if (body != null) {
+      await env.DB.prepare("UPDATE prs SET body = ? WHERE number = ?")
+        .bind(body, number)
+        .run();
+      row.body = body;
+    }
+  }
+
   const shas = [...new Set([row.head_sha, row.merge_commit_sha].filter(Boolean))];
   const commits = [];
   for (const sha of shas) {
@@ -821,75 +850,29 @@ async function listBranches(env, opts) {
   return (rows.results || []).map(toBranch);
 }
 
-async function defaultHeadSha(env) {
-  // Prefer the tip recorded by the Worker's own commit sync (refreshed every run)
-  // so the Commits tab tracks the latest default-branch commits even when the
-  // external branch sync (which also updates branches.head_sha) lags behind.
-  const metaHead = await getMeta(env, "default_head_sha");
-  if (metaHead) return metaHead;
-  let row = await env.DB.prepare(
-    "SELECT head_sha FROM branches WHERE is_default = 1 AND deleted_at IS NULL LIMIT 1"
-  ).first();
-  if (!row) {
-    const def = await getMeta(env, "default_branch");
-    if (def) {
-      row = await env.DB.prepare("SELECT head_sha FROM branches WHERE name = ? LIMIT 1")
-        .bind(def)
-        .first();
-    }
-  }
-  return row?.head_sha || null;
-}
-
 // Count of commits on the default branch. The git-based commit ingest
 // (.github/workflows/sync-commits.yml) writes an authoritative `default_commit_count`
-// (git rev-list --count <default>) each run; fall back to walking the DAG when the
-// meta value is not yet present.
+// (git rev-list --count <default>) each run; fall back to the on_default flag,
+// which the Worker's own commit sync keeps current for the newest history.
 async function countDefaultBranchCommits(env) {
   const meta = await getMeta(env, "default_commit_count");
   const cached = meta ? Number.parseInt(meta, 10) : NaN;
   if (Number.isFinite(cached)) return cached;
-  const head = await defaultHeadSha(env);
-  if (!head) return await scalar(env, "SELECT COUNT(*) AS c FROM commits");
-  return await scalar(
-    env,
-    `WITH RECURSIVE reachable(sha) AS (
-       SELECT ?
-       UNION
-       SELECT cp.parent_sha FROM commit_parents cp JOIN reachable r ON cp.child_sha = r.sha
-     )
-     SELECT COUNT(*) AS c FROM commits c JOIN reachable r ON c.sha = r.sha`,
-    head
-  );
+  return await scalar(env, "SELECT COUNT(*) AS c FROM commits WHERE on_default = 1");
 }
 
 // The "Commits" tab mirrors GitHub: it shows the default branch's history, not a
-// flat union of every branch. Now that D1 holds commits from ALL branches (so
-// branch pages and search can surface them), the global list must walk the
-// default branch's ancestry rather than dumping the whole table.
+// flat union of every branch. D1 holds commits from ALL branches (so branch pages
+// and search can surface them), so the global list filters on on_default — the
+// flag the Worker sets for every default-branch commit it syncs and the git
+// ingest leaves alone for off-branch commits.
 async function listCommits(env, opts) {
   const limit = normalizedLimit(opts.limit, 100);
   const offset = normalizedOffset(opts.offset);
-  const head = await defaultHeadSha(env);
-  if (!head) {
-    const rows = await env.DB.prepare(
-      "SELECT * FROM commits ORDER BY committed_at DESC LIMIT ? OFFSET ?"
-    )
-      .bind(limit, offset)
-      .all();
-    return (rows.results || []).map(toCommit);
-  }
   const rows = await env.DB.prepare(
-    `WITH RECURSIVE reachable(sha) AS (
-       SELECT ?
-       UNION
-       SELECT cp.parent_sha FROM commit_parents cp JOIN reachable r ON cp.child_sha = r.sha
-     )
-     SELECT c.* FROM commits c JOIN reachable r ON c.sha = r.sha
-     ORDER BY c.committed_at DESC
-     LIMIT ? OFFSET ?`
+    "SELECT * FROM commits WHERE on_default = 1 ORDER BY committed_at DESC LIMIT ? OFFSET ?"
   )
-    .bind(head, limit, offset)
+    .bind(limit, offset)
     .all();
   return (rows.results || []).map(toCommit);
 }
@@ -991,12 +974,6 @@ async function runSync(env, trigger) {
     budget,
   });
   await upsertCommits(env, commitSync.items);
-  // Record the freshest default-branch tip so the Commits tab / summary walk the
-  // latest history (commits are returned newest-first). Only when there is a new
-  // tip; an empty result means the head is unchanged.
-  if (commitSync.items.length) {
-    await setMeta(env, "default_head_sha", commitSync.items[0].sha);
-  }
 
   await setSyncStatus(env, { phase: "prs", message: "Syncing pull requests" });
   const prSync = await fetchPullRequests(env, owner, repo, {
@@ -1273,11 +1250,6 @@ async function fetchCommits(env, owner, repo, branch, opts = {}) {
           summary: message.split("\n")[0] || null,
           message,
           url: item.html_url || null,
-          parents: Array.isArray(item.parents)
-            ? item.parents
-                .map((parent) => parent?.sha)
-                .filter(Boolean)
-            : [],
         });
       }
       commits.push(...pageCommits);
@@ -1588,12 +1560,15 @@ async function upsertTags(env, tags, now, markMissingDeleted) {
 }
 
 async function upsertCommits(env, commits) {
+  // Every commit the Worker syncs is on the default branch (fetchCommits is always
+  // called with the default branch), so mark on_default = 1 here. The git ingest
+  // inserts off-branch commits with the column left at its 0 default.
   await chunkedBatch(
     env,
     commits.map((commit) =>
       env.DB.prepare(
-        `INSERT INTO commits (sha, short_sha, author_name, author_email, authored_at, committed_at, summary, message, url)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO commits (sha, short_sha, author_name, author_email, authored_at, committed_at, summary, message, url, on_default)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
          ON CONFLICT(sha) DO UPDATE SET
            author_name = excluded.author_name,
            author_email = excluded.author_email,
@@ -1601,7 +1576,8 @@ async function upsertCommits(env, commits) {
            committed_at = excluded.committed_at,
            summary = excluded.summary,
            message = excluded.message,
-           url = excluded.url`
+           url = excluded.url,
+           on_default = 1`
       ).bind(
         commit.sha,
         commit.shortSha,
@@ -1615,21 +1591,6 @@ async function upsertCommits(env, commits) {
       )
     )
   );
-  const parentStatements = [];
-  for (const commit of commits) {
-    const parents = Array.isArray(commit.parents) ? commit.parents : [];
-    for (let i = 0; i < parents.length; i++) {
-      parentStatements.push(
-        env.DB.prepare(
-          `INSERT INTO commit_parents (child_sha, parent_sha, ordinal)
-           VALUES (?, ?, ?)
-           ON CONFLICT(child_sha, parent_sha) DO UPDATE SET
-             ordinal = excluded.ordinal`
-        ).bind(commit.sha, parents[i], i)
-      );
-    }
-  }
-  await chunkedBatch(env, parentStatements);
 }
 
 async function fillBranchCommitTimes(env) {
@@ -1649,12 +1610,14 @@ async function upsertPrs(env, prs) {
     env,
     prs.map((pr) =>
       env.DB.prepare(
+        // body is intentionally omitted (NULL on insert) and never overwritten on
+        // conflict: bodies are lazy-fetched + cached per PR view to keep D1 lean.
         `INSERT INTO prs (
            number, title, state, author, base_ref, head_ref, head_sha,
            merge_commit_sha, created_at, updated_at, merged_at, closed_at,
-           url, draft, body
+           url, draft
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(number) DO UPDATE SET
            title = excluded.title,
            state = excluded.state,
@@ -1668,8 +1631,7 @@ async function upsertPrs(env, prs) {
            merged_at = excluded.merged_at,
            closed_at = excluded.closed_at,
            url = excluded.url,
-           draft = excluded.draft,
-           body = excluded.body`
+           draft = excluded.draft`
       ).bind(
         pr.number,
         pr.title,
@@ -1684,8 +1646,7 @@ async function upsertPrs(env, prs) {
         pr.mergedAt,
         pr.closedAt,
         pr.url,
-        pr.draft,
-        pr.body
+        pr.draft
       )
     )
   );
@@ -1801,6 +1762,20 @@ async function fetchCommitMessageFromGitHub(env, sha) {
       authorName: object.author?.name || null,
       authorEmail: object.author?.email || null,
     };
+  } catch {
+    return null;
+  }
+}
+
+// Lazily fetch a single PR's description body from GitHub. Used because bodies are
+// no longer stored in bulk. Returns "" for a genuinely empty body (so we cache the
+// absence and stop re-fetching), or null on any failure.
+async function fetchPrBodyFromGitHub(env, number) {
+  if (!env.GITHUB_TOKEN) return null;
+  try {
+    const [owner, repo] = repoParts(env);
+    const data = await githubJson(env, `/repos/${owner}/${repo}/pulls/${number}`);
+    return data?.body ?? "";
   } catch {
     return null;
   }
