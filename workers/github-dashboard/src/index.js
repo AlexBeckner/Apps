@@ -822,6 +822,11 @@ async function listBranches(env, opts) {
 }
 
 async function defaultHeadSha(env) {
+  // Prefer the tip recorded by the Worker's own commit sync (refreshed every run)
+  // so the Commits tab tracks the latest default-branch commits even when the
+  // external branch sync (which also updates branches.head_sha) lags behind.
+  const metaHead = await getMeta(env, "default_head_sha");
+  if (metaHead) return metaHead;
   let row = await env.DB.prepare(
     "SELECT head_sha FROM branches WHERE is_default = 1 AND deleted_at IS NULL LIMIT 1"
   ).first();
@@ -986,6 +991,12 @@ async function runSync(env, trigger) {
     budget,
   });
   await upsertCommits(env, commitSync.items);
+  // Record the freshest default-branch tip so the Commits tab / summary walk the
+  // latest history (commits are returned newest-first). Only when there is a new
+  // tip; an empty result means the head is unchanged.
+  if (commitSync.items.length) {
+    await setMeta(env, "default_head_sha", commitSync.items[0].sha);
+  }
 
   await setSyncStatus(env, { phase: "prs", message: "Syncing pull requests" });
   const prSync = await fetchPullRequests(env, owner, repo, {
