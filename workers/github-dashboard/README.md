@@ -195,9 +195,12 @@ from git — the same "let git enumerate it" approach used for branches.
 Files:
 
 - `.github/workflows/sync-commits.yml` - runs hourly (and on demand). It keeps a
-  cached, treeless (`--filter=tree:0`) bare clone of `refs/heads/*` (commit
-  objects only, no trees/blobs) and runs `git log --all` to list every commit
-  with its author, dates, subject, and parent SHAs.
+  cached, blobless (`--filter=blob:none`) bare clone of `refs/heads/*` (all
+  commits + all trees, no file blobs) and runs `git log --all` to list every
+  commit with its author, dates, subject, and parent SHAs. Blobless (not
+  treeless) is required so `git log` never has to lazily fetch a tree mid-walk -
+  a treeless clone would, and that fetch fails because credentials aren't
+  persisted on the cached repo.
 - `workers/github-dashboard/scripts/ingest-commits.mjs` - streams that output and
   upserts it into the `commits` / `commit_parents` tables in batches. It stores
   **metadata + subject only** (no message body, to keep D1 lean) and uses
