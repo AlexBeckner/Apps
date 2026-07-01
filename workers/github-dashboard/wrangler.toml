@@ -7,10 +7,15 @@ keep_vars = true
 # Same-origin Worker-hosted app. Override to "*" in local `.dev.vars` if needed.
 ALLOWED_ORIGIN = "https://github-dashboard.appliedapps.workers.dev"
 GITHUB_REPO = "AppliedNeuron/core-stack"
-SYNC_BRANCH_PAGES = "5"
 SYNC_COMMIT_PAGES = "3"
 SYNC_PR_PAGES = "5"
 SYNC_TAG_PAGES = "3"
+# Branches are refreshed by a continuous GraphQL sweep (100 branches + their
+# commit date per request). This caps GraphQL pages per invocation; the sweep
+# resumes from a saved cursor each cron tick and prunes deleted branches when a
+# full pass completes. Raise for faster sweeps, lower if you hit the subrequest
+# budget or CPU (Error 1102).
+SYNC_BRANCH_SWEEP_PAGES = "12"
 # History back-fill rotates one page per type per turn (branches -> tags ->
 # commits -> prs -> repeat) so all types advance together each run.
 SYNC_SEED_PAGES_PER_TURN = "1"

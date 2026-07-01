@@ -2,8 +2,8 @@ import { companyAuthResponse } from "./company-auth.js";
 import { dashboardHtml, isDashboardRoute } from "./ui.js";
 
 const GITHUB_API = "https://api.github.com";
+const GITHUB_GRAPHQL = "https://api.github.com/graphql";
 const DEFAULT_REPO = "AppliedNeuron/core-stack";
-const DEFAULT_BRANCH_PAGES = 5;
 const DEFAULT_COMMIT_PAGES = 3;
 const DEFAULT_PR_PAGES = 5;
 const DEFAULT_TAG_PAGES = 3;
@@ -28,8 +28,16 @@ const MAX_GITHUB_REQUESTS = 5000;
 // sync is allowed to take over instead of waiting for the full running TTL.
 const DEFAULT_HEARTBEAT_STALE_SECONDS = 180;
 const MAX_HEARTBEAT_STALE_SECONDS = 60 * 60;
+// GitHub exposes no "recently updated branches" listing (REST /branches is
+// alphabetical; GraphQL refs cannot order by commit date), so branches are kept
+// fresh with a continuous rolling GraphQL sweep instead of a fixed fresh pass.
+// Each GraphQL page returns 100 branches WITH their head commit date, so
+// last_commit_at is populated directly. This caps GraphQL pages per invocation.
+const DEFAULT_BRANCH_SWEEP_PAGES = 12;
+const MAX_BRANCH_SWEEP_PAGES = 100;
+const BRANCH_GRAPHQL_PAGE_SIZE = 100;
 const SEED_PLAN_VERSION = "full-history-with-parents-2026-06-30";
-const SCHEMA_UPGRADE_VERSION = "commit-parents-2026-06-30";
+const SCHEMA_UPGRADE_VERSION = "branch-last-seen-2026-07-01";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -41,11 +49,13 @@ CREATE TABLE IF NOT EXISTS branches (
   head_sha       TEXT NOT NULL,
   is_default     INTEGER NOT NULL DEFAULT 0,
   last_commit_at INTEGER,
+  last_seen_at   INTEGER,
   first_seen_at  INTEGER NOT NULL,
   deleted_at     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_branches_last_commit ON branches(last_commit_at DESC);
 CREATE INDEX IF NOT EXISTS idx_branches_deleted ON branches(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_branches_last_seen ON branches(last_seen_at);
 CREATE TABLE IF NOT EXISTS commits (
   sha           TEXT PRIMARY KEY,
   short_sha     TEXT NOT NULL,
@@ -241,6 +251,7 @@ async function ensureSchema(env) {
 }
 
 async function ensureSchemaUpgrades(env) {
+  await ensureColumn(env, "branches", "last_seen_at", "INTEGER");
   const statements = [
     `CREATE TABLE IF NOT EXISTS commit_parents (
        child_sha  TEXT NOT NULL,
@@ -252,9 +263,19 @@ async function ensureSchemaUpgrades(env) {
     "CREATE INDEX IF NOT EXISTS idx_commit_parents_parent ON commit_parents(parent_sha)",
     "CREATE INDEX IF NOT EXISTS idx_prs_head_ref ON prs(head_ref)",
     "CREATE INDEX IF NOT EXISTS idx_prs_base_ref ON prs(base_ref)",
+    "CREATE INDEX IF NOT EXISTS idx_branches_last_seen ON branches(last_seen_at)",
   ];
   for (const statement of statements) {
     await env.DB.prepare(statement).run();
+  }
+}
+
+// SQLite has no "ADD COLUMN IF NOT EXISTS", so probe the table first.
+async function ensureColumn(env, table, column, ddl) {
+  const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
+  const exists = (info.results || []).some((col) => col.name === column);
+  if (!exists) {
+    await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`).run();
   }
 }
 
@@ -702,12 +723,16 @@ async function handlePrBranches(env, number) {
 }
 
 async function handleBranches(env, url) {
+  const includeDeleted = url.searchParams.get("includeDeleted") === "1";
+  const total = includeDeleted
+    ? await scalar(env, "SELECT COUNT(*) AS c FROM branches")
+    : await scalar(env, "SELECT COUNT(*) AS c FROM branches WHERE deleted_at IS NULL");
   return {
-    total: await scalar(env, "SELECT COUNT(*) AS c FROM branches"),
+    total,
     branches: await listBranches(env, {
       limit: normalizedLimit(url.searchParams.get("limit"), 100),
       offset: normalizedOffset(url.searchParams.get("offset")),
-      includeDeleted: url.searchParams.get("includeDeleted") === "1",
+      includeDeleted,
       sort: normalizeBranchSort(url.searchParams.get("sort")),
     }),
   };
@@ -863,10 +888,6 @@ async function runSync(env, trigger) {
   await setMeta(env, "default_branch", repoMeta.default_branch || "");
   await setMeta(env, "repo_url", repoMeta.html_url || `https://github.com/${owner}/${repo}`);
 
-  await setSyncStatus(env, { phase: "branches", message: "Syncing branches" });
-  const branchSync = await fetchBranches(env, owner, repo, repoMeta.default_branch, now, { budget });
-  await upsertBranches(env, branchSync.items, now, branchSync.complete);
-
   await setSyncStatus(env, { phase: "tags", message: "Syncing tags" });
   const tagSync = await fetchTags(env, owner, repo, now, { budget });
   await upsertTags(env, tagSync.items, now, tagSync.complete);
@@ -884,7 +905,24 @@ async function runSync(env, trigger) {
     budget,
   });
   await upsertPrs(env, prSync.items);
+  // Surface freshly active branches (open PR heads) right away and shield them
+  // from the sweep's prune until the sweep cursor reaches their position.
+  await refreshBranchesFromPrs(env, prSync.items, now);
   await setMeta(env, "last_sync_at", String(unixNow()));
+
+  // Rolling GraphQL sweep keeps every branch's head + commit date fresh and
+  // prunes branches deleted on GitHub. Isolated so a branch-side failure can
+  // never block commit/PR syncing.
+  await setSyncStatus(env, { phase: "branches", message: "Sweeping branches" });
+  let branchSweep = { fetched: 0, completedSweep: false, pruned: 0 };
+  try {
+    branchSweep = await syncBranches(env, owner, repo, repoMeta.default_branch, now, budget);
+  } catch (error) {
+    await setSyncStatus(env, {
+      phase: "branches",
+      message: `Branch sweep error: ${error.message || String(error)}`,
+    });
+  }
 
   const historySeed = await seedHistory(
     env,
@@ -893,7 +931,6 @@ async function runSync(env, trigger) {
     repoMeta.default_branch,
     now,
     {
-      branches: branchSync.complete,
       tags: tagSync.complete,
       commits: commitSync.complete,
       prs: prSync.complete,
@@ -901,7 +938,7 @@ async function runSync(env, trigger) {
     budget
   );
 
-  // Recompute branch commit times once per run instead of after every batch.
+  // Fallback for branches whose head commit is cached but lacked a date.
   await fillBranchCommitTimes(env);
   await setMeta(env, "last_sync_at", String(unixNow()));
 
@@ -910,12 +947,15 @@ async function runSync(env, trigger) {
     status: "success",
     phase: "done",
     message:
-      `Synced ${branchSync.items.length + historySeed.branches.items} branches, ` +
-      `${tagSync.items.length + historySeed.tags.items} tags, ` +
+      `Synced ${branchSweep.fetched} branches` +
+      (branchSweep.completedSweep
+        ? ` (full sweep${branchSweep.pruned ? `, pruned ${branchSweep.pruned}` : ""})`
+        : " (sweep in progress)") +
+      `, ${tagSync.items.length + historySeed.tags.items} tags, ` +
       `${commitSync.items.length + historySeed.commits.items} commits, ` +
       `${prSync.items.length + historySeed.prs.items} PRs` +
       (backfilling
-        ? ` (back-fill in progress, ${budget.githubUsed}/${budget.githubLimit} GitHub requests used)`
+        ? ` (history back-fill in progress, ${budget.githubUsed}/${budget.githubLimit} GitHub requests used)`
         : ""),
     finished_at: unixNow(),
     error: null,
@@ -923,28 +963,149 @@ async function runSync(env, trigger) {
   });
 }
 
-async function fetchBranches(env, owner, repo, defaultBranch, now, opts = {}) {
-  const pages = opts.pages || syncPages(env.SYNC_BRANCH_PAGES, DEFAULT_BRANCH_PAGES);
-  const branches = [];
-  const pageState = await eachGithubPage(
-    env,
-    `/repos/${owner}/${repo}/branches`,
-    {},
-    { pages, startPage: opts.startPage, budget: opts.budget },
-    (items) => {
-      for (const item of items) {
-        if (!item?.name || !item?.commit?.sha) continue;
-        branches.push({
-          name: item.name,
-          headSha: item.commit.sha,
-          isDefault: item.name === defaultBranch ? 1 : 0,
-          lastCommitAt: null,
-          firstSeenAt: now,
-        });
+const BRANCHES_QUERY = `
+query($owner:String!,$name:String!,$cursor:String,$pageSize:Int!){
+  repository(owner:$owner,name:$name){
+    refs(refPrefix:"refs/heads/",first:$pageSize,after:$cursor,orderBy:{field:ALPHABETICAL,direction:ASC}){
+      totalCount
+      pageInfo{ hasNextPage endCursor }
+      nodes{
+        name
+        target{
+          __typename
+          ... on Commit { oid committedDate }
+        }
       }
     }
-  );
-  return { items: branches, ...pageState };
+  }
+}`;
+
+// Continuous rolling sweep over ALL branches via GraphQL. Each page carries the
+// head commit date, so last_commit_at is populated for every branch (not just
+// those whose head is on the default branch). A GraphQL cursor is persisted so
+// the sweep resumes across invocations; when it wraps, branches not seen during
+// the sweep are pruned (deletion detection). The sweep is the only thing that
+// keeps alphabetically-late branches fresh, since GitHub cannot list branches
+// by recency.
+async function syncBranches(env, owner, repo, defaultBranch, now, budget) {
+  const pageCap = branchSweepPages(env);
+  let cursor = (await getMeta(env, "branch_sweep_cursor")) || null;
+  let sweepStartedAt = unixOrNull(await getMeta(env, "branch_sweep_started_at"));
+
+  // Empty cursor means we are (re)starting a full sweep from the top.
+  if (!cursor) {
+    sweepStartedAt = now;
+    await setMeta(env, "branch_sweep_started_at", String(sweepStartedAt));
+  }
+
+  let fetched = 0;
+  let pages = 0;
+  let totalCount = null;
+  let completedSweep = false;
+
+  while (budget.canFetch() && pages < pageCap) {
+    const data = await githubGraphQL(
+      env,
+      BRANCHES_QUERY,
+      { owner, name: repo, cursor, pageSize: BRANCH_GRAPHQL_PAGE_SIZE },
+      budget
+    );
+    const refs = data && data.repository && data.repository.refs;
+    if (!refs) {
+      completedSweep = true;
+      cursor = null;
+      await setMeta(env, "branch_sweep_cursor", "");
+      break;
+    }
+    if (Number.isFinite(refs.totalCount)) totalCount = refs.totalCount;
+
+    const items = [];
+    for (const node of refs.nodes || []) {
+      if (!node || !node.name) continue;
+      const target = node.target || {};
+      if (!target.oid) continue;
+      items.push({
+        name: node.name,
+        headSha: target.oid,
+        isDefault: node.name === defaultBranch ? 1 : 0,
+        lastCommitAt: toUnix(target.committedDate),
+        firstSeenAt: now,
+        lastSeenAt: now,
+      });
+    }
+    await upsertBranches(env, items);
+    fetched += items.length;
+    pages += 1;
+
+    await setSyncStatus(env, {
+      phase: "branches",
+      message: `Sweeping branches (${fetched} this run${
+        totalCount != null ? ` / ~${totalCount} live` : ""
+      })`,
+    });
+
+    const pageInfo = refs.pageInfo || {};
+    if (pageInfo.hasNextPage && pageInfo.endCursor) {
+      cursor = pageInfo.endCursor;
+      await setMeta(env, "branch_sweep_cursor", cursor);
+    } else {
+      completedSweep = true;
+      cursor = null;
+      await setMeta(env, "branch_sweep_cursor", "");
+      break;
+    }
+  }
+
+  if (totalCount != null) await setMeta(env, "branch_live_count", String(totalCount));
+
+  let pruned = 0;
+  if (completedSweep) {
+    pruned = await pruneUnseenBranches(env, sweepStartedAt, now);
+    await setMeta(env, "branch_last_full_sweep_at", String(now));
+  }
+  return { fetched, pages, completedSweep, pruned, totalCount };
+}
+
+// Any live branch not observed during a completed sweep no longer exists on
+// GitHub, so mark it deleted. The default branch is never pruned as a backstop.
+async function pruneUnseenBranches(env, sweepStartedAt, now) {
+  if (!sweepStartedAt) return 0;
+  const result = await env.DB.prepare(
+    `UPDATE branches
+     SET deleted_at = ?
+     WHERE deleted_at IS NULL
+       AND is_default = 0
+       AND (last_seen_at IS NULL OR last_seen_at < ?)`
+  )
+    .bind(now, sweepStartedAt)
+    .run();
+  return (result.meta && result.meta.changes) || 0;
+}
+
+// Open PRs prove their head branch still exists, so mark those branches seen
+// (prune-proof) and surface brand-new ones immediately. Existing rows keep the
+// head/date owned by the authoritative sweep to avoid regressing to a stale PR
+// head; only last_seen_at is refreshed.
+async function refreshBranchesFromPrs(env, prs, now) {
+  const seen = new Set();
+  const statements = [];
+  for (const pr of prs) {
+    if (pr.state !== "open") continue;
+    const name = pr.headRef;
+    const sha = pr.headSha;
+    if (!name || !sha || seen.has(name)) continue;
+    seen.add(name);
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO branches (name, head_sha, is_default, last_commit_at, first_seen_at, last_seen_at, deleted_at)
+         VALUES (?, ?, 0, NULL, ?, ?, NULL)
+         ON CONFLICT(name) DO UPDATE SET
+           last_seen_at = excluded.last_seen_at,
+           deleted_at = NULL`
+      ).bind(name, sha, now, now)
+    );
+  }
+  await chunkedBatch(env, statements);
 }
 
 async function fetchTags(env, owner, repo, now, opts = {}) {
@@ -1058,18 +1219,9 @@ async function seedHistory(env, owner, repo, defaultBranch, now, freshComplete, 
   const perEntityBudget = seedPageBudget(env);
 
   // Each seeder knows how to fetch + upsert one page-range of its entity type.
+  // Branches are intentionally absent: they are kept current by the continuous
+  // GraphQL sweep in syncBranches(), not by this page-based REST back-fill.
   const seeders = [
-    {
-      kind: "branches",
-      table: "branches",
-      freshComplete: freshComplete.branches,
-      freshPages: syncPages(env.SYNC_BRANCH_PAGES, DEFAULT_BRANCH_PAGES),
-      run: async (startPage, pages) => {
-        const result = await fetchBranches(env, owner, repo, defaultBranch, now, { startPage, pages, budget });
-        await upsertBranches(env, result.items, now, false);
-        return result;
-      },
-    },
     {
       kind: "tags",
       table: "tags",
@@ -1125,10 +1277,10 @@ async function seedHistory(env, owner, repo, defaultBranch, now, freshComplete, 
     }
   }
 
-  // Round-robin one page-range per type per rotation (branches -> tags ->
-  // commits -> prs -> repeat) so every type back-fills together, until this
-  // invocation's shared subrequest budget is spent. Cursors persist to meta, so
-  // the next run picks up exactly where this one stopped.
+  // Round-robin one page-range per type per rotation (tags -> commits -> prs ->
+  // repeat) so every type back-fills together, until this invocation's shared
+  // subrequest budget is spent. Cursors persist to meta, so the next run picks
+  // up exactly where this one stopped.
   let progressed = true;
   while (budget.canFetch() && progressed) {
     progressed = false;
@@ -1158,7 +1310,6 @@ async function seedHistory(env, owner, repo, defaultBranch, now, freshComplete, 
   }
 
   const results = {
-    branches: { items: 0, complete: freshComplete.branches },
     tags: { items: 0, complete: freshComplete.tags },
     commits: { items: 0, complete: freshComplete.commits },
     prs: { items: 0, complete: freshComplete.prs },
@@ -1195,7 +1346,6 @@ async function ensureSeedPlan(env, owner, repo) {
   if ((await getMeta(env, "seed_plan_version")) === expected) return;
 
   const nextPages = {
-    branches: syncPages(env.SYNC_BRANCH_PAGES, DEFAULT_BRANCH_PAGES) + 1,
     tags: syncPages(env.SYNC_TAG_PAGES, DEFAULT_TAG_PAGES) + 1,
     commits: syncPages(env.SYNC_COMMIT_PAGES, DEFAULT_COMMIT_PAGES) + 1,
     prs: syncPages(env.SYNC_PR_PAGES, DEFAULT_PR_PAGES) + 1,
@@ -1210,7 +1360,6 @@ async function ensureSeedPlan(env, owner, repo) {
 
 async function seedComplete(env) {
   const complete = await Promise.all([
-    getMeta(env, seedCompleteKey("branches")),
     getMeta(env, seedCompleteKey("tags")),
     getMeta(env, seedCompleteKey("commits")),
     getMeta(env, seedCompleteKey("prs")),
@@ -1275,25 +1424,29 @@ async function allCommitsExist(env, commits) {
   return commits.every((commit) => existing.has(commit.sha));
 }
 
-async function upsertBranches(env, branches, now, markMissingDeleted) {
-  const seen = new Set(branches.map((branch) => branch.name));
+async function upsertBranches(env, branches) {
   await chunkedBatch(
     env,
     branches.map((branch) =>
       env.DB.prepare(
-        `INSERT INTO branches (name, head_sha, is_default, last_commit_at, first_seen_at, deleted_at)
-         VALUES (?, ?, ?, ?, ?, NULL)
+        `INSERT INTO branches (name, head_sha, is_default, last_commit_at, first_seen_at, last_seen_at, deleted_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL)
          ON CONFLICT(name) DO UPDATE SET
            head_sha = excluded.head_sha,
            is_default = excluded.is_default,
-           last_commit_at = excluded.last_commit_at,
+           last_commit_at = COALESCE(excluded.last_commit_at, branches.last_commit_at),
+           last_seen_at = excluded.last_seen_at,
            deleted_at = NULL`
-      ).bind(branch.name, branch.headSha, branch.isDefault, branch.lastCommitAt, branch.firstSeenAt)
+      ).bind(
+        branch.name,
+        branch.headSha,
+        branch.isDefault,
+        branch.lastCommitAt,
+        branch.firstSeenAt,
+        branch.lastSeenAt
+      )
     )
   );
-  if (markMissingDeleted) {
-    await markDeleted(env, "branches", "name", seen, now);
-  }
 }
 
 async function upsertTags(env, tags, now, markMissingDeleted) {
@@ -1471,6 +1624,42 @@ async function githubJson(env, path, query = {}, budget = null) {
   }
 
   return response.json();
+}
+
+async function githubGraphQL(env, query, variables = {}, budget = null) {
+  if (budget) budget.noteFetch();
+  const response = await fetch(GITHUB_GRAPHQL, {
+    method: "POST",
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+      "User-Agent": "github-dashboard-worker",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+
+  if (!response.ok) {
+    let message = `${response.status} ${response.statusText}`;
+    try {
+      const body = await response.json();
+      message = body.message || message;
+    } catch {
+      // Keep the status text when GitHub does not return a JSON error body.
+    }
+    throw httpError(response.status, message);
+  }
+
+  const body = await response.json();
+  // GraphQL reports query-level failures with HTTP 200 + an errors array.
+  if (Array.isArray(body.errors) && body.errors.length) {
+    const message = body.errors
+      .map((error) => error && error.message)
+      .filter(Boolean)
+      .join("; ");
+    throw httpError(502, message || "GitHub GraphQL error");
+  }
+  return body.data;
 }
 
 async function syncStatus(env) {
@@ -1715,6 +1904,14 @@ function normalizedOffset(value) {
 
 function syncPages(value, fallback) {
   return positiveInt(value, fallback, MAX_SYNC_PAGES);
+}
+
+function branchSweepPages(env) {
+  return positiveInt(
+    env.SYNC_BRANCH_SWEEP_PAGES,
+    DEFAULT_BRANCH_SWEEP_PAGES,
+    MAX_BRANCH_SWEEP_PAGES
+  );
 }
 
 function runningTtlSeconds(env) {

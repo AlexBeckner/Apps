@@ -90,32 +90,45 @@ Do not commit `.dev.vars`; it contains secrets.
 
 Cloudflare Workers cannot use the local filesystem git mirror, native
 `better-sqlite3`, or the `git` CLI used by the Next.js dashboard. This Worker
-uses GitHub's HTTP API instead and stores the cache in D1. Each sync refreshes
-the newest pages first:
+uses GitHub's HTTP API instead and stores the cache in D1. Commits, tags, and
+pull requests refresh their newest pages first:
 
-- `SYNC_BRANCH_PAGES` pages of branches, default 5
 - `SYNC_TAG_PAGES` pages of tags, default 3
 - `SYNC_COMMIT_PAGES` pages of recent commits on the default branch, default 3
 - `SYNC_PR_PAGES` pages of pull requests sorted by update time, default 5
 
-After that fresh pass, the Worker marks `last_sync_at` so the UI reflects that
-the newest GitHub data is cached, then back-fills older GitHub pages using D1
-`meta` cursors named `seed_<kind>_next_page`. The back-fill is **round-robin by
-page**: it pulls `SYNC_SEED_PAGES_PER_TURN` pages (default 1) of branches, then
-tags, then commits, then pull requests, then repeats, so every type advances
-together instead of finishing one type before starting the next. The Worker also
-stores a `seed_plan_version`; when that version changes, it resets the
-historical cursors to the first page after each fresh window so existing partial
-D1 state cannot skip older pages.
+Branches are handled differently. GitHub has no "recently updated branches"
+listing — the REST `/branches` endpoint is alphabetical and GraphQL cannot order
+branches by commit date — so a fixed fresh pass would only ever re-check the
+same alphabetical prefix and miss recently active branches. Instead, branches
+use a **continuous rolling GraphQL sweep** (`syncBranches`): each request pulls
+`SYNC_BRANCH_SWEEP_PAGES` × 100 branches (default 12 pages) along with each
+branch's head SHA and head commit date, so `last_commit_at` is populated for
+every branch. The sweep persists a GraphQL cursor (`branch_sweep_cursor`) and
+resumes across cron ticks; when it wraps a full pass, any branch not observed
+during that sweep is marked deleted (`deleted_at`), which is how branch
+deletions are detected. Open pull-request heads are also upserted each run so
+freshly opened branches appear immediately and are shielded from pruning before
+the sweep reaches them.
+
+After the commit/tag/PR fresh pass, the Worker marks `last_sync_at`, then
+back-fills older GitHub pages for those three types using D1 `meta` cursors named
+`seed_<kind>_next_page`. The back-fill is **round-robin by page**: it pulls
+`SYNC_SEED_PAGES_PER_TURN` pages (default 1) of tags, then commits, then pull
+requests, then repeats, so every type advances together instead of finishing one
+type before starting the next. The Worker also stores a `seed_plan_version`;
+when that version changes, it resets the historical cursors to the first page
+after each fresh window so existing partial D1 state cannot skip older pages.
 
 Every GitHub request in a sync is counted against a per-invocation budget,
 `SYNC_MAX_GITHUB_REQUESTS` (default 30). When the budget is spent, the run saves
 its cursors and finishes cleanly; the next 15-minute cron tick resumes the
 back-fill from where it stopped. This keeps a single invocation under the
 free-plan limit of 50 external subrequests. Raise the budget toward ~45 for
-faster seeding, or lower it if you hit the free-plan 10 ms CPU limit
-(`Error 1102`), but keep it above the fresh-pass total (`1 + SYNC_BRANCH_PAGES +
-SYNC_TAG_PAGES + SYNC_COMMIT_PAGES + SYNC_PR_PAGES`, ~17 by default) so the
+faster seeding and branch sweeping, or lower it if you hit the free-plan 10 ms
+CPU limit (`Error 1102`), but keep it above the per-run total consumed by the
+fresh pass and branch sweep (`1 + SYNC_TAG_PAGES + SYNC_COMMIT_PAGES +
+SYNC_PR_PAGES + SYNC_BRANCH_SWEEP_PAGES`, ~24 by default) so the history
 back-fill still receives requests each run. `SYNC_SEED_PAGE_BUDGET` is a
 secondary per-type cap on how many history pages one type may pull per
 invocation.
