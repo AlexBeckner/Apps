@@ -11,9 +11,22 @@ SYNC_BRANCH_PAGES = "5"
 SYNC_COMMIT_PAGES = "3"
 SYNC_PR_PAGES = "5"
 SYNC_TAG_PAGES = "3"
-SYNC_HISTORY_PAGES = "10"
-SYNC_SEED_PAGE_BUDGET = "1000"
-SYNC_RUNNING_TTL_SECONDS = "1800"
+# History back-fill rotates one page per type per turn (branches -> tags ->
+# commits -> prs -> repeat) so all types advance together each run.
+SYNC_SEED_PAGES_PER_TURN = "1"
+# Safety cap on how many history pages a single type may pull per invocation;
+# the real limiter is SYNC_MAX_GITHUB_REQUESTS.
+SYNC_SEED_PAGE_BUDGET = "200"
+# Free plan allows 50 external subrequests per invocation. Keep the whole run
+# (fresh pass + history back-fill) under that; the cron trigger resumes the
+# back-fill from saved cursors every 15 min. Raise toward ~45 for faster
+# seeding, or lower if you hit CPU (Error 1102) on the free plan.
+SYNC_MAX_GITHUB_REQUESTS = "30"
+# Backstop only; stall detection is primarily heartbeat-based below.
+SYNC_RUNNING_TTL_SECONDS = "600"
+# A running sync is treated as dead if it stops heartbeating for this long,
+# letting the next cron tick take over (kept under the 15 min cron interval).
+SYNC_HEARTBEAT_STALE_SECONDS = "180"
 
 [[d1_databases]]
 binding = "DB"

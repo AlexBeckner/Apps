@@ -99,24 +99,32 @@ the newest pages first:
 - `SYNC_PR_PAGES` pages of pull requests sorted by update time, default 5
 
 After that fresh pass, the Worker marks `last_sync_at` so the UI reflects that
-the newest GitHub data is cached, then seeds older GitHub pages using D1 `meta`
-cursors named `seed_<kind>_next_page`. The historical pass keeps advancing
-within the same sync until GitHub returns the end of each list or the
-`SYNC_SEED_PAGE_BUDGET` is reached. The default budget is 1,000 pages per
-resource, which is intended to fully seed `AppliedNeuron/core-stack` from the
-beginning instead of waiting for many 15-minute cron ticks. The Worker also
+the newest GitHub data is cached, then back-fills older GitHub pages using D1
+`meta` cursors named `seed_<kind>_next_page`. The back-fill is **round-robin by
+page**: it pulls `SYNC_SEED_PAGES_PER_TURN` pages (default 1) of branches, then
+tags, then commits, then pull requests, then repeats, so every type advances
+together instead of finishing one type before starting the next. The Worker also
 stores a `seed_plan_version`; when that version changes, it resets the
 historical cursors to the first page after each fresh window so existing partial
 D1 state cannot skip older pages.
 
-Set `SYNC_HISTORY_PAGES` in `wrangler.toml` to control the page batch size for
-each historical backfill request loop; if unset, it uses the resource's normal
-page count. Set `SYNC_SEED_PAGE_BUDGET` to cap the total historical pages a
-single sync can backfill per resource.
+Every GitHub request in a sync is counted against a per-invocation budget,
+`SYNC_MAX_GITHUB_REQUESTS` (default 30). When the budget is spent, the run saves
+its cursors and finishes cleanly; the next 15-minute cron tick resumes the
+back-fill from where it stopped. This keeps a single invocation under the
+free-plan limit of 50 external subrequests. Raise the budget toward ~45 for
+faster seeding, or lower it if you hit the free-plan 10 ms CPU limit
+(`Error 1102`), but keep it above the fresh-pass total (`1 + SYNC_BRANCH_PAGES +
+SYNC_TAG_PAGES + SYNC_COMMIT_PAGES + SYNC_PR_PAGES`, ~17 by default) so the
+back-fill still receives requests each run. `SYNC_SEED_PAGE_BUDGET` is a
+secondary per-type cap on how many history pages one type may pull per
+invocation.
 
 Once all `seed_<kind>_complete` flags are set, scheduled syncs stay incremental:
 recent commits stop after the first already-known page, and pull requests stop
-after reaching rows older than the previous successful sync. If a Worker run is
-left marked as running longer than `SYNC_RUNNING_TTL_SECONDS`, status calls show
-it as timed out and the next manual or scheduled sync resumes from the saved
-cursors.
+after reaching rows older than the previous successful sync. A running sync
+writes a `sync_heartbeat_at` on every phase and back-fill page; if the heartbeat
+goes stale for `SYNC_HEARTBEAT_STALE_SECONDS` (default 180, below the cron
+interval), status calls report it as stalled and the next manual or scheduled
+sync takes over from the saved cursors. `SYNC_RUNNING_TTL_SECONDS` is a hard
+backstop for the same check.

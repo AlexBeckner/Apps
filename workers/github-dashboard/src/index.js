@@ -11,9 +11,23 @@ const GITHUB_PAGE_SIZE = 100;
 const MAX_SYNC_PAGES = 100;
 const DEFAULT_SEED_PAGE_BUDGET = 1000;
 const MAX_SEED_PAGE_BUDGET = 5000;
+// History back-fill rotates through the entity types one page-range at a time so
+// they all advance together. 1 page per turn = pure round-robin by page.
+const DEFAULT_SEED_PAGES_PER_TURN = 1;
+const MAX_SEED_PAGES_PER_TURN = 50;
 const MAX_LIST_LIMIT = 500;
-const DEFAULT_RUNNING_TTL_SECONDS = 30 * 60;
+const DEFAULT_RUNNING_TTL_SECONDS = 10 * 60;
 const MAX_RUNNING_TTL_SECONDS = 24 * 60 * 60;
+// Free-plan Workers allow 50 external subrequests per invocation. Cap GitHub
+// calls per run well under that so a single sync never trips the limit; the
+// cron trigger resumes from saved cursors on the next tick.
+const DEFAULT_MAX_GITHUB_REQUESTS = 30;
+const MAX_GITHUB_REQUESTS = 5000;
+// A live sync updates its heartbeat on every phase/batch. If the heartbeat goes
+// stale the worker was almost certainly evicted or hit a limit mid-run, so a new
+// sync is allowed to take over instead of waiting for the full running TTL.
+const DEFAULT_HEARTBEAT_STALE_SECONDS = 180;
+const MAX_HEARTBEAT_STALE_SECONDS = 60 * 60;
 const SEED_PLAN_VERSION = "full-history-with-parents-2026-06-30";
 const SCHEMA_UPGRADE_VERSION = "commit-parents-2026-06-30";
 
@@ -800,11 +814,9 @@ async function startSync(env, ctx, trigger) {
 
   const current = await syncStatus(env);
   const now = unixNow();
-  if (
-    current.status === "running" &&
-    current.startedAt &&
-    now - current.startedAt < runningTtlSeconds(env)
-  ) {
+  // syncStatus() already downgrades a stalled run to "error", so a status of
+  // "running" here means a live sync is genuinely still in progress.
+  if (current.status === "running") {
     return current;
   }
 
@@ -813,6 +825,7 @@ async function startSync(env, ctx, trigger) {
     phase: "starting",
     message: `Starting ${trigger} sync`,
     started_at: now,
+    heartbeat_at: now,
     finished_at: null,
     error: null,
   });
@@ -835,6 +848,9 @@ async function startSync(env, ctx, trigger) {
 async function runSync(env, trigger) {
   const [owner, repo] = repoParts(env);
   const now = unixNow();
+  // One shared subrequest budget for the whole invocation so the fresh pass and
+  // the history back-fill together stay under the free-plan limit.
+  const budget = createSyncBudget(env);
   await ensureSeedPlan(env, owner, repo);
   const previousSyncAt = unixOrNull(await getMeta(env, "last_sync_at"));
   const seeded = await seedComplete(env);
@@ -843,40 +859,53 @@ async function runSync(env, trigger) {
     phase: "repo",
     message: `Fetching ${owner}/${repo} metadata`,
   });
-  const repoMeta = await githubJson(env, `/repos/${owner}/${repo}`);
+  const repoMeta = await githubJson(env, `/repos/${owner}/${repo}`, {}, budget);
   await setMeta(env, "default_branch", repoMeta.default_branch || "");
   await setMeta(env, "repo_url", repoMeta.html_url || `https://github.com/${owner}/${repo}`);
 
   await setSyncStatus(env, { phase: "branches", message: "Syncing branches" });
-  const branchSync = await fetchBranches(env, owner, repo, repoMeta.default_branch, now);
+  const branchSync = await fetchBranches(env, owner, repo, repoMeta.default_branch, now, { budget });
   await upsertBranches(env, branchSync.items, now, branchSync.complete);
 
   await setSyncStatus(env, { phase: "tags", message: "Syncing tags" });
-  const tagSync = await fetchTags(env, owner, repo, now);
+  const tagSync = await fetchTags(env, owner, repo, now, { budget });
   await upsertTags(env, tagSync.items, now, tagSync.complete);
 
   await setSyncStatus(env, { phase: "commits", message: "Syncing recent commits" });
   const commitSync = await fetchCommits(env, owner, repo, repoMeta.default_branch, {
     stopWhenKnown: seeded && !!previousSyncAt,
+    budget,
   });
   await upsertCommits(env, commitSync.items);
-  await fillBranchCommitTimes(env);
 
   await setSyncStatus(env, { phase: "prs", message: "Syncing pull requests" });
   const prSync = await fetchPullRequests(env, owner, repo, {
     updatedAfter: seeded ? previousSyncAt : null,
+    budget,
   });
   await upsertPrs(env, prSync.items);
   await setMeta(env, "last_sync_at", String(unixNow()));
 
-  const historySeed = await seedHistory(env, owner, repo, repoMeta.default_branch, now, {
-    branches: branchSync.complete,
-    tags: tagSync.complete,
-    commits: commitSync.complete,
-    prs: prSync.complete,
-  });
+  const historySeed = await seedHistory(
+    env,
+    owner,
+    repo,
+    repoMeta.default_branch,
+    now,
+    {
+      branches: branchSync.complete,
+      tags: tagSync.complete,
+      commits: commitSync.complete,
+      prs: prSync.complete,
+    },
+    budget
+  );
 
+  // Recompute branch commit times once per run instead of after every batch.
+  await fillBranchCommitTimes(env);
   await setMeta(env, "last_sync_at", String(unixNow()));
+
+  const backfilling = !(await seedComplete(env));
   await setSyncStatus(env, {
     status: "success",
     phase: "done",
@@ -884,7 +913,10 @@ async function runSync(env, trigger) {
       `Synced ${branchSync.items.length + historySeed.branches.items} branches, ` +
       `${tagSync.items.length + historySeed.tags.items} tags, ` +
       `${commitSync.items.length + historySeed.commits.items} commits, ` +
-      `${prSync.items.length + historySeed.prs.items} PRs`,
+      `${prSync.items.length + historySeed.prs.items} PRs` +
+      (backfilling
+        ? ` (back-fill in progress, ${budget.githubUsed}/${budget.githubLimit} GitHub requests used)`
+        : ""),
     finished_at: unixNow(),
     error: null,
     trigger,
@@ -898,7 +930,7 @@ async function fetchBranches(env, owner, repo, defaultBranch, now, opts = {}) {
     env,
     `/repos/${owner}/${repo}/branches`,
     {},
-    { pages, startPage: opts.startPage },
+    { pages, startPage: opts.startPage, budget: opts.budget },
     (items) => {
       for (const item of items) {
         if (!item?.name || !item?.commit?.sha) continue;
@@ -922,7 +954,7 @@ async function fetchTags(env, owner, repo, now, opts = {}) {
     env,
     `/repos/${owner}/${repo}/tags`,
     {},
-    { pages, startPage: opts.startPage },
+    { pages, startPage: opts.startPage, budget: opts.budget },
     (items) => {
       for (const item of items) {
         if (!item?.name || !item?.commit?.sha) continue;
@@ -947,7 +979,7 @@ async function fetchCommits(env, owner, repo, branch, opts = {}) {
     env,
     `/repos/${owner}/${repo}/commits`,
     { sha: branch },
-    { pages, startPage: opts.startPage },
+    { pages, startPage: opts.startPage, budget: opts.budget },
     async (items) => {
       const pageCommits = [];
       for (const item of items) {
@@ -988,7 +1020,7 @@ async function fetchPullRequests(env, owner, repo, opts = {}) {
     env,
     `/repos/${owner}/${repo}/pulls`,
     { state: "all", sort: "updated", direction: "desc" },
-    { pages, startPage: opts.startPage },
+    { pages, startPage: opts.startPage, budget: opts.budget },
     (items) => {
       const pagePrs = [];
       for (const pr of items) {
@@ -1021,120 +1053,120 @@ async function fetchPullRequests(env, owner, repo, opts = {}) {
   return { items: prs, ...pageState };
 }
 
-async function seedHistory(env, owner, repo, defaultBranch, now, freshComplete) {
+async function seedHistory(env, owner, repo, defaultBranch, now, freshComplete, budget) {
+  const pagesPerTurn = seedPagesPerTurn(env);
+  const perEntityBudget = seedPageBudget(env);
+
+  // Each seeder knows how to fetch + upsert one page-range of its entity type.
+  const seeders = [
+    {
+      kind: "branches",
+      table: "branches",
+      freshComplete: freshComplete.branches,
+      freshPages: syncPages(env.SYNC_BRANCH_PAGES, DEFAULT_BRANCH_PAGES),
+      run: async (startPage, pages) => {
+        const result = await fetchBranches(env, owner, repo, defaultBranch, now, { startPage, pages, budget });
+        await upsertBranches(env, result.items, now, false);
+        return result;
+      },
+    },
+    {
+      kind: "tags",
+      table: "tags",
+      freshComplete: freshComplete.tags,
+      freshPages: syncPages(env.SYNC_TAG_PAGES, DEFAULT_TAG_PAGES),
+      run: async (startPage, pages) => {
+        const result = await fetchTags(env, owner, repo, now, { startPage, pages, budget });
+        await upsertTags(env, result.items, now, false);
+        return result;
+      },
+    },
+    {
+      kind: "commits",
+      table: "commits",
+      freshComplete: freshComplete.commits,
+      freshPages: syncPages(env.SYNC_COMMIT_PAGES, DEFAULT_COMMIT_PAGES),
+      run: async (startPage, pages) => {
+        const result = await fetchCommits(env, owner, repo, defaultBranch, { startPage, pages, budget });
+        await upsertCommits(env, result.items);
+        return result;
+      },
+    },
+    {
+      kind: "prs",
+      table: "prs",
+      freshComplete: freshComplete.prs,
+      freshPages: syncPages(env.SYNC_PR_PAGES, DEFAULT_PR_PAGES),
+      run: async (startPage, pages) => {
+        const result = await fetchPullRequests(env, owner, repo, { startPage, pages, budget });
+        await upsertPrs(env, result.items);
+        return result;
+      },
+    },
+  ];
+
+  // Resolve each type's starting cursor / completion up front.
+  const states = seeders.map((seeder) => ({
+    seeder,
+    complete: false,
+    cursor: 1,
+    items: 0,
+    pagesThisRun: 0,
+  }));
+  for (const state of states) {
+    const { seeder } = state;
+    if (seeder.freshComplete) {
+      await setMeta(env, seedCompleteKey(seeder.kind), "1");
+      state.complete = true;
+    } else if ((await getMeta(env, seedCompleteKey(seeder.kind))) === "1") {
+      state.complete = true;
+    } else {
+      state.cursor = await seedStartPage(env, seeder.kind, seeder.table, seeder.freshPages);
+    }
+  }
+
+  // Round-robin one page-range per type per rotation (branches -> tags ->
+  // commits -> prs -> repeat) so every type back-fills together, until this
+  // invocation's shared subrequest budget is spent. Cursors persist to meta, so
+  // the next run picks up exactly where this one stopped.
+  let progressed = true;
+  while (budget.canFetch() && progressed) {
+    progressed = false;
+    for (const state of states) {
+      if (!budget.canFetch()) break;
+      if (state.complete || state.pagesThisRun >= perEntityBudget) continue;
+
+      const pages = Math.min(pagesPerTurn, perEntityBudget - state.pagesThisRun);
+      await setSyncStatus(env, {
+        phase: state.seeder.kind,
+        message: `Back-filling ${state.seeder.kind} (page ${state.cursor})`,
+      });
+      const result = await state.seeder.run(state.cursor, pages);
+
+      const advanced = Math.max(0, result.nextPage - state.cursor);
+      state.items += result.items.length;
+      state.pagesThisRun += advanced;
+      state.cursor = result.nextPage;
+      state.complete = !!result.complete;
+
+      await setMeta(env, seedNextPageKey(state.seeder.kind), String(state.cursor));
+      await setMeta(env, seedCompleteKey(state.seeder.kind), state.complete ? "1" : "0");
+
+      if (result.budgetExhausted) break;
+      if (advanced > 0 && !state.complete) progressed = true;
+    }
+  }
+
   const results = {
     branches: { items: 0, complete: freshComplete.branches },
     tags: { items: 0, complete: freshComplete.tags },
     commits: { items: 0, complete: freshComplete.commits },
     prs: { items: 0, complete: freshComplete.prs },
   };
-
-  results.branches = await seedGithubHistory(env, {
-    kind: "branches",
-    table: "branches",
-    freshComplete: freshComplete.branches,
-    freshPages: syncPages(env.SYNC_BRANCH_PAGES, DEFAULT_BRANCH_PAGES),
-    fetchPageRange: async (startPage, pages) => {
-      await setSyncStatus(env, {
-        phase: "branches",
-        message: `Seeding older branches from page ${startPage}`,
-      });
-      const result = await fetchBranches(env, owner, repo, defaultBranch, now, { startPage, pages });
-      await upsertBranches(env, result.items, now, false);
-      return result;
-    },
-  });
-
-  results.tags = await seedGithubHistory(env, {
-    kind: "tags",
-    table: "tags",
-    freshComplete: freshComplete.tags,
-    freshPages: syncPages(env.SYNC_TAG_PAGES, DEFAULT_TAG_PAGES),
-    fetchPageRange: async (startPage, pages) => {
-      await setSyncStatus(env, {
-        phase: "tags",
-        message: `Seeding older tags from page ${startPage}`,
-      });
-      const result = await fetchTags(env, owner, repo, now, { startPage, pages });
-      await upsertTags(env, result.items, now, false);
-      return result;
-    },
-  });
-
-  results.commits = await seedGithubHistory(env, {
-    kind: "commits",
-    table: "commits",
-    freshComplete: freshComplete.commits,
-    freshPages: syncPages(env.SYNC_COMMIT_PAGES, DEFAULT_COMMIT_PAGES),
-    fetchPageRange: async (startPage, pages) => {
-      await setSyncStatus(env, {
-        phase: "commits",
-        message: `Seeding older commits from page ${startPage}`,
-      });
-      const result = await fetchCommits(env, owner, repo, defaultBranch, { startPage, pages });
-      await upsertCommits(env, result.items);
-      await fillBranchCommitTimes(env);
-      return result;
-    },
-  });
-
-  results.prs = await seedGithubHistory(env, {
-    kind: "prs",
-    table: "prs",
-    freshComplete: freshComplete.prs,
-    freshPages: syncPages(env.SYNC_PR_PAGES, DEFAULT_PR_PAGES),
-    fetchPageRange: async (startPage, pages) => {
-      await setSyncStatus(env, {
-        phase: "prs",
-        message: `Seeding older pull requests from page ${startPage}`,
-      });
-      const result = await fetchPullRequests(env, owner, repo, { startPage, pages });
-      await upsertPrs(env, result.items);
-      return result;
-    },
-  });
-
+  for (const state of states) {
+    results[state.seeder.kind] = { items: state.items, complete: state.complete };
+  }
   return results;
-}
-
-async function seedGithubHistory(env, opts) {
-  const pagesPerBatch = historyPages(env, opts.freshPages);
-  const pageBudget = seedPageBudget(env);
-  if (opts.freshComplete) {
-    await setMeta(env, seedCompleteKey(opts.kind), "1");
-    return { items: 0, complete: true, skipped: true };
-  }
-  if ((await getMeta(env, seedCompleteKey(opts.kind))) === "1") {
-    return { items: 0, complete: true, skipped: true };
-  }
-
-  const initialStartPage = await seedStartPage(env, opts.kind, opts.table, opts.freshPages);
-  let startPage = initialStartPage;
-  let totalItems = 0;
-  let totalPages = 0;
-  let result = null;
-
-  while (totalPages < pageBudget) {
-    const pages = Math.min(pagesPerBatch, pageBudget - totalPages);
-    result = await opts.fetchPageRange(startPage, pages);
-    totalItems += result.items.length;
-    totalPages += Math.max(0, result.nextPage - startPage);
-
-    await setMeta(env, seedNextPageKey(opts.kind), String(result.nextPage));
-    await setMeta(env, seedCompleteKey(opts.kind), result.complete ? "1" : "0");
-
-    if (result.complete) break;
-    if (result.nextPage <= startPage) break;
-    startPage = result.nextPage;
-  }
-
-  return {
-    items: totalItems,
-    complete: !!result?.complete,
-    nextPage: result?.nextPage ?? startPage,
-    startPage: initialStartPage,
-    pageBudget,
-  };
 }
 
 async function seedStartPage(env, kind, table, freshPages) {
@@ -1146,8 +1178,12 @@ async function seedStartPage(env, kind, table, freshPages) {
   return Math.max(freshPages + 1, nextCachedPage);
 }
 
-function historyPages(env, fallbackPages) {
-  return syncPages(env.SYNC_HISTORY_PAGES, fallbackPages);
+function seedPagesPerTurn(env) {
+  return positiveInt(
+    env.SYNC_SEED_PAGES_PER_TURN,
+    DEFAULT_SEED_PAGES_PER_TURN,
+    MAX_SEED_PAGES_PER_TURN
+  );
 }
 
 function seedPageBudget(env) {
@@ -1193,12 +1229,22 @@ function seedCompleteKey(kind) {
 async function eachGithubPage(env, path, query, opts, onPage) {
   const maxPages = opts.pages;
   const startPage = opts.startPage || 1;
+  const budget = opts.budget || null;
   for (let page = startPage; page < startPage + maxPages; page++) {
-    const items = await githubJson(env, path, {
-      ...query,
-      per_page: String(GITHUB_PAGE_SIZE),
-      page: String(page),
-    });
+    if (budget && !budget.canFetch()) {
+      // Stop before spending another subrequest; resume from this page later.
+      return { complete: false, nextPage: page, budgetExhausted: true };
+    }
+    const items = await githubJson(
+      env,
+      path,
+      {
+        ...query,
+        per_page: String(GITHUB_PAGE_SIZE),
+        page: String(page),
+      },
+      budget
+    );
     if (!Array.isArray(items) || items.length === 0) {
       return { complete: true, nextPage: page };
     }
@@ -1395,7 +1441,8 @@ async function chunkedBatch(env, statements, size = 50) {
   }
 }
 
-async function githubJson(env, path, query = {}) {
+async function githubJson(env, path, query = {}, budget = null) {
+  if (budget) budget.noteFetch();
   const url = new URL(`${GITHUB_API}${path}`);
   for (const [key, value] of Object.entries(query)) {
     if (value !== undefined && value !== null && value !== "") {
@@ -1436,6 +1483,7 @@ async function syncStatus(env) {
     error,
     lastSyncAt,
     trigger,
+    heartbeatAt,
   ] = await Promise.all([
     getMeta(env, "sync_status"),
     getMeta(env, "sync_phase"),
@@ -1445,23 +1493,25 @@ async function syncStatus(env) {
     getMeta(env, "sync_error"),
     getMeta(env, "last_sync_at"),
     getMeta(env, "sync_trigger"),
+    getMeta(env, "sync_heartbeat_at"),
   ]);
   const normalizedStatus = status || "idle";
   const normalizedStartedAt = unixOrNull(startedAt);
+  const normalizedHeartbeatAt = unixOrNull(heartbeatAt);
   if (
     normalizedStatus === "running" &&
-    normalizedStartedAt &&
-    unixNow() - normalizedStartedAt >= runningTtlSeconds(env)
+    syncStalled(env, normalizedStartedAt, normalizedHeartbeatAt)
   ) {
-    const minutes = Math.round(runningTtlSeconds(env) / 60);
     return {
       status: "error",
       phase: "error",
-      message: "Previous sync timed out",
+      message: "Previous sync stalled",
       startedAt: normalizedStartedAt,
       finishedAt: unixOrNull(finishedAt),
       lastSyncAt: unixOrNull(lastSyncAt),
-      error: `Previous sync was marked running for more than ${minutes} minutes. Start a new sync to resume from the saved cursors.`,
+      heartbeatAt: normalizedHeartbeatAt,
+      error:
+        "Previous sync stopped updating (the worker was likely evicted or hit a limit mid-run). Start a new sync to resume from the saved cursors.",
       trigger: trigger || null,
     };
   }
@@ -1473,9 +1523,24 @@ async function syncStatus(env) {
     startedAt: normalizedStartedAt,
     finishedAt: unixOrNull(finishedAt),
     lastSyncAt: unixOrNull(lastSyncAt),
+    heartbeatAt: normalizedHeartbeatAt,
     error: error || null,
     trigger: trigger || null,
   };
+}
+
+// A run is stalled if its heartbeat has gone quiet (primary signal) or, as a
+// backstop, if it has been marked running past the hard TTL.
+function syncStalled(env, startedAt, heartbeatAt) {
+  const now = unixNow();
+  const lastProgressAt = heartbeatAt || startedAt;
+  if (lastProgressAt && now - lastProgressAt >= heartbeatStaleSeconds(env)) {
+    return true;
+  }
+  if (startedAt && now - startedAt >= runningTtlSeconds(env)) {
+    return true;
+  }
+  return false;
 }
 
 async function setSyncStatus(env, patch) {
@@ -1483,6 +1548,11 @@ async function setSyncStatus(env, patch) {
   for (const [key, value] of Object.entries(patch)) {
     const metaKey = key.startsWith("sync_") || key === "last_sync_at" ? key : `sync_${key}`;
     entries.push([metaKey, value === null || value === undefined ? "" : String(value)]);
+  }
+  // Every status write doubles as a heartbeat so stall detection can tell a live
+  // run from an evicted one. Callers can still set it explicitly (e.g. on start).
+  if (!entries.some(([key]) => key === "sync_heartbeat_at")) {
+    entries.push(["sync_heartbeat_at", String(unixNow())]);
   }
   await chunkedBatch(
     env,
@@ -1653,6 +1723,37 @@ function runningTtlSeconds(env) {
     DEFAULT_RUNNING_TTL_SECONDS,
     MAX_RUNNING_TTL_SECONDS
   );
+}
+
+function heartbeatStaleSeconds(env) {
+  return positiveInt(
+    env.SYNC_HEARTBEAT_STALE_SECONDS,
+    DEFAULT_HEARTBEAT_STALE_SECONDS,
+    MAX_HEARTBEAT_STALE_SECONDS
+  );
+}
+
+function maxGithubRequests(env) {
+  return positiveInt(
+    env.SYNC_MAX_GITHUB_REQUESTS,
+    DEFAULT_MAX_GITHUB_REQUESTS,
+    MAX_GITHUB_REQUESTS
+  );
+}
+
+// Tracks how many GitHub subrequests this invocation has spent so fetch loops can
+// stop before hitting the platform's per-invocation subrequest limit.
+function createSyncBudget(env) {
+  return {
+    githubUsed: 0,
+    githubLimit: maxGithubRequests(env),
+    canFetch() {
+      return this.githubUsed < this.githubLimit;
+    },
+    noteFetch() {
+      this.githubUsed += 1;
+    },
+  };
 }
 
 function positiveInt(value, fallback, max) {
