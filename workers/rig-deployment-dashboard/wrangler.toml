@@ -5,7 +5,7 @@ keep_vars = true
 
 [vars]
 # Same-origin Worker-hosted app. Override to "*" in local `.dev.vars` if needed.
-ALLOWED_ORIGIN = "https://rig-deployment-dashboard.dataspeedhashfinder.workers.dev"
+ALLOWED_ORIGIN = "https://rig-deployment-dashboard.appliedapps.workers.dev"
 SNAPSHOT_SIZE = "10"
 CACHE_SECONDS = "10"
 

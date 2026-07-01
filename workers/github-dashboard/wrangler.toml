@@ -5,7 +5,7 @@ keep_vars = true
 
 [vars]
 # Same-origin Worker-hosted app. Override to "*" in local `.dev.vars` if needed.
-ALLOWED_ORIGIN = "https://github-dashboard.dataspeedhashfinder.workers.dev"
+ALLOWED_ORIGIN = "https://github-dashboard.appliedapps.workers.dev"
 GITHUB_REPO = "AppliedNeuron/core-stack"
 SYNC_BRANCH_PAGES = "5"
 SYNC_COMMIT_PAGES = "3"

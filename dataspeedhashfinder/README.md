@@ -14,6 +14,6 @@ After deploying the Worker, set its public URL in `config.js`:
 
 ```js
 window.dataspeedHashFinderConfig = {
-  apiBaseUrl: "https://dataspeed-parameter-proxy.<account>.workers.dev",
+  apiBaseUrl: "https://dataspeed-parameter-proxy.appliedapps.workers.dev",
 };
 ```

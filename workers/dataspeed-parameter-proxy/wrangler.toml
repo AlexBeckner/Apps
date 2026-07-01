@@ -5,7 +5,7 @@ keep_vars = true
 
 [vars]
 # Same-origin Worker-hosted app. Override to "*" in local `.dev.vars` if needed.
-ALLOWED_ORIGIN = "https://dataspeed-parameter-proxy.dataspeedhashfinder.workers.dev"
+ALLOWED_ORIGIN = "https://dataspeed-parameter-proxy.appliedapps.workers.dev"
 
 [assets]
 directory = "./public"

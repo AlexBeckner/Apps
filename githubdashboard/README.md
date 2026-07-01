@@ -12,7 +12,7 @@ Edit `config.js` when the Worker URL changes:
 
 ```js
 window.githubDashboardConfig = {
-  apiBaseUrl: "https://github-dashboard.dataspeedhashfinder.workers.dev",
+  apiBaseUrl: "https://github-dashboard.appliedapps.workers.dev",
 };
 ```
 
