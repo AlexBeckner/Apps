@@ -619,7 +619,7 @@ export function dashboardHtml(env) {
           '<div class="card-grid">' +
             countBadge("branches", data.liveBranchCount, "accent") +
             countBadge("tags", data.liveTagCount) +
-            countBadge("commits", Number(data.commitCount || 0).toLocaleString()) +
+            countBadge("commits", Number(data.allBranchCommitCount || data.commitCount || 0).toLocaleString()) +
             countBadge("open PRs", data.prCount.open, "success") +
             countBadge("merged PRs", data.prCount.merged, "merged") +
           '</div>' +

@@ -1,0 +1,48 @@
+name: Sync pull requests to dashboard D1
+
+# The Worker back-fills PRs only a few REST pages per cron tick (free-plan
+# subrequest cap), so for a repo with ~100k PRs the merged/closed counts stay
+# understated for hours. This Action has the full authenticated GitHub budget
+# (5,000 req/hour), so it walks every page of /pulls in one run and upserts the
+# metadata into D1. PR bodies are intentionally not stored (the Worker lazily
+# fetches them on first view) to keep D1 under its 500 MB free-plan cap.
+
+on:
+  schedule:
+    - cron: "37 */6 * * *" # every 6h, offset from the branch (*/30) & commit (:23) syncs
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Force full re-walk (ignore the D1 watermark) — use for the initial back-fill"
+        type: boolean
+        default: false
+
+concurrency:
+  group: sync-prs
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout dashboard repo (for the ingest script)
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Ingest pull requests into D1
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: "501de9c56b6ed3604e3ca0d047ed8084"
+          D1_DATABASE_ID: "d2b507b0-d616-41fe-a2cd-9f6e7c72011d"
+          GITHUB_REPO: AppliedNeuron/core-stack
+          # Needs pull-requests:read (fine-grained) or `repo` scope (classic) on
+          # AppliedNeuron/core-stack. The same secret used by sync-commits must
+          # therefore include PR read, not just contents:read.
+          GITHUB_TOKEN: ${{ secrets.CORE_STACK_TOKEN }}
+          FULL: ${{ github.event.inputs.full }}
+        run: node workers/github-dashboard/scripts/ingest-prs.mjs

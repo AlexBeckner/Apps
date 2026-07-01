@@ -798,7 +798,7 @@ async function handleBranches(env, url) {
 
 async function handleCommits(env, url) {
   return {
-    total: await countDefaultBranchCommits(env),
+    total: await countAllCommits(env),
     commits: await listCommits(env, {
       limit: normalizedLimit(url.searchParams.get("limit"), 100),
       offset: normalizedOffset(url.searchParams.get("offset")),
@@ -861,20 +861,29 @@ async function countDefaultBranchCommits(env) {
   return await scalar(env, "SELECT COUNT(*) AS c FROM commits WHERE on_default = 1");
 }
 
-// The "Commits" tab mirrors GitHub: it shows the default branch's history, not a
-// flat union of every branch. D1 holds commits from ALL branches (so branch pages
-// and search can surface them), so the global list filters on on_default — the
-// flag the Worker sets for every default-branch commit it syncs and the git
-// ingest leaves alone for off-branch commits.
+// The global "Commits" tab lists commits from ALL branches (the git ingest fills
+// in every non-default-branch commit), ordered by commit date via
+// idx_commits_committed. Per-branch history lives on the branch pages; the default
+// branch's on_default flag still backs its branch page + the default_commit_count
+// stat, but the global list is intentionally the full cross-branch firehose.
 async function listCommits(env, opts) {
   const limit = normalizedLimit(opts.limit, 100);
   const offset = normalizedOffset(opts.offset);
   const rows = await env.DB.prepare(
-    "SELECT * FROM commits WHERE on_default = 1 ORDER BY committed_at DESC LIMIT ? OFFSET ?"
+    "SELECT * FROM commits ORDER BY committed_at DESC LIMIT ? OFFSET ?"
   )
     .bind(limit, offset)
     .all();
   return (rows.results || []).map(toCommit);
+}
+
+// Every commit across every branch (matches the global Commits list). Prefer the
+// cached commit_total_count the git ingest writes; fall back to a live COUNT.
+async function countAllCommits(env) {
+  const meta = await getMeta(env, "commit_total_count");
+  const cached = meta ? Number.parseInt(meta, 10) : NaN;
+  if (Number.isFinite(cached)) return cached;
+  return await scalar(env, "SELECT COUNT(*) AS c FROM commits");
 }
 
 async function listPrs(env, opts) {

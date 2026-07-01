@@ -214,6 +214,27 @@ Files:
 Required Actions secrets are the same as the branch sync (`CORE_STACK_TOKEN`,
 `CLOUDFLARE_API_TOKEN`); the account id and D1 id are inlined in the workflow.
 
+### PR back-fill via GitHub Actions
+
+The Worker back-fills PRs only a few REST pages per cron tick (free-plan
+subrequest cap), so for a repo with ~100k PRs the merged/closed counts stay
+understated for hours. A dedicated Action walks the whole list in one run instead:
+
+- `.github/workflows/sync-prs.yml` - runs every 6h (and on demand). The first run
+  should use the **full** input to walk every page; scheduled runs are incremental.
+- `workers/github-dashboard/scripts/ingest-prs.mjs` - paginates
+  `/repos/{owner}/{repo}/pulls?state=all&sort=updated&direction=desc` with the
+  full authenticated budget and upserts metadata into `prs` (`ON CONFLICT(number)
+  DO UPDATE`, since PRs mutate). It stores **no body** (lazily fetched on first
+  view, like commits), advances a `pr_git_synced_at` watermark, and on a
+  completed full walk sets `seed_prs_complete = 1` so the Worker stops its own
+  slow back-fill (its fresh pass still keeps recently-updated PRs current). Run
+  with `DRY_RUN=1 SINCE="2 days ago" GITHUB_TOKEN=... GITHUB_REPO=owner/name` to
+  preview.
+
+`CORE_STACK_TOKEN` must have **pull-requests:read** (fine-grained) or `repo`
+scope (classic) - not just `contents:read` - for this workflow.
+
 ### Storage model (fitting D1's 500 MB free-plan cap)
 
 A full monorepo (hundreds of thousands of commits, tens of thousands of branches
@@ -230,9 +251,10 @@ DAG and full PR bodies. So the schema is deliberately lean:
 
 How it surfaces in the dashboard:
 
-- The **Commits tab** and the summary `commitCount` are scoped to the default
-  branch via `WHERE on_default = 1` (no DAG walk); the summary also exposes
-  `allBranchCommitCount` (`commit_total_count`, every commit across all branches).
+- The **Commits tab** and the home **commits** badge show **every commit across
+  all branches** (`commit_total_count` for the count, `idx_commits_committed` for
+  the list). The `on_default` flag still backs the default branch's page and the
+  `default_commit_count` stat, but the global list is the full cross-branch view.
 - **Branch pages**: the default branch is served from D1 (`on_default`); every
   other branch fetches its commit list live from the GitHub API (one request for
   the exact count via the `Link` header, one or two for the visible page).
