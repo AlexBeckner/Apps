@@ -1,0 +1,66 @@
+name: Sync branches to dashboard D1
+
+# Branch data for the GitHub dashboard is sourced from git itself instead of the
+# paginated REST/GraphQL API: one shallow, treeless fetch lists every branch tip
+# with its commit date, which is far cheaper and more complete for a repo with
+# tens of thousands of branches. The snapshot is pushed into the dashboard's D1.
+
+# Cadence vs. cost: each run does a fresh shallow fetch of every branch tip, so
+# on a private repo it consumes Actions minutes. */30 is a reasonable default
+# (every branch is fully refreshed each run, unlike the Worker's partial sweep).
+# Lower to */15 for fresher data, or add actions/cache on repo.git for cheaper
+# incremental fetches.
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-branches
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout dashboard repo (for the ingest script)
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Fetch branch tips from core-stack (shallow + treeless)
+        env:
+          # PAT / fine-grained token with contents:read on AppliedNeuron/core-stack.
+          CORE_STACK_TOKEN: ${{ secrets.CORE_STACK_TOKEN }}
+          CORE_STACK_REPO: AppliedNeuron/core-stack
+        run: |
+          set -euo pipefail
+          git init --bare repo.git
+          git -C repo.git remote add origin "https://github.com/${CORE_STACK_REPO}.git"
+          AUTH=$(printf 'x-access-token:%s' "$CORE_STACK_TOKEN" | base64 | tr -d '\n')
+          # --depth=1 grabs only each branch tip; --filter=tree:0 skips trees/blobs
+          # so we download just the commit objects we need for committer dates.
+          git -C repo.git \
+            -c http.extraheader="Authorization: Basic ${AUTH}" \
+            -c protocol.version=2 \
+            fetch --depth=1 --filter=tree:0 --prune --no-tags \
+            origin '+refs/heads/*:refs/heads/*'
+          DEF=$(git -C repo.git -c http.extraheader="Authorization: Basic ${AUTH}" \
+            ls-remote --symref origin HEAD \
+            | sed -n 's#^ref: refs/heads/\(.*\)[[:space:]]HEAD#\1#p')
+          echo "DEFAULT_BRANCH=${DEF}" >> "$GITHUB_ENV"
+          echo "Default branch: ${DEF}"
+          git -C repo.git for-each-ref --sort=-committerdate refs/heads \
+            --format='%(objectname)%09%(committerdate:unix)%09%(refname:short)' > branches.tsv
+          echo "Branch tips: $(wc -l < branches.tsv)"
+
+      - name: Upsert snapshot into D1
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: "501de9c56b6ed3604e3ca0d047ed8084"
+          D1_DATABASE_ID: "d2b507b0-d616-41fe-a2cd-9f6e7c72011d"
+        run: node workers/github-dashboard/scripts/ingest-branches.mjs branches.tsv

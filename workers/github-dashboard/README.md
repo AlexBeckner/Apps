@@ -141,3 +141,40 @@ goes stale for `SYNC_HEARTBEAT_STALE_SECONDS` (default 180, below the cron
 interval), status calls report it as stalled and the next manual or scheduled
 sync takes over from the saved cursors. `SYNC_RUNNING_TTL_SECONDS` is a hard
 backstop for the same check.
+
+## Branch sync via git (recommended for large repos)
+
+GitHub has no "recently updated branches" listing (REST `/branches` is
+alphabetical; GraphQL cannot order branches by commit date), so for a repo with
+tens of thousands of branches the in-Worker sweep can only refresh everything on
+a slow rolling cycle. The faster, simpler source of truth is **git itself**: one
+shallow, treeless fetch lists every branch tip with its commit date, and a
+scheduled GitHub Action pushes that full snapshot into the same D1 table.
+
+Files:
+
+- `.github/workflows/sync-branches.yml` - runs every 30 min (and on demand). It
+  does a `git fetch --depth=1 --filter=tree:0 --prune` of `refs/heads/*` (only
+  branch-tip commit objects, no trees/blobs), then `git for-each-ref` to emit
+  `<sha>\t<committerdate-unix>\t<name>`.
+- `workers/github-dashboard/scripts/ingest-branches.mjs` - upserts that snapshot
+  into D1 in batches, then mark-and-sweeps deletions (any branch not in the
+  snapshot is set `deleted_at`). Because git returns the complete authoritative
+  list every run, deletion detection is exact and immediate. Run with `DRY_RUN=1`
+  to preview the SQL without touching D1.
+
+Required Actions secrets (in the repo that hosts the workflow):
+
+- `CORE_STACK_TOKEN` - fine-grained PAT with **contents:read** on the tracked
+  repo (`AppliedNeuron/core-stack`), used for the git fetch. (If you instead
+  place the workflow inside `core-stack`, the built-in `GITHUB_TOKEN` works and
+  this secret is unnecessary.)
+- `CLOUDFLARE_API_TOKEN` - token with **D1 edit** permission. The account id and
+  D1 database id are non-secret and are inlined in the workflow `env`.
+
+To hand branches off from the Worker to the Action, set `BRANCH_SYNC_MODE` to
+`external` in `wrangler.toml` `[vars]` and redeploy. The Worker then stops
+touching the `branches` table (its GraphQL sweep and PR fast-path are skipped)
+and continues syncing commits, tags, and PRs; the UI/API keep reading the same
+`branches` table the Action now populates. Leave `BRANCH_SYNC_MODE` unset to keep
+the Worker's built-in sweep as the branch source.

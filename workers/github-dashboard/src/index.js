@@ -905,23 +905,35 @@ async function runSync(env, trigger) {
     budget,
   });
   await upsertPrs(env, prSync.items);
-  // Surface freshly active branches (open PR heads) right away and shield them
-  // from the sweep's prune until the sweep cursor reaches their position.
-  await refreshBranchesFromPrs(env, prSync.items, now);
   await setMeta(env, "last_sync_at", String(unixNow()));
 
-  // Rolling GraphQL sweep keeps every branch's head + commit date fresh and
-  // prunes branches deleted on GitHub. Isolated so a branch-side failure can
-  // never block commit/PR syncing.
-  await setSyncStatus(env, { phase: "branches", message: "Sweeping branches" });
-  let branchSweep = { fetched: 0, completedSweep: false, pruned: 0 };
-  try {
-    branchSweep = await syncBranches(env, owner, repo, repoMeta.default_branch, now, budget);
-  } catch (error) {
-    await setSyncStatus(env, {
-      phase: "branches",
-      message: `Branch sweep error: ${error.message || String(error)}`,
-    });
+  // Branches can be owned by an external git-based sync (see
+  // .github/workflows/sync-branches.yml), which lists every branch tip with its
+  // commit date in one shallow fetch. When BRANCH_SYNC_MODE=external the Worker
+  // leaves the branches table alone; otherwise it keeps branches fresh itself
+  // via the rolling GraphQL sweep below.
+  const externalBranches =
+    (env.BRANCH_SYNC_MODE || "").trim().toLowerCase() === "external";
+  let branchSweep = { fetched: 0, completedSweep: false, pruned: 0, external: externalBranches };
+  if (!externalBranches) {
+    // Surface freshly active branches (open PR heads) right away and shield them
+    // from the sweep's prune until the sweep cursor reaches their position.
+    await refreshBranchesFromPrs(env, prSync.items, now);
+    // Rolling GraphQL sweep keeps every branch's head + commit date fresh and
+    // prunes branches deleted on GitHub. Isolated so a branch-side failure can
+    // never block commit/PR syncing.
+    await setSyncStatus(env, { phase: "branches", message: "Sweeping branches" });
+    try {
+      branchSweep = {
+        ...(await syncBranches(env, owner, repo, repoMeta.default_branch, now, budget)),
+        external: false,
+      };
+    } catch (error) {
+      await setSyncStatus(env, {
+        phase: "branches",
+        message: `Branch sweep error: ${error.message || String(error)}`,
+      });
+    }
   }
 
   const historySeed = await seedHistory(
@@ -939,19 +951,24 @@ async function runSync(env, trigger) {
   );
 
   // Fallback for branches whose head commit is cached but lacked a date.
-  await fillBranchCommitTimes(env);
+  if (!externalBranches) {
+    await fillBranchCommitTimes(env);
+  }
   await setMeta(env, "last_sync_at", String(unixNow()));
 
+  const branchesSummary = branchSweep.external
+    ? "branches (external git sync)"
+    : `${branchSweep.fetched} branches` +
+      (branchSweep.completedSweep
+        ? ` (full sweep${branchSweep.pruned ? `, pruned ${branchSweep.pruned}` : ""})`
+        : " (sweep in progress)");
   const backfilling = !(await seedComplete(env));
   await setSyncStatus(env, {
     status: "success",
     phase: "done",
     message:
-      `Synced ${branchSweep.fetched} branches` +
-      (branchSweep.completedSweep
-        ? ` (full sweep${branchSweep.pruned ? `, pruned ${branchSweep.pruned}` : ""})`
-        : " (sweep in progress)") +
-      `, ${tagSync.items.length + historySeed.tags.items} tags, ` +
+      `Synced ${branchesSummary}, ` +
+      `${tagSync.items.length + historySeed.tags.items} tags, ` +
       `${commitSync.items.length + historySeed.commits.items} commits, ` +
       `${prSync.items.length + historySeed.prs.items} PRs` +
       (backfilling
