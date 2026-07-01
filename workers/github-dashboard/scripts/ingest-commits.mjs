@@ -203,6 +203,11 @@ async function main() {
     console.error(`Failed to run git: ${error.message}`);
     process.exit(1);
   });
+  // Attach the close listener BEFORE consuming stdout. The final flush() below
+  // awaits on D1 network I/O, during which git can exit and emit 'close'. If we
+  // only started listening after the loop we'd miss an already-fired event and
+  // hang until the job timeout (inserting every commit but never writing meta).
+  const closed = new Promise((resolve) => child.on("close", resolve));
   const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
 
   let buf = [];
@@ -224,7 +229,7 @@ async function main() {
   await flush(buf);
   ingested += buf.length;
 
-  const code = await new Promise((resolve) => child.on("close", resolve));
+  const code = await closed;
   if (code !== 0) {
     console.error(`git log exited with code ${code}`);
     process.exit(1);
