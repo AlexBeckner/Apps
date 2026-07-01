@@ -487,10 +487,10 @@ export function dashboardHtml(env) {
       (state.syncErrorOpen && sync.error ? '<div class="sync-error-popover">' + escape(sync.error) + '</div>' : '');
     document.getElementById("sync-button").addEventListener("click", function () {
       state.syncErrorOpen = false;
-      var adminToken = getAdminToken();
-      if (!adminToken) return;
+      // Admin token requirement temporarily disabled; send it only if one is saved.
+      var adminToken = localStorage.getItem(adminStorageKey) || "";
       postApi("/api/sync", {
-        headers: { "X-Dashboard-Admin-Token": adminToken }
+        headers: adminToken ? { "X-Dashboard-Admin-Token": adminToken } : {}
       }).then(function (data) {
         state.sync = data;
         renderSync();
