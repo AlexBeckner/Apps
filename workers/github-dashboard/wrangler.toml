@@ -10,11 +10,13 @@ GITHUB_REPO = "AppliedNeuron/core-stack"
 SYNC_COMMIT_PAGES = "3"
 SYNC_PR_PAGES = "5"
 SYNC_TAG_PAGES = "3"
-# Branches are refreshed by a continuous GraphQL sweep (100 branches + their
-# commit date per request). This caps GraphQL pages per invocation; the sweep
-# resumes from a saved cursor each cron tick and prunes deleted branches when a
-# full pass completes. Raise for faster sweeps, lower if you hit the subrequest
-# budget or CPU (Error 1102).
+# Branch data is owned by the external git-based sync (see
+# .github/workflows/sync-branches.yml), which lists every branch tip with its
+# commit date in one shallow fetch and pushes the snapshot to D1. In this mode
+# the Worker leaves the branches table alone and only syncs commits/tags/PRs.
+# Unset this (or set to anything other than "external") to fall back to the
+# Worker's built-in GraphQL branch sweep governed by SYNC_BRANCH_SWEEP_PAGES.
+BRANCH_SYNC_MODE = "external"
 SYNC_BRANCH_SWEEP_PAGES = "12"
 # History back-fill rotates one page per type per turn (branches -> tags ->
 # commits -> prs -> repeat) so all types advance together each run.
