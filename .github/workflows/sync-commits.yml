@@ -1,0 +1,83 @@
+name: Sync commits to dashboard D1
+
+# Commit metadata for EVERY branch is sourced from git (one `git log --all`)
+# instead of paginating the REST API per branch. The Worker keeps the default
+# branch's commits fresh on its own; this fills in all the non-default-branch
+# commits so branch pages, PR pages, and search can surface them.
+#
+# The clone is treeless (--filter=tree:0: commit objects only, no trees/blobs)
+# and cached between runs, so after the initial full ingest each run only pulls
+# new commit objects and ingests the delta (via a watermark in D1).
+
+on:
+  schedule:
+    - cron: "23 * * * *" # hourly, offset from the branch sync (*/30)
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Force full re-ingest (ignore the D1 watermark)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: sync-commits
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout dashboard repo (for the ingest script)
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Restore core-stack git cache
+        uses: actions/cache@v4
+        with:
+          path: repo.git
+          # Rolling cache: the run-id key never hits, so a fresh cache is saved
+          # every run; restore-keys pulls the most recent prior cache to fetch on
+          # top of. Keeps the treeless history warm between runs.
+          key: core-stack-commits-git-v1-${{ github.run_id }}
+          restore-keys: |
+            core-stack-commits-git-v1-
+
+      - name: Fetch full commit history from core-stack (treeless)
+        env:
+          # PAT / fine-grained token with contents:read on AppliedNeuron/core-stack.
+          CORE_STACK_TOKEN: ${{ secrets.CORE_STACK_TOKEN }}
+          CORE_STACK_REPO: AppliedNeuron/core-stack
+        run: |
+          set -euo pipefail
+          AUTH=$(printf 'x-access-token:%s' "$CORE_STACK_TOKEN" | base64 | tr -d '\n')
+          if [ ! -d repo.git ]; then
+            git init --bare repo.git
+            git -C repo.git remote add origin "https://github.com/${CORE_STACK_REPO}.git"
+          fi
+          # Full history of every branch, commit objects only (no trees/blobs).
+          git -C repo.git \
+            -c http.extraheader="Authorization: Basic ${AUTH}" \
+            -c protocol.version=2 \
+            fetch --filter=tree:0 --prune --no-tags \
+            origin '+refs/heads/*:refs/heads/*'
+          DEF=$(git -C repo.git -c http.extraheader="Authorization: Basic ${AUTH}" \
+            ls-remote --symref origin HEAD \
+            | sed -n 's#^ref: refs/heads/\(.*\)[[:space:]]HEAD#\1#p')
+          echo "DEFAULT_BRANCH=${DEF}" >> "$GITHUB_ENV"
+          echo "Default branch: ${DEF}"
+          echo "Branches: $(git -C repo.git for-each-ref refs/heads | wc -l)"
+
+      - name: Ingest commits into D1
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: "501de9c56b6ed3604e3ca0d047ed8084"
+          D1_DATABASE_ID: "d2b507b0-d616-41fe-a2cd-9f6e7c72011d"
+          REPO_DIR: repo.git
+          GITHUB_REPO: AppliedNeuron/core-stack
+          FULL: ${{ github.event.inputs.full }}
+        run: node workers/github-dashboard/scripts/ingest-commits.mjs

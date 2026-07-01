@@ -296,7 +296,7 @@ async function handleSummary(env) {
   const counts = await Promise.all([
     scalar(env, "SELECT COUNT(*) AS c FROM branches"),
     scalar(env, "SELECT COUNT(*) AS c FROM branches WHERE deleted_at IS NULL"),
-    scalar(env, "SELECT COUNT(*) AS c FROM commits"),
+    countDefaultBranchCommits(env),
     scalar(env, "SELECT COUNT(*) AS c FROM tags"),
     scalar(env, "SELECT COUNT(*) AS c FROM tags WHERE deleted_at IS NULL"),
     env.DB.prepare("SELECT state, COUNT(*) AS c FROM prs GROUP BY state").all(),
@@ -310,6 +310,14 @@ async function handleSummary(env) {
     prCount.total += row.c;
   }
 
+  // commitCount tracks the default branch (matches the Commits tab);
+  // allBranchCommitCount is every commit across all branches, sourced from the
+  // git ingest (falls back to the raw table count until that meta exists).
+  const allBranchMeta = await getMeta(env, "commit_total_count");
+  const allBranchCommitCount = allBranchMeta
+    ? Number.parseInt(allBranchMeta, 10)
+    : await scalar(env, "SELECT COUNT(*) AS c FROM commits");
+
   return {
     repo: `${owner}/${repo}`,
     repoUrl: (await getMeta(env, "repo_url")) || `https://github.com/${owner}/${repo}`,
@@ -320,6 +328,7 @@ async function handleSummary(env) {
     branchCount: counts[0],
     liveBranchCount: counts[1],
     commitCount: counts[2],
+    allBranchCommitCount,
     tagCount: counts[3],
     liveTagCount: counts[4],
     prCount,
@@ -626,6 +635,26 @@ async function handleCommitDetail(env, sha) {
   const row = await getCommitRow(env, sha);
   if (!row) throw httpError(404, "Commit not found");
 
+  // Off-branch commits are ingested from git with metadata only (no message body,
+  // to keep D1 lean). Fetch + cache the full message the first time one is opened.
+  let message = row.message || "";
+  if (!message) {
+    const fetched = await fetchCommitMessageFromGitHub(env, row.sha);
+    if (fetched && fetched.message) {
+      message = fetched.message;
+      await env.DB.prepare(
+        `UPDATE commits
+         SET message = ?,
+             author_name = COALESCE(author_name, ?),
+             author_email = COALESCE(author_email, ?)
+         WHERE sha = ?`
+      )
+        .bind(message, fetched.authorName, fetched.authorEmail, row.sha)
+        .run();
+    }
+  }
+  message = message || row.summary || "";
+
   const [prRows, tagRows, branchRows] = await Promise.all([
     env.DB.prepare(
       `SELECT * FROM prs
@@ -645,7 +674,7 @@ async function handleCommitDetail(env, sha) {
 
   return {
     commit: toCommit(row),
-    message: row.message || row.summary || "",
+    message,
     parents: [],
     prs: (prRows.results || []).map(toPr),
     tagsPointing: (tagRows.results || []).map((tag) => ({
@@ -740,7 +769,7 @@ async function handleBranches(env, url) {
 
 async function handleCommits(env, url) {
   return {
-    total: await scalar(env, "SELECT COUNT(*) AS c FROM commits"),
+    total: await countDefaultBranchCommits(env),
     commits: await listCommits(env, {
       limit: normalizedLimit(url.searchParams.get("limit"), 100),
       offset: normalizedOffset(url.searchParams.get("offset")),
@@ -792,11 +821,70 @@ async function listBranches(env, opts) {
   return (rows.results || []).map(toBranch);
 }
 
+async function defaultHeadSha(env) {
+  let row = await env.DB.prepare(
+    "SELECT head_sha FROM branches WHERE is_default = 1 AND deleted_at IS NULL LIMIT 1"
+  ).first();
+  if (!row) {
+    const def = await getMeta(env, "default_branch");
+    if (def) {
+      row = await env.DB.prepare("SELECT head_sha FROM branches WHERE name = ? LIMIT 1")
+        .bind(def)
+        .first();
+    }
+  }
+  return row?.head_sha || null;
+}
+
+// Count of commits on the default branch. The git-based commit ingest
+// (.github/workflows/sync-commits.yml) writes an authoritative `default_commit_count`
+// (git rev-list --count <default>) each run; fall back to walking the DAG when the
+// meta value is not yet present.
+async function countDefaultBranchCommits(env) {
+  const meta = await getMeta(env, "default_commit_count");
+  const cached = meta ? Number.parseInt(meta, 10) : NaN;
+  if (Number.isFinite(cached)) return cached;
+  const head = await defaultHeadSha(env);
+  if (!head) return await scalar(env, "SELECT COUNT(*) AS c FROM commits");
+  return await scalar(
+    env,
+    `WITH RECURSIVE reachable(sha) AS (
+       SELECT ?
+       UNION
+       SELECT cp.parent_sha FROM commit_parents cp JOIN reachable r ON cp.child_sha = r.sha
+     )
+     SELECT COUNT(*) AS c FROM commits c JOIN reachable r ON c.sha = r.sha`,
+    head
+  );
+}
+
+// The "Commits" tab mirrors GitHub: it shows the default branch's history, not a
+// flat union of every branch. Now that D1 holds commits from ALL branches (so
+// branch pages and search can surface them), the global list must walk the
+// default branch's ancestry rather than dumping the whole table.
 async function listCommits(env, opts) {
+  const limit = normalizedLimit(opts.limit, 100);
+  const offset = normalizedOffset(opts.offset);
+  const head = await defaultHeadSha(env);
+  if (!head) {
+    const rows = await env.DB.prepare(
+      "SELECT * FROM commits ORDER BY committed_at DESC LIMIT ? OFFSET ?"
+    )
+      .bind(limit, offset)
+      .all();
+    return (rows.results || []).map(toCommit);
+  }
   const rows = await env.DB.prepare(
-    "SELECT * FROM commits ORDER BY committed_at DESC LIMIT ? OFFSET ?"
+    `WITH RECURSIVE reachable(sha) AS (
+       SELECT ?
+       UNION
+       SELECT cp.parent_sha FROM commit_parents cp JOIN reachable r ON cp.child_sha = r.sha
+     )
+     SELECT c.* FROM commits c JOIN reachable r ON c.sha = r.sha
+     ORDER BY c.committed_at DESC
+     LIMIT ? OFFSET ?`
   )
-    .bind(normalizedLimit(opts.limit, 100), normalizedOffset(opts.offset))
+    .bind(head, limit, offset)
     .all();
   return (rows.results || []).map(toCommit);
 }
@@ -1677,6 +1765,34 @@ async function githubGraphQL(env, query, variables = {}, budget = null) {
     throw httpError(502, message || "GitHub GraphQL error");
   }
   return body.data;
+}
+
+// Lazily fetch a single commit's full message body from GitHub. Used for commits
+// ingested from git with metadata only. Returns null on any failure so the
+// commit detail view still renders from the cached subject.
+async function fetchCommitMessageFromGitHub(env, sha) {
+  if (!env.GITHUB_TOKEN || !sha) return null;
+  try {
+    const [owner, repo] = repoParts(env);
+    const data = await githubGraphQL(
+      env,
+      `query($owner:String!,$name:String!,$oid:GitObjectID!){
+         repository(owner:$owner,name:$name){
+           object(oid:$oid){ ... on Commit { message author { name email } } }
+         }
+       }`,
+      { owner, name: repo, oid: sha }
+    );
+    const object = data?.repository?.object;
+    if (!object) return null;
+    return {
+      message: object.message || "",
+      authorName: object.author?.name || null,
+      authorEmail: object.author?.email || null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 async function syncStatus(env) {

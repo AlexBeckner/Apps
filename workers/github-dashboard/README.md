@@ -97,6 +97,12 @@ pull requests refresh their newest pages first:
 - `SYNC_COMMIT_PAGES` pages of recent commits on the default branch, default 3
 - `SYNC_PR_PAGES` pages of pull requests sorted by update time, default 5
 
+The Worker only syncs the **default branch's** commits (that is what the REST
+`/commits` endpoint returns and what the "Commits" tab shows). Commits that live
+only on other branches are ingested from git by a separate Action — see
+[Commit sync via git](#commit-sync-via-git-all-branches). Pull requests are
+already all-branch (the Worker lists `state=all`, covering every head/base ref).
+
 Branches are handled differently. GitHub has no "recently updated branches"
 listing — the REST `/branches` endpoint is alphabetical and GraphQL cannot order
 branches by commit date — so a fixed fresh pass would only ever re-check the
@@ -178,3 +184,44 @@ touching the `branches` table (its GraphQL sweep and PR fast-path are skipped)
 and continues syncing commits, tags, and PRs; the UI/API keep reading the same
 `branches` table the Action now populates. Leave `BRANCH_SYNC_MODE` unset to keep
 the Worker's built-in sweep as the branch source.
+
+## Commit sync via git (all branches)
+
+The Worker only knows about default-branch commits. To surface commits that live
+on other branches (so branch pages, PR pages, and search show real history
+instead of just a branch tip), commit metadata for **every** branch is ingested
+from git — the same "let git enumerate it" approach used for branches.
+
+Files:
+
+- `.github/workflows/sync-commits.yml` - runs hourly (and on demand). It keeps a
+  cached, treeless (`--filter=tree:0`) bare clone of `refs/heads/*` (commit
+  objects only, no trees/blobs) and runs `git log --all` to list every commit
+  with its author, dates, subject, and parent SHAs.
+- `workers/github-dashboard/scripts/ingest-commits.mjs` - streams that output and
+  upserts it into the `commits` / `commit_parents` tables in batches. It stores
+  **metadata + subject only** (no message body, to keep D1 lean) and uses
+  `INSERT ... ON CONFLICT DO NOTHING` so it never overwrites the richer rows the
+  Worker writes for default-branch commits. It writes `default_commit_count` and
+  `commit_total_count` to `meta`, and advances a `commit_git_synced_at` watermark
+  so each run only enumerates commits since the last one (the first run, or
+  `FULL=1` / the workflow's **full** input, ingests the entire history). Run with
+  `DRY_RUN=1 REPO_DIR=<path-to-a-clone> GITHUB_REPO=owner/name` to preview the SQL
+  without touching D1.
+
+Required Actions secrets are the same as the branch sync (`CORE_STACK_TOKEN`,
+`CLOUDFLARE_API_TOKEN`); the account id and D1 id are inlined in the workflow.
+
+How it surfaces in the dashboard:
+
+- **Branch pages** walk the commit DAG (`commit_parents`) from the branch head,
+  so they now show the branch's full history and an accurate commit count.
+- **Search** matches commits on any branch.
+- The **Commits tab** and the summary `commitCount` stay scoped to the default
+  branch (they walk the default head's ancestry); the summary also exposes
+  `allBranchCommitCount` (every commit across all branches).
+- **Commit detail** for an off-branch commit lazily fetches its full message from
+  GitHub the first time it is opened and caches it back into D1.
+
+No Worker env changes are required: the Worker keeps syncing default-branch
+commits for near-real-time freshness, and the Action fills in the rest.
