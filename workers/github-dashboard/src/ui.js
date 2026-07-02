@@ -476,7 +476,7 @@ export function dashboardHtml(env) {
     var label = running ? labelForPhase(sync.phase) : "Sync now";
     var hasAdminToken = !!localStorage.getItem(adminStorageKey);
     syncRoot.innerHTML =
-      '<div class="last-sync"><div>Last synced</div><strong>' + shortRelative(sync.lastSyncAt) + '</strong></div>' +
+      '<div class="last-sync" title="' + attr(sourcesSummary(sync)) + '"><div>Last synced</div><strong>' + shortRelative(sync.lastSyncAt) + '</strong></div>' +
       '<button class="btn" id="sync-button" ' + (running ? "disabled" : "") + '>' +
         '<svg class="' + (running ? "spin" : "") + '" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7 7 0 0 1 14.95 7.16a.75.75 0 1 1-1.49.178A5.501 5.501 0 0 0 8 2.5ZM1.705 8.005a.75.75 0 0 1 .834.656 5.501 5.501 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.001 7.001 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834Z"/></svg>' +
         label +
@@ -583,8 +583,17 @@ export function dashboardHtml(env) {
   }
 
   function labelForPhase(phase) {
-    var labels = { starting: "Starting...", repo: "Repo...", branches: "Branches...", tags: "Tags...", commits: "Commits...", prs: "PRs...", done: "Done..." };
+    var labels = { starting: "Starting...", dispatch: "Dispatching...", repo: "Repo...", branches: "Branches...", tags: "Tags...", commits: "Commits...", prs: "PRs...", done: "Done..." };
     return labels[phase] || "Syncing...";
+  }
+
+  // Per-source last-synced times (branches / commits / PRs / tags) for the
+  // "Last synced" hover tooltip, so each git-based sync is verifiable at a glance.
+  function sourcesSummary(sync) {
+    if (!sync || !sync.sources || !sync.sources.length) return "";
+    return sync.sources.map(function (s) {
+      return s.label + ": " + shortRelative(s.lastSyncAt);
+    }).join("\n");
   }
 
   var syncTimer = null;

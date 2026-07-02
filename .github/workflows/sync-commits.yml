@@ -1,9 +1,9 @@
-name: Sync commits to dashboard D1
+name: Sync commits + tags to dashboard D1
 
 # Commit metadata for EVERY branch is sourced from git (one `git log --all`)
-# instead of paginating the REST API per branch. The Worker keeps the default
-# branch's commits fresh on its own; this fills in all the non-default-branch
-# commits so branch pages, PR pages, and search can surface them.
+# instead of paginating the REST API per branch, and every tag is sourced from
+# the same clone (`git for-each-ref refs/tags`). These are the sole source of
+# truth for commits and tags in D1 (the Worker no longer syncs anything).
 #
 # The clone is BLOBLESS (--filter=blob:none: all commits + all trees, no file
 # blobs) and cached between runs. Blobless (not treeless) is required because
@@ -14,7 +14,7 @@ name: Sync commits to dashboard D1
 
 on:
   schedule:
-    - cron: "23 * * * *" # hourly, offset from the branch sync (*/30)
+    - cron: "25 * * * *" # hourly (offset from branches :05 and PRs :45)
   workflow_dispatch:
     inputs:
       full:
@@ -65,17 +65,21 @@ jobs:
           fi
           # Full history of every branch: all commits + all trees, no file blobs.
           # Blobless (not treeless) so `git log --all` never needs a lazy fetch.
+          # --no-tags disables auto-following; the explicit refs/tags refspec is
+          # still honored, so we get every tag object (for the tag sync) without
+          # git also grabbing tags reachable from unrelated fetched history.
           git -C repo.git \
             -c http.extraheader="Authorization: Basic ${AUTH}" \
             -c protocol.version=2 \
             fetch --filter=blob:none --prune --no-tags \
-            origin '+refs/heads/*:refs/heads/*'
+            origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'
           DEF=$(git -C repo.git -c http.extraheader="Authorization: Basic ${AUTH}" \
             ls-remote --symref origin HEAD \
             | sed -n 's#^ref: refs/heads/\(.*\)[[:space:]]HEAD#\1#p')
           echo "DEFAULT_BRANCH=${DEF}" >> "$GITHUB_ENV"
           echo "Default branch: ${DEF}"
           echo "Branches: $(git -C repo.git for-each-ref refs/heads | wc -l)"
+          echo "Tags: $(git -C repo.git for-each-ref refs/tags | wc -l)"
 
       - name: Ingest commits into D1
         env:
@@ -91,3 +95,11 @@ jobs:
           # "could not read Username for github.com" that a lazy fetch produces.
           GIT_NO_LAZY_FETCH: "1"
         run: node workers/github-dashboard/scripts/ingest-commits.mjs
+
+      - name: Ingest tags into D1
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: "501de9c56b6ed3604e3ca0d047ed8084"
+          D1_DATABASE_ID: "d2b507b0-d616-41fe-a2cd-9f6e7c72011d"
+          REPO_DIR: repo.git
+        run: node workers/github-dashboard/scripts/ingest-tags.mjs

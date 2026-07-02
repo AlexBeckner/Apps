@@ -9,7 +9,7 @@ name: Sync pull requests to dashboard D1
 
 on:
   schedule:
-    - cron: "37 */6 * * *" # every 6h, offset from the branch (*/30) & commit (:23) syncs
+    - cron: "45 * * * *" # hourly (offset from branches :05 and commits :25)
   workflow_dispatch:
     inputs:
       full:

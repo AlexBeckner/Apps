@@ -4,40 +4,25 @@ import { dashboardHtml, isDashboardRoute } from "./ui.js";
 const GITHUB_API = "https://api.github.com";
 const GITHUB_GRAPHQL = "https://api.github.com/graphql";
 const DEFAULT_REPO = "AppliedNeuron/core-stack";
-const DEFAULT_COMMIT_PAGES = 3;
-const DEFAULT_PR_PAGES = 5;
-const DEFAULT_TAG_PAGES = 3;
 const GITHUB_PAGE_SIZE = 100;
-const MAX_SYNC_PAGES = 100;
-const DEFAULT_SEED_PAGE_BUDGET = 1000;
-const MAX_SEED_PAGE_BUDGET = 5000;
-// History back-fill rotates through the entity types one page-range at a time so
-// they all advance together. 1 page per turn = pure round-robin by page.
-const DEFAULT_SEED_PAGES_PER_TURN = 1;
-const MAX_SEED_PAGES_PER_TURN = 50;
 const MAX_LIST_LIMIT = 500;
-const DEFAULT_RUNNING_TTL_SECONDS = 10 * 60;
-const MAX_RUNNING_TTL_SECONDS = 24 * 60 * 60;
-// Free-plan Workers allow 50 external subrequests per invocation. Cap GitHub
-// calls per run well under that so a single sync never trips the limit; the
-// cron trigger resumes from saved cursors on the next tick.
-const DEFAULT_MAX_GITHUB_REQUESTS = 30;
-const MAX_GITHUB_REQUESTS = 5000;
-// A live sync updates its heartbeat on every phase/batch. If the heartbeat goes
-// stale the worker was almost certainly evicted or hit a limit mid-run, so a new
-// sync is allowed to take over instead of waiting for the full running TTL.
-const DEFAULT_HEARTBEAT_STALE_SECONDS = 180;
-const MAX_HEARTBEAT_STALE_SECONDS = 60 * 60;
-// GitHub exposes no "recently updated branches" listing (REST /branches is
-// alphabetical; GraphQL refs cannot order by commit date), so branches are kept
-// fresh with a continuous rolling GraphQL sweep instead of a fixed fresh pass.
-// Each GraphQL page returns 100 branches WITH their head commit date, so
-// last_commit_at is populated directly. This caps GraphQL pages per invocation.
-const DEFAULT_BRANCH_SWEEP_PAGES = 12;
-const MAX_BRANCH_SWEEP_PAGES = 100;
-const BRANCH_GRAPHQL_PAGE_SIZE = 100;
-const SEED_PLAN_VERSION = "full-history-with-parents-2026-06-30";
 const SCHEMA_UPGRADE_VERSION = "commits-on-default-2026-07-01";
+
+// All syncing is owned by git-based GitHub Actions (branches; commits+tags; PRs).
+// The Worker no longer syncs anything itself: it serves the dashboard from D1 and
+// lazily reads a few things from GitHub at request time (PR bodies, commit
+// messages, live per-branch commit lists). "Sync now" dispatches these three
+// workflows via the GitHub API; each also runs hourly on its own cron.
+const DEFAULT_ACTIONS_REPO = "AlexBeckner/Apps";
+const SYNC_WORKFLOWS = ["sync-branches.yml", "sync-commits.yml", "sync-prs.yml"];
+// Where each workflow's ingest script records its last successful run. Status is
+// derived from these timestamps, so no GitHub API call is needed to render it.
+const SYNC_SOURCES = [
+  { key: "branches", label: "Branches", metaKey: "branch_external_synced_at" },
+  { key: "commits", label: "Commits", metaKey: "commit_git_synced_at" },
+  { key: "prs", label: "PRs", metaKey: "pr_git_synced_at" },
+  { key: "tags", label: "Tags", metaKey: "tag_git_synced_at" },
+];
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -201,7 +186,7 @@ export default {
         if (authError) {
           return jsonResponse(request, env, { error: authError }, { status: 403 });
         }
-        const status = await startSync(env, ctx, "manual");
+        const status = await dispatchSync(env, "manual");
         return jsonResponse(request, env, status);
       }
 
@@ -215,11 +200,6 @@ export default {
         { status }
       );
     }
-  },
-
-  async scheduled(_event, env, ctx) {
-    await ensureSchema(env);
-    ctx.waitUntil(startSync(env, ctx, "scheduled"));
   },
 };
 
@@ -917,767 +897,66 @@ async function listTags(env, opts) {
   return (rows.results || []).map(toTag);
 }
 
-async function startSync(env, ctx, trigger) {
-  if (!env.GITHUB_TOKEN) {
-    throw httpError(500, "Worker secret GITHUB_TOKEN is not configured.");
+// "Sync now" fans out to the three git-based workflows (branches; commits+tags;
+// PRs) via the GitHub Actions REST API. They also run hourly on their own cron;
+// this just kicks an immediate run of each. Requires ACTIONS_DISPATCH_TOKEN, a
+// PAT with actions:read+write on ACTIONS_REPO (the repo hosting the workflows).
+async function dispatchSync(env, trigger) {
+  const token = env.ACTIONS_DISPATCH_TOKEN;
+  if (!token) {
+    throw httpError(500, "Worker secret ACTIONS_DISPATCH_TOKEN is not configured.");
   }
+  const repo = (env.ACTIONS_REPO || DEFAULT_ACTIONS_REPO).trim();
+  const ref = (env.ACTIONS_REF || "main").trim();
 
-  const current = await syncStatus(env);
-  const now = unixNow();
-  // syncStatus() already downgrades a stalled run to "error", so a status of
-  // "running" here means a live sync is genuinely still in progress.
-  if (current.status === "running") {
-    return current;
-  }
-
-  await setSyncStatus(env, {
-    status: "running",
-    phase: "starting",
-    message: `Starting ${trigger} sync`,
-    started_at: now,
-    heartbeat_at: now,
-    finished_at: null,
-    error: null,
-  });
-
-  ctx.waitUntil(
-    runSync(env, trigger).catch(async (error) => {
-      await setSyncStatus(env, {
-        status: "error",
-        phase: "error",
-        message: "Sync failed",
-        finished_at: unixNow(),
-        error: error.message || String(error),
-      });
+  const results = await Promise.allSettled(
+    SYNC_WORKFLOWS.map(async (file) => {
+      const res = await fetch(
+        `${GITHUB_API}/repos/${repo}/actions/workflows/${file}/dispatches`,
+        {
+          method: "POST",
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${token}`,
+            "User-Agent": "github-dashboard-worker",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ ref }),
+        }
+      );
+      // A successful workflow_dispatch returns 204 No Content.
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`${file}: ${res.status} ${text.slice(0, 200)}`);
+      }
+      return file;
     })
   );
 
+  const failed = results
+    .filter((r) => r.status === "rejected")
+    .map((r) => (r.reason && r.reason.message) || String(r.reason));
+  await setMeta(env, "sync_dispatched_at", String(unixNow()));
+  await setMeta(env, "sync_trigger", trigger);
+  await setMeta(env, "sync_dispatch_error", failed.join(" | "));
+  if (failed.length) {
+    throw httpError(
+      502,
+      `Failed to dispatch ${failed.length}/${SYNC_WORKFLOWS.length} workflow(s): ${failed.join(" | ")}`
+    );
+  }
   return syncStatus(env);
 }
 
-async function runSync(env, trigger) {
-  const [owner, repo] = repoParts(env);
-  const now = unixNow();
-  // One shared subrequest budget for the whole invocation so the fresh pass and
-  // the history back-fill together stay under the free-plan limit.
-  const budget = createSyncBudget(env);
-  await ensureSeedPlan(env, owner, repo);
-  const previousSyncAt = unixOrNull(await getMeta(env, "last_sync_at"));
-  const seeded = await seedComplete(env);
-
-  await setSyncStatus(env, {
-    phase: "repo",
-    message: `Fetching ${owner}/${repo} metadata`,
-  });
-  const repoMeta = await githubJson(env, `/repos/${owner}/${repo}`, {}, budget);
-  await setMeta(env, "default_branch", repoMeta.default_branch || "");
-  await setMeta(env, "repo_url", repoMeta.html_url || `https://github.com/${owner}/${repo}`);
-
-  await setSyncStatus(env, { phase: "tags", message: "Syncing tags" });
-  const tagSync = await fetchTags(env, owner, repo, now, { budget });
-  await upsertTags(env, tagSync.items, now, tagSync.complete);
-
-  await setSyncStatus(env, { phase: "commits", message: "Syncing recent commits" });
-  const commitSync = await fetchCommits(env, owner, repo, repoMeta.default_branch, {
-    stopWhenKnown: seeded && !!previousSyncAt,
-    budget,
-  });
-  await upsertCommits(env, commitSync.items);
-
-  await setSyncStatus(env, { phase: "prs", message: "Syncing pull requests" });
-  const prSync = await fetchPullRequests(env, owner, repo, {
-    updatedAfter: seeded ? previousSyncAt : null,
-    budget,
-  });
-  await upsertPrs(env, prSync.items);
-  await setMeta(env, "last_sync_at", String(unixNow()));
-
-  // Branches can be owned by an external git-based sync (see
-  // .github/workflows/sync-branches.yml), which lists every branch tip with its
-  // commit date in one shallow fetch. When BRANCH_SYNC_MODE=external the Worker
-  // leaves the branches table alone; otherwise it keeps branches fresh itself
-  // via the rolling GraphQL sweep below.
-  const externalBranches =
-    (env.BRANCH_SYNC_MODE || "").trim().toLowerCase() === "external";
-  let branchSweep = { fetched: 0, completedSweep: false, pruned: 0, external: externalBranches };
-  if (!externalBranches) {
-    // Surface freshly active branches (open PR heads) right away and shield them
-    // from the sweep's prune until the sweep cursor reaches their position.
-    await refreshBranchesFromPrs(env, prSync.items, now);
-    // Rolling GraphQL sweep keeps every branch's head + commit date fresh and
-    // prunes branches deleted on GitHub. Isolated so a branch-side failure can
-    // never block commit/PR syncing.
-    await setSyncStatus(env, { phase: "branches", message: "Sweeping branches" });
-    try {
-      branchSweep = {
-        ...(await syncBranches(env, owner, repo, repoMeta.default_branch, now, budget)),
-        external: false,
-      };
-    } catch (error) {
-      await setSyncStatus(env, {
-        phase: "branches",
-        message: `Branch sweep error: ${error.message || String(error)}`,
-      });
-    }
-  }
-
-  const historySeed = await seedHistory(
-    env,
-    owner,
-    repo,
-    repoMeta.default_branch,
-    now,
-    {
-      tags: tagSync.complete,
-      commits: commitSync.complete,
-      prs: prSync.complete,
-    },
-    budget
-  );
-
-  // Fallback for branches whose head commit is cached but lacked a date.
-  if (!externalBranches) {
-    await fillBranchCommitTimes(env);
-  }
-  await setMeta(env, "last_sync_at", String(unixNow()));
-
-  const branchesSummary = branchSweep.external
-    ? "branches (external git sync)"
-    : `${branchSweep.fetched} branches` +
-      (branchSweep.completedSweep
-        ? ` (full sweep${branchSweep.pruned ? `, pruned ${branchSweep.pruned}` : ""})`
-        : " (sweep in progress)");
-  const backfilling = !(await seedComplete(env));
-  await setSyncStatus(env, {
-    status: "success",
-    phase: "done",
-    message:
-      `Synced ${branchesSummary}, ` +
-      `${tagSync.items.length + historySeed.tags.items} tags, ` +
-      `${commitSync.items.length + historySeed.commits.items} commits, ` +
-      `${prSync.items.length + historySeed.prs.items} PRs` +
-      (backfilling
-        ? ` (history back-fill in progress, ${budget.githubUsed}/${budget.githubLimit} GitHub requests used)`
-        : ""),
-    finished_at: unixNow(),
-    error: null,
-    trigger,
-  });
-}
-
-const BRANCHES_QUERY = `
-query($owner:String!,$name:String!,$cursor:String,$pageSize:Int!){
-  repository(owner:$owner,name:$name){
-    refs(refPrefix:"refs/heads/",first:$pageSize,after:$cursor,orderBy:{field:ALPHABETICAL,direction:ASC}){
-      totalCount
-      pageInfo{ hasNextPage endCursor }
-      nodes{
-        name
-        target{
-          __typename
-          ... on Commit { oid committedDate }
-        }
-      }
-    }
-  }
-}`;
-
-// Continuous rolling sweep over ALL branches via GraphQL. Each page carries the
-// head commit date, so last_commit_at is populated for every branch (not just
-// those whose head is on the default branch). A GraphQL cursor is persisted so
-// the sweep resumes across invocations; when it wraps, branches not seen during
-// the sweep are pruned (deletion detection). The sweep is the only thing that
-// keeps alphabetically-late branches fresh, since GitHub cannot list branches
-// by recency.
-async function syncBranches(env, owner, repo, defaultBranch, now, budget) {
-  const pageCap = branchSweepPages(env);
-  let cursor = (await getMeta(env, "branch_sweep_cursor")) || null;
-  let sweepStartedAt = unixOrNull(await getMeta(env, "branch_sweep_started_at"));
-
-  // Empty cursor means we are (re)starting a full sweep from the top.
-  if (!cursor) {
-    sweepStartedAt = now;
-    await setMeta(env, "branch_sweep_started_at", String(sweepStartedAt));
-  }
-
-  let fetched = 0;
-  let pages = 0;
-  let totalCount = null;
-  let completedSweep = false;
-
-  while (budget.canFetch() && pages < pageCap) {
-    const data = await githubGraphQL(
-      env,
-      BRANCHES_QUERY,
-      { owner, name: repo, cursor, pageSize: BRANCH_GRAPHQL_PAGE_SIZE },
-      budget
-    );
-    const refs = data && data.repository && data.repository.refs;
-    if (!refs) {
-      completedSweep = true;
-      cursor = null;
-      await setMeta(env, "branch_sweep_cursor", "");
-      break;
-    }
-    if (Number.isFinite(refs.totalCount)) totalCount = refs.totalCount;
-
-    const items = [];
-    for (const node of refs.nodes || []) {
-      if (!node || !node.name) continue;
-      const target = node.target || {};
-      if (!target.oid) continue;
-      items.push({
-        name: node.name,
-        headSha: target.oid,
-        isDefault: node.name === defaultBranch ? 1 : 0,
-        lastCommitAt: toUnix(target.committedDate),
-        firstSeenAt: now,
-        lastSeenAt: now,
-      });
-    }
-    await upsertBranches(env, items);
-    fetched += items.length;
-    pages += 1;
-
-    await setSyncStatus(env, {
-      phase: "branches",
-      message: `Sweeping branches (${fetched} this run${
-        totalCount != null ? ` / ~${totalCount} live` : ""
-      })`,
-    });
-
-    const pageInfo = refs.pageInfo || {};
-    if (pageInfo.hasNextPage && pageInfo.endCursor) {
-      cursor = pageInfo.endCursor;
-      await setMeta(env, "branch_sweep_cursor", cursor);
-    } else {
-      completedSweep = true;
-      cursor = null;
-      await setMeta(env, "branch_sweep_cursor", "");
-      break;
-    }
-  }
-
-  if (totalCount != null) await setMeta(env, "branch_live_count", String(totalCount));
-
-  let pruned = 0;
-  if (completedSweep) {
-    pruned = await pruneUnseenBranches(env, sweepStartedAt, now);
-    await setMeta(env, "branch_last_full_sweep_at", String(now));
-  }
-  return { fetched, pages, completedSweep, pruned, totalCount };
-}
-
-// Any live branch not observed during a completed sweep no longer exists on
-// GitHub, so mark it deleted. The default branch is never pruned as a backstop.
-async function pruneUnseenBranches(env, sweepStartedAt, now) {
-  if (!sweepStartedAt) return 0;
-  const result = await env.DB.prepare(
-    `UPDATE branches
-     SET deleted_at = ?
-     WHERE deleted_at IS NULL
-       AND is_default = 0
-       AND (last_seen_at IS NULL OR last_seen_at < ?)`
-  )
-    .bind(now, sweepStartedAt)
-    .run();
-  return (result.meta && result.meta.changes) || 0;
-}
-
-// Open PRs prove their head branch still exists, so mark those branches seen
-// (prune-proof) and surface brand-new ones immediately. Existing rows keep the
-// head/date owned by the authoritative sweep to avoid regressing to a stale PR
-// head; only last_seen_at is refreshed.
-async function refreshBranchesFromPrs(env, prs, now) {
-  const seen = new Set();
-  const statements = [];
-  for (const pr of prs) {
-    if (pr.state !== "open") continue;
-    const name = pr.headRef;
-    const sha = pr.headSha;
-    if (!name || !sha || seen.has(name)) continue;
-    seen.add(name);
-    statements.push(
-      env.DB.prepare(
-        `INSERT INTO branches (name, head_sha, is_default, last_commit_at, first_seen_at, last_seen_at, deleted_at)
-         VALUES (?, ?, 0, NULL, ?, ?, NULL)
-         ON CONFLICT(name) DO UPDATE SET
-           last_seen_at = excluded.last_seen_at,
-           deleted_at = NULL`
-      ).bind(name, sha, now, now)
-    );
-  }
-  await chunkedBatch(env, statements);
-}
-
-async function fetchTags(env, owner, repo, now, opts = {}) {
-  const pages = opts.pages || syncPages(env.SYNC_TAG_PAGES, DEFAULT_TAG_PAGES);
-  const tags = [];
-  const pageState = await eachGithubPage(
-    env,
-    `/repos/${owner}/${repo}/tags`,
-    {},
-    { pages, startPage: opts.startPage, budget: opts.budget },
-    (items) => {
-      for (const item of items) {
-        if (!item?.name || !item?.commit?.sha) continue;
-        tags.push({
-          name: item.name,
-          targetSha: item.commit.sha,
-          isAnnotated: 0,
-          taggedAt: null,
-          message: null,
-          firstSeenAt: now,
-        });
-      }
-    }
-  );
-  return { items: tags, ...pageState };
-}
-
-async function fetchCommits(env, owner, repo, branch, opts = {}) {
-  const pages = opts.pages || syncPages(env.SYNC_COMMIT_PAGES, DEFAULT_COMMIT_PAGES);
-  const commits = [];
-  const pageState = await eachGithubPage(
-    env,
-    `/repos/${owner}/${repo}/commits`,
-    { sha: branch },
-    { pages, startPage: opts.startPage, budget: opts.budget },
-    async (items) => {
-      const pageCommits = [];
-      for (const item of items) {
-        const commit = item?.commit;
-        if (!item?.sha || !commit) continue;
-        const message = commit.message || "";
-        pageCommits.push({
-          sha: item.sha,
-          shortSha: item.sha.slice(0, 7),
-          authorName: commit.author?.name || item.author?.login || null,
-          authorEmail: commit.author?.email || null,
-          authoredAt: toUnix(commit.author?.date),
-          committedAt: toUnix(commit.committer?.date || commit.author?.date),
-          summary: message.split("\n")[0] || null,
-          message,
-          url: item.html_url || null,
-        });
-      }
-      commits.push(...pageCommits);
-      if (opts.stopWhenKnown && pageCommits.length > 0) {
-        return !(await allCommitsExist(env, pageCommits));
-      }
-      return true;
-    }
-  );
-  return { items: commits, ...pageState };
-}
-
-async function fetchPullRequests(env, owner, repo, opts = {}) {
-  const pages = opts.pages || syncPages(env.SYNC_PR_PAGES, DEFAULT_PR_PAGES);
-  const prs = [];
-  const pageState = await eachGithubPage(
-    env,
-    `/repos/${owner}/${repo}/pulls`,
-    { state: "all", sort: "updated", direction: "desc" },
-    { pages, startPage: opts.startPage, budget: opts.budget },
-    (items) => {
-      const pagePrs = [];
-      for (const pr of items) {
-        if (!Number.isInteger(pr?.number)) continue;
-        pagePrs.push({
-          number: pr.number,
-          title: pr.title || "",
-          state: pr.merged_at ? "merged" : pr.state || "closed",
-          author: pr.user?.login || null,
-          baseRef: pr.base?.ref || null,
-          headRef: pr.head?.ref || null,
-          headSha: pr.head?.sha || null,
-          mergeCommitSha: pr.merge_commit_sha || null,
-          createdAt: toUnix(pr.created_at),
-          updatedAt: toUnix(pr.updated_at),
-          mergedAt: toUnix(pr.merged_at),
-          closedAt: toUnix(pr.closed_at),
-          url: pr.html_url || null,
-          draft: pr.draft ? 1 : 0,
-          body: pr.body || null,
-        });
-      }
-      prs.push(...pagePrs);
-      if (opts.updatedAfter && pagePrs.length > 0) {
-        return pagePrs.some((pr) => (pr.updatedAt || 0) > opts.updatedAfter);
-      }
-      return true;
-    }
-  );
-  return { items: prs, ...pageState };
-}
-
-async function seedHistory(env, owner, repo, defaultBranch, now, freshComplete, budget) {
-  const pagesPerTurn = seedPagesPerTurn(env);
-  const perEntityBudget = seedPageBudget(env);
-
-  // Each seeder knows how to fetch + upsert one page-range of its entity type.
-  // Branches are intentionally absent: they are kept current by the continuous
-  // GraphQL sweep in syncBranches(), not by this page-based REST back-fill.
-  const seeders = [
-    {
-      kind: "tags",
-      table: "tags",
-      freshComplete: freshComplete.tags,
-      freshPages: syncPages(env.SYNC_TAG_PAGES, DEFAULT_TAG_PAGES),
-      run: async (startPage, pages) => {
-        const result = await fetchTags(env, owner, repo, now, { startPage, pages, budget });
-        await upsertTags(env, result.items, now, false);
-        return result;
-      },
-    },
-    {
-      kind: "commits",
-      table: "commits",
-      freshComplete: freshComplete.commits,
-      freshPages: syncPages(env.SYNC_COMMIT_PAGES, DEFAULT_COMMIT_PAGES),
-      run: async (startPage, pages) => {
-        const result = await fetchCommits(env, owner, repo, defaultBranch, { startPage, pages, budget });
-        await upsertCommits(env, result.items);
-        return result;
-      },
-    },
-    {
-      kind: "prs",
-      table: "prs",
-      freshComplete: freshComplete.prs,
-      freshPages: syncPages(env.SYNC_PR_PAGES, DEFAULT_PR_PAGES),
-      run: async (startPage, pages) => {
-        const result = await fetchPullRequests(env, owner, repo, { startPage, pages, budget });
-        await upsertPrs(env, result.items);
-        return result;
-      },
-    },
-  ];
-
-  // Resolve each type's starting cursor / completion up front.
-  const states = seeders.map((seeder) => ({
-    seeder,
-    complete: false,
-    cursor: 1,
-    items: 0,
-    pagesThisRun: 0,
-  }));
-  for (const state of states) {
-    const { seeder } = state;
-    if (seeder.freshComplete) {
-      await setMeta(env, seedCompleteKey(seeder.kind), "1");
-      state.complete = true;
-    } else if ((await getMeta(env, seedCompleteKey(seeder.kind))) === "1") {
-      state.complete = true;
-    } else {
-      state.cursor = await seedStartPage(env, seeder.kind, seeder.table, seeder.freshPages);
-    }
-  }
-
-  // Round-robin one page-range per type per rotation (tags -> commits -> prs ->
-  // repeat) so every type back-fills together, until this invocation's shared
-  // subrequest budget is spent. Cursors persist to meta, so the next run picks
-  // up exactly where this one stopped.
-  let progressed = true;
-  while (budget.canFetch() && progressed) {
-    progressed = false;
-    for (const state of states) {
-      if (!budget.canFetch()) break;
-      if (state.complete || state.pagesThisRun >= perEntityBudget) continue;
-
-      const pages = Math.min(pagesPerTurn, perEntityBudget - state.pagesThisRun);
-      await setSyncStatus(env, {
-        phase: state.seeder.kind,
-        message: `Back-filling ${state.seeder.kind} (page ${state.cursor})`,
-      });
-      const result = await state.seeder.run(state.cursor, pages);
-
-      const advanced = Math.max(0, result.nextPage - state.cursor);
-      state.items += result.items.length;
-      state.pagesThisRun += advanced;
-      state.cursor = result.nextPage;
-      state.complete = !!result.complete;
-
-      await setMeta(env, seedNextPageKey(state.seeder.kind), String(state.cursor));
-      await setMeta(env, seedCompleteKey(state.seeder.kind), state.complete ? "1" : "0");
-
-      if (result.budgetExhausted) break;
-      if (advanced > 0 && !state.complete) progressed = true;
-    }
-  }
-
-  const results = {
-    tags: { items: 0, complete: freshComplete.tags },
-    commits: { items: 0, complete: freshComplete.commits },
-    prs: { items: 0, complete: freshComplete.prs },
-  };
-  for (const state of states) {
-    results[state.seeder.kind] = { items: state.items, complete: state.complete };
-  }
-  return results;
-}
-
-async function seedStartPage(env, kind, table, freshPages) {
-  const saved = Number(await getMeta(env, seedNextPageKey(kind)));
-  if (Number.isFinite(saved) && saved >= 1) return Math.floor(saved);
-
-  const cachedItems = await scalar(env, `SELECT COUNT(*) AS c FROM ${table}`);
-  const nextCachedPage = Math.floor(cachedItems / GITHUB_PAGE_SIZE) + 1;
-  return Math.max(freshPages + 1, nextCachedPage);
-}
-
-function seedPagesPerTurn(env) {
-  return positiveInt(
-    env.SYNC_SEED_PAGES_PER_TURN,
-    DEFAULT_SEED_PAGES_PER_TURN,
-    MAX_SEED_PAGES_PER_TURN
-  );
-}
-
-function seedPageBudget(env) {
-  return positiveInt(env.SYNC_SEED_PAGE_BUDGET, DEFAULT_SEED_PAGE_BUDGET, MAX_SEED_PAGE_BUDGET);
-}
-
-async function ensureSeedPlan(env, owner, repo) {
-  const expected = `${owner}/${repo}:${SEED_PLAN_VERSION}`;
-  if ((await getMeta(env, "seed_plan_version")) === expected) return;
-
-  const nextPages = {
-    tags: syncPages(env.SYNC_TAG_PAGES, DEFAULT_TAG_PAGES) + 1,
-    commits: syncPages(env.SYNC_COMMIT_PAGES, DEFAULT_COMMIT_PAGES) + 1,
-    prs: syncPages(env.SYNC_PR_PAGES, DEFAULT_PR_PAGES) + 1,
-  };
-
-  for (const kind of Object.keys(nextPages)) {
-    await setMeta(env, seedNextPageKey(kind), String(nextPages[kind]));
-    await setMeta(env, seedCompleteKey(kind), "0");
-  }
-  await setMeta(env, "seed_plan_version", expected);
-}
-
-async function seedComplete(env) {
-  const complete = await Promise.all([
-    getMeta(env, seedCompleteKey("tags")),
-    getMeta(env, seedCompleteKey("commits")),
-    getMeta(env, seedCompleteKey("prs")),
-  ]);
-  return complete.every((value) => value === "1");
-}
-
-function seedNextPageKey(kind) {
-  return `seed_${kind}_next_page`;
-}
-
-function seedCompleteKey(kind) {
-  return `seed_${kind}_complete`;
-}
-
-async function eachGithubPage(env, path, query, opts, onPage) {
-  const maxPages = opts.pages;
-  const startPage = opts.startPage || 1;
-  const budget = opts.budget || null;
-  for (let page = startPage; page < startPage + maxPages; page++) {
-    if (budget && !budget.canFetch()) {
-      // Stop before spending another subrequest; resume from this page later.
-      return { complete: false, nextPage: page, budgetExhausted: true };
-    }
-    const items = await githubJson(
-      env,
-      path,
-      {
-        ...query,
-        per_page: String(GITHUB_PAGE_SIZE),
-        page: String(page),
-      },
-      budget
-    );
-    if (!Array.isArray(items) || items.length === 0) {
-      return { complete: true, nextPage: page };
-    }
-    const shouldContinue = await onPage(items, page);
-    if (items.length < GITHUB_PAGE_SIZE) {
-      return { complete: true, nextPage: page + 1 };
-    }
-    if (shouldContinue === false) {
-      return { complete: false, nextPage: page + 1, stoppedEarly: true };
-    }
-  }
-  return { complete: false, nextPage: startPage + maxPages };
-}
-
-async function allCommitsExist(env, commits) {
-  if (!commits.length) return false;
-  const existing = new Set();
-  for (let i = 0; i < commits.length; i += 50) {
-    const chunk = commits.slice(i, i + 50);
-    const placeholders = chunk.map(() => "?").join(", ");
-    const rows = await env.DB.prepare(
-      `SELECT sha FROM commits WHERE sha IN (${placeholders})`
-    )
-      .bind(...chunk.map((commit) => commit.sha))
-      .all();
-    for (const row of rows.results || []) existing.add(row.sha);
-  }
-  return commits.every((commit) => existing.has(commit.sha));
-}
-
-async function upsertBranches(env, branches) {
-  await chunkedBatch(
-    env,
-    branches.map((branch) =>
-      env.DB.prepare(
-        `INSERT INTO branches (name, head_sha, is_default, last_commit_at, first_seen_at, last_seen_at, deleted_at)
-         VALUES (?, ?, ?, ?, ?, ?, NULL)
-         ON CONFLICT(name) DO UPDATE SET
-           head_sha = excluded.head_sha,
-           is_default = excluded.is_default,
-           last_commit_at = COALESCE(excluded.last_commit_at, branches.last_commit_at),
-           last_seen_at = excluded.last_seen_at,
-           deleted_at = NULL`
-      ).bind(
-        branch.name,
-        branch.headSha,
-        branch.isDefault,
-        branch.lastCommitAt,
-        branch.firstSeenAt,
-        branch.lastSeenAt
-      )
-    )
-  );
-}
-
-async function upsertTags(env, tags, now, markMissingDeleted) {
-  const seen = new Set(tags.map((tag) => tag.name));
-  await chunkedBatch(
-    env,
-    tags.map((tag) =>
-      env.DB.prepare(
-        `INSERT INTO tags (name, target_sha, is_annotated, tagged_at, message, first_seen_at, deleted_at)
-         VALUES (?, ?, ?, ?, ?, ?, NULL)
-         ON CONFLICT(name) DO UPDATE SET
-           target_sha = excluded.target_sha,
-           is_annotated = excluded.is_annotated,
-           tagged_at = excluded.tagged_at,
-           message = excluded.message,
-           deleted_at = NULL`
-      ).bind(tag.name, tag.targetSha, tag.isAnnotated, tag.taggedAt, tag.message, tag.firstSeenAt)
-    )
-  );
-  if (markMissingDeleted) {
-    await markDeleted(env, "tags", "name", seen, now);
-  }
-}
-
-async function upsertCommits(env, commits) {
-  // Every commit the Worker syncs is on the default branch (fetchCommits is always
-  // called with the default branch), so mark on_default = 1 here. The git ingest
-  // inserts off-branch commits with the column left at its 0 default.
-  await chunkedBatch(
-    env,
-    commits.map((commit) =>
-      env.DB.prepare(
-        `INSERT INTO commits (sha, short_sha, author_name, author_email, authored_at, committed_at, summary, message, url, on_default)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-         ON CONFLICT(sha) DO UPDATE SET
-           author_name = excluded.author_name,
-           author_email = excluded.author_email,
-           authored_at = excluded.authored_at,
-           committed_at = excluded.committed_at,
-           summary = excluded.summary,
-           message = excluded.message,
-           url = excluded.url,
-           on_default = 1`
-      ).bind(
-        commit.sha,
-        commit.shortSha,
-        commit.authorName,
-        commit.authorEmail,
-        commit.authoredAt,
-        commit.committedAt,
-        commit.summary,
-        commit.message,
-        commit.url
-      )
-    )
-  );
-}
-
-async function fillBranchCommitTimes(env) {
-  await env.DB.prepare(
-    `UPDATE branches
-     SET last_commit_at = (
-       SELECT committed_at FROM commits WHERE commits.sha = branches.head_sha
-     )
-     WHERE EXISTS (
-       SELECT 1 FROM commits WHERE commits.sha = branches.head_sha
-     )`
-  ).run();
-}
-
-async function upsertPrs(env, prs) {
-  await chunkedBatch(
-    env,
-    prs.map((pr) =>
-      env.DB.prepare(
-        // body is intentionally omitted (NULL on insert) and never overwritten on
-        // conflict: bodies are lazy-fetched + cached per PR view to keep D1 lean.
-        `INSERT INTO prs (
-           number, title, state, author, base_ref, head_ref, head_sha,
-           merge_commit_sha, created_at, updated_at, merged_at, closed_at,
-           url, draft
-         )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(number) DO UPDATE SET
-           title = excluded.title,
-           state = excluded.state,
-           author = excluded.author,
-           base_ref = excluded.base_ref,
-           head_ref = excluded.head_ref,
-           head_sha = excluded.head_sha,
-           merge_commit_sha = excluded.merge_commit_sha,
-           created_at = excluded.created_at,
-           updated_at = excluded.updated_at,
-           merged_at = excluded.merged_at,
-           closed_at = excluded.closed_at,
-           url = excluded.url,
-           draft = excluded.draft`
-      ).bind(
-        pr.number,
-        pr.title,
-        pr.state,
-        pr.author,
-        pr.baseRef,
-        pr.headRef,
-        pr.headSha,
-        pr.mergeCommitSha,
-        pr.createdAt,
-        pr.updatedAt,
-        pr.mergedAt,
-        pr.closedAt,
-        pr.url,
-        pr.draft
-      )
-    )
-  );
-}
-
-async function markDeleted(env, table, keyColumn, seen, now) {
-  const existing = await env.DB.prepare(`SELECT ${keyColumn} AS key FROM ${table} WHERE deleted_at IS NULL`).all();
-  const statements = [];
-  for (const row of existing.results || []) {
-    if (!seen.has(row.key)) {
-      statements.push(
-        env.DB.prepare(`UPDATE ${table} SET deleted_at = ? WHERE ${keyColumn} = ?`).bind(now, row.key)
-      );
-    }
-  }
-  await chunkedBatch(env, statements);
-}
-
-async function chunkedBatch(env, statements, size = 50) {
-  for (let i = 0; i < statements.length; i += size) {
-    await env.DB.batch(statements.slice(i, i + size));
-  }
+// Compact "5m ago" relative time for status messages.
+function relativeAgo(now, ts) {
+  if (!ts) return "never";
+  const d = Math.max(0, now - ts);
+  if (d < 60) return `${d}s ago`;
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
 }
 
 async function githubJson(env, path, query = {}, budget = null) {
@@ -1790,96 +1069,57 @@ async function fetchPrBodyFromGitHub(env, number) {
   }
 }
 
+// Status is derived from the per-source "last synced" timestamps each workflow's
+// ingest script writes to meta, plus a short "running" window after a manual
+// dispatch (until every source reports a run at/after the dispatch, capped so a
+// slow/failed workflow can't pin the indicator forever). No GitHub API call.
 async function syncStatus(env) {
-  const [
-    status,
-    phase,
-    message,
-    startedAt,
-    finishedAt,
-    error,
-    lastSyncAt,
-    trigger,
-    heartbeatAt,
-  ] = await Promise.all([
-    getMeta(env, "sync_status"),
-    getMeta(env, "sync_phase"),
-    getMeta(env, "sync_message"),
-    getMeta(env, "sync_started_at"),
-    getMeta(env, "sync_finished_at"),
-    getMeta(env, "sync_error"),
-    getMeta(env, "last_sync_at"),
+  const values = await Promise.all([
+    ...SYNC_SOURCES.map((s) => getMeta(env, s.metaKey)),
+    getMeta(env, "sync_dispatched_at"),
     getMeta(env, "sync_trigger"),
-    getMeta(env, "sync_heartbeat_at"),
+    getMeta(env, "sync_dispatch_error"),
   ]);
-  const normalizedStatus = status || "idle";
-  const normalizedStartedAt = unixOrNull(startedAt);
-  const normalizedHeartbeatAt = unixOrNull(heartbeatAt);
-  if (
-    normalizedStatus === "running" &&
-    syncStalled(env, normalizedStartedAt, normalizedHeartbeatAt)
-  ) {
-    return {
-      status: "error",
-      phase: "error",
-      message: "Previous sync stalled",
-      startedAt: normalizedStartedAt,
-      finishedAt: unixOrNull(finishedAt),
-      lastSyncAt: unixOrNull(lastSyncAt),
-      heartbeatAt: normalizedHeartbeatAt,
-      error:
-        "Previous sync stopped updating (the worker was likely evicted or hit a limit mid-run). Start a new sync to resume from the saved cursors.",
-      trigger: trigger || null,
-    };
-  }
+  const dispatchError = values.pop();
+  const trigger = values.pop();
+  const dispatchedRaw = values.pop();
+
+  const now = unixNow();
+  const sources = SYNC_SOURCES.map((s, i) => ({
+    key: s.key,
+    label: s.label,
+    lastSyncAt: unixOrNull(values[i]),
+  }));
+  const times = sources.map((s) => s.lastSyncAt || 0);
+  const lastSyncAt = Math.max(0, ...times) || null;
+
+  const dispatched = unixOrNull(dispatchedRaw);
+  // Running until every source recorded a sync at/after the dispatch (each ingest
+  // script always bumps its timestamp when it finishes), capped at 15 minutes.
+  const allReported = dispatched ? times.every((t) => t >= dispatched) : true;
+  const running = !!dispatched && !allReported && now - dispatched < 15 * 60;
+
+  let status = "idle";
+  if (running) status = "running";
+  else if (dispatchError) status = "error";
+  else if (lastSyncAt) status = "success";
+
+  const summary = sources
+    .map((s) => `${s.label} ${relativeAgo(now, s.lastSyncAt)}`)
+    .join(" \u00b7 ");
 
   return {
-    status: normalizedStatus,
-    phase: phase || "idle",
-    message: message || "",
-    startedAt: normalizedStartedAt,
-    finishedAt: unixOrNull(finishedAt),
-    lastSyncAt: unixOrNull(lastSyncAt),
-    heartbeatAt: normalizedHeartbeatAt,
-    error: error || null,
+    status,
+    phase: running ? "dispatch" : "done",
+    message: running ? `Syncing \u2014 dispatched ${relativeAgo(now, dispatched)}` : summary,
+    startedAt: dispatched,
+    finishedAt: allReported ? lastSyncAt : null,
+    lastSyncAt,
+    heartbeatAt: lastSyncAt,
+    error: dispatchError || null,
     trigger: trigger || null,
+    sources,
   };
-}
-
-// A run is stalled if its heartbeat has gone quiet (primary signal) or, as a
-// backstop, if it has been marked running past the hard TTL.
-function syncStalled(env, startedAt, heartbeatAt) {
-  const now = unixNow();
-  const lastProgressAt = heartbeatAt || startedAt;
-  if (lastProgressAt && now - lastProgressAt >= heartbeatStaleSeconds(env)) {
-    return true;
-  }
-  if (startedAt && now - startedAt >= runningTtlSeconds(env)) {
-    return true;
-  }
-  return false;
-}
-
-async function setSyncStatus(env, patch) {
-  const entries = [];
-  for (const [key, value] of Object.entries(patch)) {
-    const metaKey = key.startsWith("sync_") || key === "last_sync_at" ? key : `sync_${key}`;
-    entries.push([metaKey, value === null || value === undefined ? "" : String(value)]);
-  }
-  // Every status write doubles as a heartbeat so stall detection can tell a live
-  // run from an evicted one. Callers can still set it explicitly (e.g. on start).
-  if (!entries.some(([key]) => key === "sync_heartbeat_at")) {
-    entries.push(["sync_heartbeat_at", String(unixNow())]);
-  }
-  await chunkedBatch(
-    env,
-    entries.map(([key, value]) =>
-      env.DB.prepare(
-        `INSERT INTO meta (key, value) VALUES (?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-      ).bind(key, value)
-    )
-  );
 }
 
 async function setMeta(env, key, value) {
@@ -2028,63 +1268,6 @@ function normalizedOffset(value) {
   const parsed = Number(value ?? 0);
   if (!Number.isFinite(parsed)) return 0;
   return Math.max(0, Math.floor(parsed));
-}
-
-function syncPages(value, fallback) {
-  return positiveInt(value, fallback, MAX_SYNC_PAGES);
-}
-
-function branchSweepPages(env) {
-  return positiveInt(
-    env.SYNC_BRANCH_SWEEP_PAGES,
-    DEFAULT_BRANCH_SWEEP_PAGES,
-    MAX_BRANCH_SWEEP_PAGES
-  );
-}
-
-function runningTtlSeconds(env) {
-  return positiveInt(
-    env.SYNC_RUNNING_TTL_SECONDS,
-    DEFAULT_RUNNING_TTL_SECONDS,
-    MAX_RUNNING_TTL_SECONDS
-  );
-}
-
-function heartbeatStaleSeconds(env) {
-  return positiveInt(
-    env.SYNC_HEARTBEAT_STALE_SECONDS,
-    DEFAULT_HEARTBEAT_STALE_SECONDS,
-    MAX_HEARTBEAT_STALE_SECONDS
-  );
-}
-
-function maxGithubRequests(env) {
-  return positiveInt(
-    env.SYNC_MAX_GITHUB_REQUESTS,
-    DEFAULT_MAX_GITHUB_REQUESTS,
-    MAX_GITHUB_REQUESTS
-  );
-}
-
-// Tracks how many GitHub subrequests this invocation has spent so fetch loops can
-// stop before hitting the platform's per-invocation subrequest limit.
-function createSyncBudget(env) {
-  return {
-    githubUsed: 0,
-    githubLimit: maxGithubRequests(env),
-    canFetch() {
-      return this.githubUsed < this.githubLimit;
-    },
-    noteFetch() {
-      this.githubUsed += 1;
-    },
-  };
-}
-
-function positiveInt(value, fallback, max) {
-  const parsed = Number(value ?? fallback);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.max(1, Math.min(max, Math.floor(parsed)));
 }
 
 function toUnix(value) {

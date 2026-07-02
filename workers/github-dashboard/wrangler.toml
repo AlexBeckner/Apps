@@ -6,39 +6,23 @@ keep_vars = true
 [vars]
 # Same-origin Worker-hosted app. Override to "*" in local `.dev.vars` if needed.
 ALLOWED_ORIGIN = "https://github-dashboard.appliedapps.workers.dev"
+# Repo whose commits/PRs the dashboard lazily reads at request time (PR bodies,
+# commit messages, live per-branch commit lists). Needs the GITHUB_TOKEN secret
+# with read access to it.
 GITHUB_REPO = "AppliedNeuron/core-stack"
-SYNC_COMMIT_PAGES = "3"
-SYNC_PR_PAGES = "5"
-SYNC_TAG_PAGES = "3"
-# Branch data is owned by the external git-based sync (see
-# .github/workflows/sync-branches.yml), which lists every branch tip with its
-# commit date in one shallow fetch and pushes the snapshot to D1. In this mode
-# the Worker leaves the branches table alone and only syncs commits/tags/PRs.
-# Unset this (or set to anything other than "external") to fall back to the
-# Worker's built-in GraphQL branch sweep governed by SYNC_BRANCH_SWEEP_PAGES.
-BRANCH_SYNC_MODE = "external"
-SYNC_BRANCH_SWEEP_PAGES = "12"
-# History back-fill rotates one page per type per turn (branches -> tags ->
-# commits -> prs -> repeat) so all types advance together each run.
-SYNC_SEED_PAGES_PER_TURN = "1"
-# Safety cap on how many history pages a single type may pull per invocation;
-# the real limiter is SYNC_MAX_GITHUB_REQUESTS.
-SYNC_SEED_PAGE_BUDGET = "200"
-# Free plan allows 50 external subrequests per invocation. Keep the whole run
-# (fresh pass + history back-fill) under that; the cron trigger resumes the
-# back-fill from saved cursors every 15 min. Raise toward ~45 for faster
-# seeding, or lower if you hit CPU (Error 1102) on the free plan.
-SYNC_MAX_GITHUB_REQUESTS = "30"
-# Backstop only; stall detection is primarily heartbeat-based below.
-SYNC_RUNNING_TTL_SECONDS = "600"
-# A running sync is treated as dead if it stops heartbeating for this long,
-# letting the next cron tick take over (kept under the 15 min cron interval).
-SYNC_HEARTBEAT_STALE_SECONDS = "180"
+# All syncing is owned by git-based GitHub Actions in this repo (sync-branches;
+# sync-commits [+ tags]; sync-prs), each running hourly. The Worker no longer
+# syncs anything itself (no cron). "Sync now" dispatches all three workflows via
+# the GitHub API using the ACTIONS_DISPATCH_TOKEN secret -- a PAT with
+# actions:read + write on ACTIONS_REPO. ACTIONS_REF defaults to "main".
+ACTIONS_REPO = "AlexBeckner/Apps"
+
+# Secrets (set with `wrangler secret put <NAME>`), not stored here:
+#   GITHUB_TOKEN           read access to GITHUB_REPO (lazy request-time reads)
+#   ACTIONS_DISPATCH_TOKEN PAT with actions:read+write on ACTIONS_REPO ("Sync now")
+#   ACCESS_PASSWORD        company-auth gate (see company-auth.js)
 
 [[d1_databases]]
 binding = "DB"
 database_name = "github-dashboard"
 database_id = "d2b507b0-d616-41fe-a2cd-9f6e7c72011d"
-
-[triggers]
-crons = ["*/15 * * * *"]
