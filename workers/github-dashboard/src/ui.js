@@ -593,7 +593,7 @@ export function dashboardHtml(env) {
     if (!sync || !sync.sources || !sync.sources.length) return "";
     return sync.sources.map(function (s) {
       return s.label + ": " + shortRelative(s.lastSyncAt);
-    }).join("\n");
+    }).join("\\n");
   }
 
   var syncTimer = null;
