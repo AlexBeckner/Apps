@@ -171,6 +171,10 @@ export default {
         }
         return jsonResponse(request, env, await handlePrDetail(env, Number(rest)));
       }
+      if (request.method === "GET" && url.pathname.startsWith("/api/tag-commits/")) {
+        const name = decodePathParam(url.pathname, "/api/tag-commits/");
+        return jsonResponse(request, env, await handleTagCommits(env, url, name));
+      }
       if (request.method === "GET" && url.pathname === "/api/tags") {
         return jsonResponse(request, env, await handleTags(env, url));
       }
@@ -469,7 +473,7 @@ async function listBranchCommits(env, branch, opts) {
     return { total, source: "sql", commits: (rows.results || []).map(toCommit) };
   }
 
-  return await listBranchCommitsFromGitHub(env, branch.name, {
+  return await listRefCommitsFromGitHub(env, branch.name, {
     q,
     limit,
     offset,
@@ -477,11 +481,11 @@ async function listBranchCommits(env, branch, opts) {
   });
 }
 
-// Off-branch commit listings come straight from GitHub. One request yields the
-// exact total (via the Link header) and one or two more cover the requested
-// window. Human branch browsing is low-volume, so this stays well within the
-// authenticated 5k req/hour budget.
-async function listBranchCommitsFromGitHub(env, branchName, opts) {
+// Commit listings for an arbitrary ref (a branch name, or a tag's target SHA)
+// come straight from GitHub. One request yields the exact total (via the Link
+// header) and one or two more cover the requested window. Human browsing is
+// low-volume, so this stays well within the authenticated 5k req/hour budget.
+async function listRefCommitsFromGitHub(env, ref, opts) {
   const q = (opts.q || "").trim().toLowerCase();
   const limit = normalizedLimit(opts.limit, 100);
   const offset = normalizedOffset(opts.offset);
@@ -489,7 +493,7 @@ async function listBranchCommitsFromGitHub(env, branchName, opts) {
 
   let total = 0;
   try {
-    total = await githubRefCommitCount(env, owner, repo, branchName);
+    total = await githubRefCommitCount(env, owner, repo, ref);
   } catch {
     total = 0;
   }
@@ -502,7 +506,7 @@ async function listBranchCommitsFromGitHub(env, branchName, opts) {
     const pagesNeeded = Math.ceil((within + limit) / GITHUB_PAGE_SIZE);
     for (let i = 0; i < pagesNeeded; i++) {
       const items = await githubJson(env, `/repos/${owner}/${repo}/commits`, {
-        sha: branchName,
+        sha: ref,
         per_page: String(GITHUB_PAGE_SIZE),
         page: String(startPage + i),
       });
@@ -645,6 +649,35 @@ async function handleBranchPrs(env, url, name) {
     direction,
     q,
     prs: (rows.results || []).map(toPr),
+  };
+}
+
+// Commits reachable from a tag, mirroring the per-branch commit list. A tag's
+// stored target_sha is the dereferenced commit (annotated tags are peeled at
+// ingest), so it plugs straight into the ref-commits GitHub helper.
+async function handleTagCommits(env, url, name) {
+  const tag = await env.DB.prepare("SELECT * FROM tags WHERE name = ?")
+    .bind(name)
+    .first();
+  if (!tag) throw httpError(404, "Tag not found");
+
+  const q = (url.searchParams.get("q") || "").trim().toLowerCase();
+  const offset = normalizedOffset(url.searchParams.get("offset"));
+  const limit = normalizedLimit(url.searchParams.get("limit"), 100);
+  const result = await listRefCommitsFromGitHub(env, tag.target_sha, {
+    q,
+    limit,
+    offset,
+  });
+
+  return {
+    total: result.total,
+    offset,
+    limit,
+    q,
+    source: result.source,
+    walkError: result.error || null,
+    commits: result.commits,
   };
 }
 

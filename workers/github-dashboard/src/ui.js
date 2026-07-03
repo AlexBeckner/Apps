@@ -221,6 +221,7 @@ export function dashboardHtml(env) {
     branch: { includeDeleted: false, sort: "last_commit_at", filter: "" },
     branchDetail: { name: "", commitsPage: 0, commitsFilter: "", prsFromPage: 0, prsFromFilter: "", prsToPage: 0, prsToFilter: "" },
     tag: { includeDeleted: false, sort: "tagged_at", filter: "" },
+    tagDetail: { name: "", commitsPage: 0, commitsFilter: "" },
     commits: { page: 0, filter: "" },
     prs: { page: 0, state: "all", filter: "" },
     searchValue: "",
@@ -991,17 +992,63 @@ export function dashboardHtml(env) {
     if (restoreFocusId) restoreInputSelection(restoreFocusId);
   }
 
-  function renderTagDetail(name) {
-    setLoading();
-    api("/api/tags/" + name.split("/").map(encodeURIComponent).join("/")).then(function (data) {
+  function renderTagDetail(name, opts) {
+    opts = opts || {};
+    if (!opts.keepContent) setLoading();
+    if (state.tagDetail.name !== name) {
+      state.tagDetail = { name: name, commitsPage: 0, commitsFilter: "" };
+    }
+    var encoded = name.split("/").map(encodeURIComponent).join("/");
+    var pageSize = 100;
+    var commitsOffset = state.tagDetail.commitsPage * pageSize;
+    Promise.all([
+      api("/api/tags/" + encoded),
+      api("/api/tag-commits/" + encoded + "?" + qs({ limit: pageSize, offset: commitsOffset, q: state.tagDetail.commitsFilter.trim() }))
+    ]).then(function (results) {
+      var data = results[0];
+      var commitsPage = results[1];
       var t = data.tag;
       app.innerHTML =
         '<div class="page"><div><div class="crumb small subtle"><a href="/tags" data-link>Tags</a> /</div><h1 class="mono break"><a class="link" href="https://github.com/' + attr(config.repo) + '/releases/tag/' + attr(t.name) + '" target="_blank" rel="noopener noreferrer">' + escape(t.name) + '</a> ' + (t.deletedAt ? '<span class="pill pill-danger">deleted</span>' : '') + '</h1></div>' +
         '<div class="stat-grid">' + stat("Target", '<a class="table-link mono" href="/commits/' + attr(t.targetSha) + '" data-link>' + escape(t.shortTargetSha) + '</a>') + stat("Tagged", '<span class="muted">' + relativeTime(t.taggedAt) + '</span>') + stat("Annotated", t.isAnnotated ? "yes" : "no") + '</div>' +
         (t.message ? panel("Tag message", "", '<pre class="message">' + escape(t.message) + '</pre>') : '') +
-        (data.target ? panel("Target commit", '<a class="panel-link" href="/commits/' + attr(data.target.sha) + '" data-link>Commit details -&gt;</a>', listRow("/commits/" + data.target.sha, '<span class="mono small muted">' + escape(data.target.shortSha) + '</span> ' + escape(data.target.summary || "(no message)") + '<div class="tiny subtle">' + escape(data.target.authorName || "?") + ' - ' + relativeTime(data.target.committedAt) + '</div>')) : '') +
+        tagCommitsPanel(commitsPage, commitsOffset, pageSize) +
         '</div>';
+      bindTagDetailControls(name, commitsPage, pageSize, opts.restoreFocusId);
     }).catch(function (error) { setError(error.message); });
+  }
+
+  function tagCommitsPanel(data, offset, pageSize) {
+    var filter = state.tagDetail.commitsFilter.trim();
+    var title = "Commits (" + Number(data.total || 0).toLocaleString() + ")";
+    var totalPages = Math.max(1, Math.ceil((data.total || 0) / pageSize));
+    var body = data.commits && data.commits.length
+      ? '<div class="list-scroll">' + data.commits.map(function (c) {
+          return listRow("/commits/" + c.sha, '<div><span class="mono small muted">' + escape(c.shortSha) + '</span> <span class="text-sm">' + escape(c.summary || "(no message)") + '</span></div><div class="row-meta"><span class="truncate">' + escape(c.authorName || "?") + '</span><span>' + relativeTime(c.committedAt) + '</span></div>');
+        }).join("") + '</div>'
+      : empty(filter ? "No commits on this tag match your filter." : "No commits found for this tag.");
+    return panel(
+      title,
+      '<input id="tag-commit-filter" class="input input-sm" placeholder="Search sha, summary, author..." value="' + attr(state.tagDetail.commitsFilter) + '">',
+      body + pager(offset, pageSize, data.total || 0, state.tagDetail.commitsPage, totalPages, "tag-commit")
+    );
+  }
+
+  function bindTagDetailControls(name, commitsPage, pageSize, restoreFocusId) {
+    var commitFilter = document.getElementById("tag-commit-filter");
+    if (commitFilter) {
+      commitFilter.addEventListener("input", function (event) {
+        state.tagDetail.commitsFilter = event.target.value;
+        state.tagDetail.commitsPage = 0;
+        rememberInputSelection(event);
+        renderTagDetail(name, { keepContent: true, restoreFocusId: "tag-commit-filter" });
+      });
+    }
+    bindPager("tag-commit", function (delta) {
+      state.tagDetail.commitsPage = Math.max(0, Math.min(Math.ceil((commitsPage.total || 0) / pageSize) - 1, state.tagDetail.commitsPage + delta));
+      renderTagDetail(name);
+    });
+    if (restoreFocusId) restoreInputSelection(restoreFocusId);
   }
 
   function renderCommitDetail(sha) {
