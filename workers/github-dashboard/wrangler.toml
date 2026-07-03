@@ -22,6 +22,14 @@ ACTIONS_REPO = "AlexBeckner/Apps"
 #   ACTIONS_DISPATCH_TOKEN PAT with actions:read+write on ACTIONS_REPO ("Sync now")
 #   ACCESS_PASSWORD        company-auth gate (see company-auth.js)
 
+# No scheduled triggers: the Worker no longer syncs. This MUST be an explicit
+# empty list -- omitting [triggers] leaves any previously deployed cron live on
+# Cloudflare (that's how the old "*/15" sync cron lingered and kept throwing
+# "Handler does not export a scheduled() function" every 15 min). `crons = []`
+# removes it on the next deploy.
+[triggers]
+crons = []
+
 [[d1_databases]]
 binding = "DB"
 database_name = "github-dashboard"
