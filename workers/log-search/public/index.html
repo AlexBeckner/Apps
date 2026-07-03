@@ -280,6 +280,90 @@
         padding: 0 1px;
       }
 
+      .heatmap {
+        border: 1px solid #333;
+        border-radius: 6px;
+        display: none;
+        margin-top: 14px;
+        padding: 12px;
+      }
+
+      .heatmap h2 {
+        color: #aaa;
+        font-size: 13px;
+        font-weight: 600;
+        margin: 0 0 8px;
+      }
+
+      .heat-list {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        max-height: 340px;
+        overflow-y: auto;
+      }
+
+      .heat-row {
+        align-items: center;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        cursor: pointer;
+        display: grid;
+        gap: 10px;
+        grid-template-columns: minmax(0, 1fr) 140px 66px;
+        padding: 3px 6px;
+      }
+
+      .heat-row:hover {
+        background: #161616;
+      }
+
+      .heat-row.active {
+        background: #16202e;
+        border-color: #7fb2ff;
+      }
+
+      .heat-row .hp {
+        direction: rtl;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .heat-row .hp span {
+        direction: ltr;
+        unicode-bidi: plaintext;
+      }
+
+      .heat-row .hp .base {
+        font-weight: 700;
+      }
+
+      .heat-track {
+        background: #222;
+        border-radius: 3px;
+        height: 10px;
+        overflow: hidden;
+      }
+
+      .heat-fill {
+        border-radius: 3px;
+        height: 100%;
+        min-width: 3px;
+      }
+
+      .heat-count {
+        color: #ccc;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+
+      .heat-note {
+        color: #aaa;
+        font-size: 12px;
+        margin-top: 8px;
+      }
+
       .note {
         color: #aaa;
         margin-top: 8px;
@@ -288,13 +372,6 @@
   </head>
   <body>
     <main>
-      <h1>Log Search</h1>
-      <p class="muted">
-        Pick or drop a log folder and search every line of every file for
-        <code>ERROR</code>, <code>FATAL</code>, or any terms you add. Files are
-        read locally in your browser and never uploaded.
-      </p>
-
       <label class="dropzone" id="dropzone" tabindex="0">
         <strong>Choose a log folder</strong>
         <p class="muted">or drag &amp; drop a folder here</p>
@@ -344,6 +421,8 @@
 
       <section class="summary" id="summary" aria-live="polite"></section>
 
+      <section class="heatmap" id="heatmap" aria-label="File heatmap"></section>
+
       <div class="chips" id="term-filter" aria-label="Filter by term"></div>
 
       <div class="results-head" id="results-head" style="display: none;">
@@ -385,6 +464,7 @@
       const progressBar = el("progress-bar");
       const configError = el("config-error");
       const summaryEl = el("summary");
+      const heatmapEl = el("heatmap");
       const termFilterEl = el("term-filter");
       const resultsHead = el("results-head");
       const filterInput = el("filter");
@@ -398,6 +478,7 @@
       let selected = [];
       let lastRun = null; // results of the most recent completed scan
       let activeTerm = null; // term chip filter, or null for all
+      let activeFile = null; // heatmap file filter, or null for all
       let running = false;
       let cancelRequested = false;
 
@@ -566,11 +647,14 @@
         cancelBtn.style.display = "";
         progressEl.style.display = "";
         summaryEl.style.display = "none";
+        heatmapEl.style.display = "none";
+        heatmapEl.innerHTML = "";
         resultsHead.style.display = "none";
         resultsTable.style.display = "none";
         resultsNote.textContent = "";
         termFilterEl.innerHTML = "";
         activeTerm = null;
+        activeFile = null;
 
         const ctx = {
           matches: [],
@@ -581,6 +665,7 @@
           filesSkipped: 0,
           bytesRead: 0,
           termCounts: Object.fromEntries(terms.map((t) => [t, 0])),
+          fileCounts: Object.create(null),
           fileCount: 0,
           matchers,
           startedAt: performance.now(),
@@ -613,6 +698,7 @@
           : `Done. Scanned ${ctx.filesScanned} of ${totalFiles} files.`;
 
         renderSummary(ctx);
+        renderHeatmap(ctx);
         renderTermFilter(ctx);
         renderResults();
       }
@@ -688,6 +774,7 @@
       function testLine(line, lineNo, path, ctx, combined, perTerm) {
         if (!combined.test(line)) return;
         ctx.totalMatches++;
+        ctx.fileCounts[path] = (ctx.fileCounts[path] || 0) + 1;
         for (const t of perTerm) {
           if (t.re.test(line)) ctx.termCounts[t.term]++;
         }
@@ -735,6 +822,96 @@
           summaryEl.appendChild(stat);
         }
         summaryEl.style.display = "flex";
+      }
+
+      const HEAT_LIMIT = 100; // max file rows drawn in the heatmap
+
+      function renderHeatmap(ctx) {
+        heatmapEl.innerHTML = "";
+        const entries = Object.keys(ctx.fileCounts)
+          .map((path) => [path, ctx.fileCounts[path]])
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+
+        if (!entries.length) {
+          heatmapEl.style.display = "none";
+          return;
+        }
+
+        const shown = entries.slice(0, HEAT_LIMIT);
+        const max = entries[0][1];
+
+        const heading = document.createElement("h2");
+        heading.textContent =
+          `File heatmap -- ${entries.length.toLocaleString()} ` +
+          `file${entries.length === 1 ? "" : "s"} with matches ` +
+          `(click to filter)`;
+        heatmapEl.appendChild(heading);
+
+        const list = document.createElement("div");
+        list.className = "heat-list";
+
+        for (const [path, count] of shown) {
+          // Log scale keeps low-count files visible next to a runaway file.
+          const intensity =
+            max > 1 ? Math.log(count + 1) / Math.log(max + 1) : 1;
+
+          const row = document.createElement("div");
+          row.className = "heat-row" + (activeFile === path ? " active" : "");
+          row.dataset.file = path;
+          row.title = `${path} -- ${count.toLocaleString()} match${count === 1 ? "" : "es"}`;
+
+          const hp = document.createElement("div");
+          hp.className = "hp";
+          const inner = document.createElement("span");
+          inner.innerHTML = formatPath(path);
+          hp.appendChild(inner);
+
+          const track = document.createElement("div");
+          track.className = "heat-track";
+          const fill = document.createElement("div");
+          fill.className = "heat-fill";
+          fill.style.width = `${Math.max(3, Math.round(intensity * 100))}%`;
+          fill.style.background = heatColor(intensity);
+          track.appendChild(fill);
+
+          const countEl = document.createElement("div");
+          countEl.className = "heat-count";
+          countEl.textContent = count.toLocaleString();
+
+          row.append(hp, track, countEl);
+          row.addEventListener("click", () => {
+            activeFile = activeFile === path ? null : path;
+            syncHeatRows();
+            renderResults();
+            if (activeFile && resultsHead.style.display !== "none") {
+              resultsHead.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            }
+          });
+          list.appendChild(row);
+        }
+        heatmapEl.appendChild(list);
+
+        if (entries.length > shown.length) {
+          const note = document.createElement("p");
+          note.className = "heat-note";
+          note.textContent =
+            `Showing the top ${shown.length} files by hit count.`;
+          heatmapEl.appendChild(note);
+        }
+        heatmapEl.style.display = "block";
+      }
+
+      function syncHeatRows() {
+        for (const row of heatmapEl.querySelectorAll(".heat-row")) {
+          row.classList.toggle("active", (row.dataset.file || null) === activeFile);
+        }
+      }
+
+      // Blue (few hits) -> red (most hits) heat scale for the dark theme.
+      function heatColor(ratio) {
+        const r = Math.max(0, Math.min(1, ratio));
+        const hue = 210 - 210 * r;
+        return `hsl(${hue}, 85%, 52%)`;
       }
 
       function renderTermFilter(ctx) {
@@ -789,36 +966,27 @@
         const filterText = filterInput.value.trim().toLowerCase();
         const termRe = activeTermRegex();
 
-        const rows = [];
-        for (const m of lastRun.matches) {
-          if (termRe && !termRe.test(m.text)) continue;
+        const passes = (m) => {
+          if (activeFile && m.path !== activeFile) return false;
+          if (termRe && !termRe.test(m.text)) return false;
           if (
             filterText &&
             !m.text.toLowerCase().includes(filterText) &&
             !m.path.toLowerCase().includes(filterText)
           ) {
-            continue;
+            return false;
           }
-          rows.push(m);
-          if (rows.length >= RENDER_LIMIT) break;
-        }
+          return true;
+        };
 
-        // Count total matching (beyond render cap) for the note.
+        // Single pass: collect up to the render cap, but count every match so
+        // the note can report the true total (which may exceed the cap).
+        const rows = [];
         let totalMatching = 0;
-        if (termRe || filterText) {
-          for (const m of lastRun.matches) {
-            if (termRe && !termRe.test(m.text)) continue;
-            if (
-              filterText &&
-              !m.text.toLowerCase().includes(filterText) &&
-              !m.path.toLowerCase().includes(filterText)
-            ) {
-              continue;
-            }
-            totalMatching++;
-          }
-        } else {
-          totalMatching = lastRun.matches.length;
+        for (const m of lastRun.matches) {
+          if (!passes(m)) continue;
+          totalMatching++;
+          if (rows.length < RENDER_LIMIT) rows.push(m);
         }
 
         resultsBody.innerHTML = "";
@@ -851,6 +1019,9 @@
           resultsNote.textContent = "No matches found.";
         } else {
           const parts = [];
+          if (activeFile) {
+            parts.push(`Filtered to file "${activeFile}" (click it again to clear).`);
+          }
           parts.push(
             `Showing ${rows.length.toLocaleString()} of ` +
               `${totalMatching.toLocaleString()} matching line${totalMatching === 1 ? "" : "s"}.`
