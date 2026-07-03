@@ -1015,10 +1015,31 @@ export function dashboardHtml(env) {
         (body ? '<pre class="message">' + escape(body) + '</pre>' : '') +
         '<div class="stat-grid">' + stat("SHA", '<span class="mono small muted break">' + escape(c.sha) + '</span>') + stat("Author", '<span class="muted">' + escape(c.authorName || "?") + (c.authorEmail ? ' <span class="subtle">&lt;' + escape(c.authorEmail) + '&gt;</span>' : '') + '</span>') + stat("Committed", '<span class="muted">' + relativeTime(c.committedAt) + '</span>') + '</div>' +
         '<div class="two-grid">' +
-          panel("Branches pointing at this commit (" + data.branches.length + ")", "", data.branches.length ? data.branches.map(function (b) { return listRow(branchHref(b.name), '<span class="mono muted">' + escape(b.name) + '</span>'); }).join("") : empty("No cached branch heads point at this commit.")) +
+          panel('Branches containing this commit <span id="commit-branch-count" class="subtle"></span>', "", '<div id="commit-branches">' + empty("Checking branches on GitHub...") + '</div>') +
           panel("Pull requests touching this commit (" + data.prs.length + ")", "", data.prs.length ? data.prs.map(prListItem).join("") : empty("No PRs reference this commit in the Worker cache.")) +
         '</div></div>';
+      loadCommitBranches(c.sha);
     }).catch(function (error) { setError(error.message); });
+  }
+
+  function loadCommitBranches(sha) {
+    api("/api/commits/" + encodeURIComponent(sha) + "/branches").then(function (data) {
+      var container = document.getElementById("commit-branches");
+      if (!container) return;
+      var count = document.getElementById("commit-branch-count");
+      var branches = data.branches || [];
+      if (count) count.textContent = "(" + branches.length + ")";
+      var rows = branches.length
+        ? '<div class="list-scroll">' + branches.map(function (name) { return listRow(branchHref(name), '<span class="mono muted">' + escape(name) + '</span>'); }).join("") + '</div>'
+        : empty("No active branches contain this commit.");
+      if (data.truncated) {
+        rows += '<div class="tiny subtle" style="padding:8px 12px">Checked the ' + Number(data.evaluatedBranches || 0).toLocaleString() + ' most recently active of ' + Number(data.totalBranches || 0).toLocaleString() + ' branches.</div>';
+      }
+      container.innerHTML = rows;
+    }).catch(function (error) {
+      var container = document.getElementById("commit-branches");
+      if (container) container.innerHTML = empty("Could not check branches: " + escape(error.message));
+    });
   }
 
   function renderPrDetail(number) {

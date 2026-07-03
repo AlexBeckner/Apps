@@ -565,6 +565,44 @@ function githubCommitToRow(item) {
   };
 }
 
+// Compare status for base...head. With base = branch and head = commit, the
+// commit is contained in the branch when the status is "behind" or "identical"
+// (i.e. the commit is an ancestor of, or equal to, the branch head). per_page=1
+// keeps the payload small since we only read the status field.
+async function githubCompareStatus(env, base, head) {
+  const [owner, repo] = repoParts(env);
+  const basehead = `${encodeURIComponent(base)}...${encodeURIComponent(head)}`;
+  const data = await githubJson(
+    env,
+    `/repos/${owner}/${repo}/compare/${basehead}`,
+    { per_page: "1" }
+  );
+  return data && typeof data.status === "string" ? data.status : null;
+}
+
+// Run an async mapper over items with a bounded number of in-flight tasks so a
+// commit sitting on dozens of branches does not fan out into an unbounded burst
+// of GitHub subrequests. Results preserve input order.
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workerCount = Math.max(1, Math.min(concurrency, items.length));
+  const workers = [];
+  for (let i = 0; i < workerCount; i++) {
+    workers.push(
+      (async () => {
+        while (true) {
+          const index = cursor++;
+          if (index >= items.length) break;
+          results[index] = await mapper(items[index], index);
+        }
+      })()
+    );
+  }
+  await Promise.all(workers);
+  return results;
+}
+
 async function handleBranchPrs(env, url, name) {
   const direction = url.searchParams.get("direction") === "to" ? "to" : "from";
   const column = direction === "to" ? "base_ref" : "head_ref";
@@ -651,7 +689,7 @@ async function handleCommitDetail(env, sha) {
   }
   message = message || row.summary || "";
 
-  const [prRows, tagRows, branchRows] = await Promise.all([
+  const [prRows, tagRows] = await Promise.all([
     env.DB.prepare(
       `SELECT * FROM prs
        WHERE merge_commit_sha = ? OR head_sha = ?
@@ -661,9 +699,6 @@ async function handleCommitDetail(env, sha) {
       .bind(row.sha, row.sha)
       .all(),
     env.DB.prepare("SELECT * FROM tags WHERE target_sha = ? ORDER BY COALESCE(tagged_at, 0) DESC, name ASC")
-      .bind(row.sha)
-      .all(),
-    env.DB.prepare("SELECT * FROM branches WHERE head_sha = ? ORDER BY name ASC")
       .bind(row.sha)
       .all(),
   ]);
@@ -677,23 +712,75 @@ async function handleCommitDetail(env, sha) {
       name: tag.name,
       deletedAt: tag.deleted_at ?? null,
     })),
-    branches: (branchRows.results || []).map(toBranch),
+    // "Branches containing this commit" loads lazily via
+    // /api/commits/{sha}/branches (live GitHub compare calls; see
+    // handleCommitBranches) so this detail response stays fast.
   };
 }
+
+// "Branches containing this commit" (git branch --contains) is answered live:
+// D1 has no commit-ancestry DAG (it was dropped to fit the free storage cap).
+//   - a branch whose head IS this commit trivially contains it (no API call);
+//   - if the commit is on the default branch, the default branch contains it;
+//   - otherwise compare base=branch, head=commit -- the commit is contained iff
+//     the branch is "behind" or "identical" (the commit is reachable from the
+//     branch head).
+// Each compare is one GitHub subrequest, so we probe at most
+// MAX_CONTAINMENT_CHECKS branches (most-recently-active first) to stay within
+// the Worker per-request subrequest budget.
+const MAX_CONTAINMENT_CHECKS = 45;
+const CONTAINMENT_CONCURRENCY = 6;
 
 async function handleCommitBranches(env, sha) {
   const row = await getCommitRow(env, sha);
   if (!row) throw httpError(404, "Commit not found");
 
-  const branches = await env.DB.prepare(
-    "SELECT name FROM branches WHERE head_sha = ? ORDER BY name ASC"
-  )
-    .bind(row.sha)
-    .all();
+  const branchRows = await env.DB.prepare(
+    `SELECT name, head_sha, is_default FROM branches
+     WHERE deleted_at IS NULL
+     ORDER BY COALESCE(last_commit_at, 0) DESC, name ASC`
+  ).all();
+  const allBranches = branchRows.results || [];
+
+  const contained = [];
+  const toCompare = [];
+  for (const branch of allBranches) {
+    if (branch.head_sha === row.sha || (row.on_default && branch.is_default)) {
+      contained.push(branch.name);
+    } else {
+      toCompare.push(branch);
+    }
+  }
+  const freeCount = contained.length;
+
+  const probeList = toCompare.slice(0, MAX_CONTAINMENT_CHECKS);
+  const truncated = toCompare.length > probeList.length;
+
+  const probeResults = await mapWithConcurrency(
+    probeList,
+    CONTAINMENT_CONCURRENCY,
+    async (branch) => {
+      try {
+        const status = await githubCompareStatus(env, branch.name, row.sha);
+        return status === "behind" || status === "identical" ? branch.name : null;
+      } catch {
+        // Skip branches we cannot compare (e.g. renamed/removed upstream).
+        return null;
+      }
+    }
+  );
+  for (const name of probeResults) {
+    if (name) contained.push(name);
+  }
+
+  contained.sort((a, b) => a.localeCompare(b));
 
   return {
     sha: row.sha,
-    branches: (branches.results || []).map((branch) => branch.name),
+    branches: contained,
+    totalBranches: allBranches.length,
+    evaluatedBranches: freeCount + probeList.length,
+    truncated,
     stale: false,
     computedAt: unixNow(),
   };
