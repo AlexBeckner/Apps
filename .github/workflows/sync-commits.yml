@@ -5,6 +5,10 @@ name: Sync commits + tags to dashboard D1
 # the same clone (`git for-each-ref refs/tags`). These are the sole source of
 # truth for commits and tags in D1 (the Worker no longer syncs anything).
 #
+# This run also snapshots branch heads (`git for-each-ref refs/heads`) from the
+# same clone, so the commit ancestry DAG and the branch heads that "branches
+# containing this commit" matches against are one consistent snapshot.
+#
 # The clone is BLOBLESS (--filter=blob:none: all commits + all trees, no file
 # blobs) and cached between runs. Blobless (not treeless) is required because
 # `git log --all` traverses trees and a treeless clone would lazily fetch them
@@ -95,6 +99,28 @@ jobs:
           # "could not read Username for github.com" that a lazy fetch produces.
           GIT_NO_LAZY_FETCH: "1"
         run: node workers/github-dashboard/scripts/ingest-commits.mjs
+
+      # Snapshot branch heads from the SAME clone that just built the DAG, so the
+      # "branches containing this commit" walk and the branch heads it matches
+      # against are always one consistent point-in-time snapshot. Without this,
+      # branch heads (from the separate sync-branches run) can be newer or older
+      # than the DAG, so a freshly pushed commit/head shows "in 0 branches" until
+      # both happen to line up. sync-branches still runs on its own cadence for
+      # fresher between-run branch listings; this just guarantees consistency at
+      # DAG-build time. Reuses the same mark-and-sweep ingest as sync-branches.
+      - name: Snapshot branch heads into D1 (consistent with the DAG)
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: "501de9c56b6ed3604e3ca0d047ed8084"
+          D1_DATABASE_ID: "d2b507b0-d616-41fe-a2cd-9f6e7c72011d"
+          # Exported by the fetch step above; marks the default branch.
+          DEFAULT_BRANCH: ${{ env.DEFAULT_BRANCH }}
+        run: |
+          set -euo pipefail
+          git -C repo.git for-each-ref --sort=-committerdate refs/heads \
+            --format='%(objectname)%09%(committerdate:unix)%09%(refname:short)' > branches.tsv
+          echo "Branch tips: $(wc -l < branches.tsv)"
+          node workers/github-dashboard/scripts/ingest-branches.mjs branches.tsv
 
       - name: Ingest tags into D1
         env:

@@ -782,9 +782,17 @@ async function handleCommitBranches(env, sha) {
 
   if (await getMeta(env, "commit_parents_full_at")) {
     try {
-      return await commitBranchesFromDag(env, row);
+      const dag = await commitBranchesFromDag(env, row);
+      // The DAG is a point-in-time snapshot built by the hourly commit ingest, and
+      // the branch heads it matches against come from a *separate* hourly branch
+      // sync. A 0 result is therefore ambiguous: the commit may genuinely be in no
+      // branch, OR it (or its branch's head) is newer than those snapshots and the
+      // graph simply hasn't connected it yet -- the common case for freshly pushed
+      // work. Only trust a non-empty DAG answer; verify a 0 live before reporting
+      // it, so recent commits don't wrongly show "in 0 branches".
+      if (dag.total > 0) return dag;
     } catch {
-      // DAG query failed unexpectedly; fall back to the live probe below.
+      // DAG query failed unexpectedly; fall through to the live probe.
     }
   }
   return await commitBranchesFromCompare(env, row);
