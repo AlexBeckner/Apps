@@ -7,6 +7,11 @@ Upload/pick a log folder and search every line of every file for terms like
 API and streaming reads, so no log file is ever uploaded to the Worker. That
 also means it handles large folders without hitting any request-size limits.
 
+Compressed archives are expanded automatically, in the browser, using the
+native `DecompressionStream` API -- so a folder full of `.tar.gz` bundles (or a
+single `.zip`) is searched just like a plain folder, and the archives are never
+uploaded either.
+
 The Worker itself only does two things:
 
 - Gate access with the shared company password (`companyAuthResponse`, reused
@@ -16,7 +21,12 @@ The Worker itself only does two things:
 
 ## Features
 
-- Pick a folder or drag & drop one onto the page.
+- Pick a folder or drag & drop one onto the page (or choose archive files
+  directly).
+- Expands compressed archives automatically and searches the files inside:
+  `.zip`, `.tar`, `.tar.gz` / `.tgz`, and single-file `.gz`. Matches inside an
+  archive are shown with an archive-qualified path (e.g.
+  `logs.tgz/app/server.log`).
 - Comma-separated search terms (default `ERROR, FATAL`), with quick-add chips
   for `WARN`, `CRITICAL`, `Exception`, etc.
 - Case-sensitive and regular-expression toggles.
@@ -24,6 +34,21 @@ The Worker itself only does two things:
   live progress + a cancel button.
 - Summary counts, per-term filter chips, a results filter box, and a
   "Download CSV" export of all matches.
+
+### Archive handling
+
+`public/archives.js` reads archives with no external dependencies:
+
+- **ZIP**: parses the central directory (including ZIP64) and reads each entry's
+  bytes via `Blob.slice`, so only the needed ranges are touched. Stored (method
+  0) and DEFLATE (method 8) entries are supported; encrypted or otherwise
+  unsupported entries are reported and skipped.
+- **TAR / TAR.GZ / TGZ**: streamed and parsed block-by-block (ustar + GNU long
+  names + pax `path`), decompressing `.gz` on the fly.
+- **GZIP**: a single `.gz` file is decompressed to one logical file.
+
+Corrupt archives and unsupported entries are counted and surfaced in a note
+under the results summary rather than aborting the whole scan.
 
 ## Setup
 
@@ -75,3 +100,8 @@ Do not commit `.dev.vars`.
 The tool relies on directory selection (`webkitdirectory`) and
 `TextDecoderStream`. Use a recent Chrome, Edge, or Safari. The page shows a
 warning if `TextDecoderStream` is unavailable.
+
+Automatic archive expansion additionally needs the `DecompressionStream` API
+with `deflate-raw` support (Chrome/Edge 103+, Firefox 113+, Safari 16.4+). On
+older browsers, plain-folder scanning still works and archives are simply
+skipped with a note.

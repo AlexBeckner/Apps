@@ -374,10 +374,21 @@
     <main>
       <label class="dropzone" id="dropzone" tabindex="0">
         <strong>Choose a log folder</strong>
-        <p class="muted">or drag &amp; drop a folder here</p>
+        <p class="muted">or drag &amp; drop a folder or archive here</p>
+        <p class="muted">Archives expand automatically: .zip, .tar, .tar.gz, .tgz, .gz</p>
         <p class="muted" id="selection">No folder selected yet.</p>
         <input id="folder" type="file" webkitdirectory directory multiple>
       </label>
+      <p class="note" style="margin-top: 6px;">
+        <a href="#" id="pick-archives" role="button">Choose archive file(s) instead</a>
+      </p>
+      <input
+        id="archive-files"
+        type="file"
+        accept=".zip,.tar,.gz,.tgz,.gzip,.tar.gz,application/zip,application/gzip,application/x-tar"
+        multiple
+        hidden
+      >
 
       <div class="controls">
         <div>
@@ -421,6 +432,8 @@
 
       <section class="summary" id="summary" aria-live="polite"></section>
 
+      <p class="note" id="scan-note"></p>
+
       <section class="heatmap" id="heatmap" aria-label="File heatmap"></section>
 
       <div class="chips" id="term-filter" aria-label="Filter by term"></div>
@@ -445,6 +458,7 @@
       </table>
     </main>
 
+    <script src="archives.js"></script>
     <script>
       const STORE_LIMIT = 50000; // max matches kept in memory
       const RENDER_LIMIT = 2000; // max rows painted into the DOM at once
@@ -453,6 +467,8 @@
       const el = (id) => document.getElementById(id);
       const dropzone = el("dropzone");
       const folderInput = el("folder");
+      const archiveInput = el("archive-files");
+      const pickArchives = el("pick-archives");
       const selectionEl = el("selection");
       const termsInput = el("terms");
       const caseInput = el("case");
@@ -470,8 +486,16 @@
       const filterInput = el("filter");
       const downloadBtn = el("download");
       const resultsNote = el("results-note");
+      const scanNote = el("scan-note");
       const resultsTable = el("results-table");
       const resultsBody = el("results-body");
+
+      // Archive expansion (.zip/.tar/.tar.gz/.tgz/.gz) runs client-side via
+      // archives.js. It needs the native DecompressionStream API; if that is
+      // missing we still scan plain folders and just skip archives.
+      const archivesSupported = !!(
+        window.LogArchives && window.LogArchives.support().any
+      );
 
       // Selected files as { file, path }. Kept in memory so re-searching with
       // new terms just re-reads them (no need to hold every line in memory).
@@ -491,9 +515,15 @@
           return;
         }
         const root = files[0].path.split("/")[0] || "(folder)";
+        const archiveCount = files.filter(
+          (f) => window.LogArchives && LogArchives.archiveKind(f.path)
+        ).length;
         selectionEl.textContent =
           `${files.length.toLocaleString()} file${files.length === 1 ? "" : "s"} ` +
-          `(${formatBytes(totalBytes)}) from "${root}"`;
+          `(${formatBytes(totalBytes)}) from "${root}"` +
+          (archiveCount
+            ? ` -- ${archiveCount} archive${archiveCount === 1 ? "" : "s"} will be expanded`
+            : "");
         searchBtn.disabled = false;
       }
 
@@ -506,6 +536,16 @@
 
       folderInput.addEventListener("change", () => {
         setSelection(filesFromInput(folderInput.files));
+      });
+
+      // Secondary picker for choosing archive files directly (the folder input
+      // above only allows selecting directories).
+      archiveInput.addEventListener("change", () => {
+        setSelection(filesFromInput(archiveInput.files));
+      });
+      pickArchives.addEventListener("click", (event) => {
+        event.preventDefault();
+        archiveInput.click();
       });
 
       // Drag & drop of a folder (traverses the directory tree).
@@ -652,6 +692,7 @@
         resultsHead.style.display = "none";
         resultsTable.style.display = "none";
         resultsNote.textContent = "";
+        scanNote.textContent = "";
         termFilterEl.innerHTML = "";
         activeTerm = null;
         activeFile = null;
@@ -664,6 +705,9 @@
           filesScanned: 0,
           filesSkipped: 0,
           bytesRead: 0,
+          unsupported: 0, // archived entries we can't read (encrypted, etc.)
+          archiveErrors: [], // archives that failed to parse
+          archivesExpanded: 0,
           termCounts: Object.fromEntries(terms.map((t) => [t, 0])),
           fileCounts: Object.create(null),
           fileCount: 0,
@@ -672,14 +716,16 @@
           lastUi: 0,
         };
 
-        const totalFiles = selected.length;
+        // Expand archives into scan tasks up front. Each top-level selected item
+        // is one task; an archive task fans out to all the files inside it.
+        const { tasks, unsupportedArchives } = buildTasks(selected);
+        ctx.archivesExpanded = tasks.filter((t) => t.archive).length;
+        const totalTasks = tasks.length;
         try {
-          for (let i = 0; i < selected.length; i++) {
+          for (let i = 0; i < tasks.length; i++) {
             if (cancelRequested) break;
-            const { file, path } = selected[i];
-            updateProgress(ctx, i, totalFiles, path);
-            await scanFile(file, path, ctx);
-            ctx.filesScanned++;
+            updateProgress(ctx, i, totalTasks, tasks[i].path);
+            await tasks[i].run(ctx);
           }
         } catch (error) {
           showConfigError("Error while scanning: " + error.message);
@@ -693,54 +739,154 @@
         cancelBtn.style.display = "none";
         searchBtn.disabled = false;
         progressBar.style.width = "100%";
+        const scannedLabel =
+          `${ctx.filesScanned.toLocaleString()} file` +
+          `${ctx.filesScanned === 1 ? "" : "s"}` +
+          (ctx.archivesExpanded
+            ? ` (expanded ${ctx.archivesExpanded.toLocaleString()} archive${ctx.archivesExpanded === 1 ? "" : "s"})`
+            : "");
         progressText.textContent = ctx.cancelled
-          ? `Cancelled after ${ctx.filesScanned} of ${totalFiles} files.`
-          : `Done. Scanned ${ctx.filesScanned} of ${totalFiles} files.`;
+          ? `Cancelled after searching ${scannedLabel}.`
+          : `Done. Searched ${scannedLabel}.`;
 
         renderSummary(ctx);
+        renderScanNote(ctx, unsupportedArchives);
         renderHeatmap(ctx);
         renderTermFilter(ctx);
         renderResults();
       }
 
-      async function scanFile(fileObj, path, ctx) {
-        let stream;
-        try {
-          stream = fileObj
-            .stream()
-            .pipeThrough(new TextDecoderStream("utf-8", { fatal: false }));
-        } catch (error) {
-          ctx.filesSkipped++;
-          return;
+      // Turn the flat selection into scan tasks, expanding archives when the
+      // browser supports the decompression APIs archives.js relies on.
+      function buildTasks(items) {
+        const tasks = [];
+        let unsupportedArchives = 0;
+        for (const { file, path } of items) {
+          const kind = window.LogArchives ? LogArchives.archiveKind(path) : null;
+          if (kind) {
+            if (LogArchives.canExpand(path)) {
+              tasks.push({
+                path,
+                archive: true,
+                run: (ctx) =>
+                  LogArchives.extract(file, path, makeArchiveSink(ctx), {
+                    isCancelled: () => cancelRequested,
+                  }),
+              });
+              continue;
+            }
+            unsupportedArchives++;
+          }
+          tasks.push({
+            path,
+            archive: false,
+            run: (ctx) => scanFile(file, path, ctx),
+          });
         }
+        return { tasks, unsupportedArchives };
+      }
 
-        const reader = stream.getReader();
+      // Sink that streams each inner archive file through a LineScanner, so the
+      // scanning/highlighting logic is identical to plain files.
+      function makeArchiveSink(ctx) {
+        return {
+          open(name) {
+            return {
+              name,
+              scanner: makeLineScanner(name, ctx),
+              decoder: new TextDecoder("utf-8", { fatal: false }),
+              done: false,
+            };
+          },
+          chunk(handle, bytes) {
+            if (handle.done) return false;
+            ctx.bytesRead += bytes.length;
+            const text = handle.decoder.decode(bytes, { stream: true });
+            if (text) handle.scanner.pushText(text);
+            if (handle.scanner.binary) {
+              handle.done = true;
+              return false; // tell the extractor to stop reading this entry
+            }
+            const now = performance.now();
+            if (now - ctx.lastUi > 120) {
+              ctx.lastUi = now;
+              liveProgress(ctx, handle.name);
+            }
+            return true;
+          },
+          close(handle) {
+            if (!handle.done) {
+              const tail = handle.decoder.decode();
+              if (tail) handle.scanner.pushText(tail);
+            }
+            handle.scanner.finish();
+            ctx.filesScanned++;
+            if (handle.scanner.binary) ctx.filesSkipped++;
+          },
+          skip(_name, _reason) {
+            ctx.filesScanned++;
+            ctx.filesSkipped++;
+            ctx.unsupported++;
+          },
+          error(path, err) {
+            ctx.filesScanned++;
+            ctx.filesSkipped++;
+            ctx.archiveErrors.push(
+              `${path}: ${(err && err.message) || "could not be read"}`
+            );
+          },
+        };
+      }
+
+      function renderScanNote(ctx, unsupportedArchives) {
+        const parts = [];
+        if (ctx.archiveErrors.length) {
+          parts.push(
+            `${ctx.archiveErrors.length} archive${ctx.archiveErrors.length === 1 ? "" : "s"} ` +
+              `could not be read: ${ctx.archiveErrors.slice(0, 3).join("; ")}` +
+              (ctx.archiveErrors.length > 3 ? "; ..." : ".")
+          );
+        }
+        if (ctx.unsupported) {
+          parts.push(
+            `${ctx.unsupported.toLocaleString()} archived ` +
+              `entr${ctx.unsupported === 1 ? "y was" : "ies were"} skipped ` +
+              `(encrypted or unsupported compression).`
+          );
+        }
+        if (unsupportedArchives) {
+          parts.push(
+            `${unsupportedArchives} archive${unsupportedArchives === 1 ? "" : "s"} ` +
+              `could not be expanded in this browser and ` +
+              `${unsupportedArchives === 1 ? "was" : "were"} skipped.`
+          );
+        }
+        scanNote.textContent = parts.join(" ");
+      }
+
+      // Line-by-line scanner shared by plain files and archived entries. It
+      // sniffs the first chunk for a NUL byte to skip binary content.
+      function makeLineScanner(path, ctx) {
         const { combined, perTerm } = ctx.matchers;
         let buffer = "";
         let lineNo = 0;
         let sniffed = false;
-
-        try {
-          while (true) {
-            if (cancelRequested) break;
-            const { value, done } = await reader.read();
-            if (done) break;
-            let chunk = value;
-            ctx.bytesRead += chunk.length;
-
+        let binary = false;
+        return {
+          get binary() {
+            return binary;
+          },
+          pushText(text) {
+            if (binary || !text) return;
             if (!sniffed) {
               sniffed = true;
-              // NUL byte in the head strongly implies a binary file; skip it.
-              if (chunk.slice(0, BINARY_SNIFF_BYTES).includes("\u0000")) {
-                ctx.filesSkipped++;
-                try {
-                  await reader.cancel();
-                } catch (e) {}
+              // NUL byte in the head strongly implies binary content; skip it.
+              if (text.slice(0, BINARY_SNIFF_BYTES).includes("\u0000")) {
+                binary = true;
                 return;
               }
             }
-
-            buffer += chunk;
+            buffer += text;
             let nl;
             while ((nl = buffer.indexOf("\n")) !== -1) {
               let line = buffer.slice(0, nl);
@@ -750,25 +896,59 @@
               ctx.totalLines++;
               testLine(line, lineNo, path, ctx, combined, perTerm);
             }
+          },
+          finish() {
+            if (binary || !buffer.length) return;
+            if (buffer.endsWith("\r")) buffer = buffer.slice(0, -1);
+            lineNo++;
+            ctx.totalLines++;
+            testLine(buffer, lineNo, path, ctx, combined, perTerm);
+          },
+        };
+      }
 
+      async function scanFile(fileObj, path, ctx) {
+        let stream;
+        try {
+          stream = fileObj
+            .stream()
+            .pipeThrough(new TextDecoderStream("utf-8", { fatal: false }));
+        } catch (error) {
+          ctx.filesScanned++;
+          ctx.filesSkipped++;
+          return;
+        }
+
+        const reader = stream.getReader();
+        const scanner = makeLineScanner(path, ctx);
+        try {
+          while (true) {
+            if (cancelRequested) break;
+            const { value, done } = await reader.read();
+            if (done) break;
+            ctx.bytesRead += value.length;
+            scanner.pushText(value);
+            if (scanner.binary) {
+              try {
+                await reader.cancel();
+              } catch (e) {}
+              break;
+            }
             const now = performance.now();
             if (now - ctx.lastUi > 120) {
               ctx.lastUi = now;
               liveProgress(ctx, path);
             }
           }
-
-          if (buffer.length && !cancelRequested) {
-            if (buffer.endsWith("\r")) buffer = buffer.slice(0, -1);
-            lineNo++;
-            ctx.totalLines++;
-            testLine(buffer, lineNo, path, ctx, combined, perTerm);
-          }
+          if (!cancelRequested) scanner.finish();
         } finally {
           try {
             reader.releaseLock();
           } catch (e) {}
         }
+
+        ctx.filesScanned++;
+        if (scanner.binary) ctx.filesSkipped++;
       }
 
       function testLine(line, lineNo, path, ctx, combined, perTerm) {
@@ -1138,6 +1318,12 @@
           "This browser lacks TextDecoderStream. Use a recent Chrome, Edge, or Safari."
         );
         searchBtn.disabled = true;
+      } else if (!archivesSupported) {
+        // Folder scanning still works; only automatic archive expansion needs
+        // the DecompressionStream API (Chrome 103+, Firefox 113+, Safari 16.4+).
+        scanNote.textContent =
+          "Note: automatic archive expansion (.zip/.tar/.gz) needs a newer " +
+          "browser; plain folders still work here.";
       }
     </script>
   </body>
