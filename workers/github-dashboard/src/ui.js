@@ -605,20 +605,25 @@ export function dashboardHtml(env) {
 
   function loadSync() {
     api("/api/sync/status").then(function (data) {
+      var wasRunning = state.sync && state.sync.status === "running";
       state.sync = data;
       renderSync();
       renderBanner();
       pollSyncSoon();
-      if (data.status === "success") {
-        if (location.pathname === "/") renderHome();
+      // Only refresh home data right after a sync finishes (running -> done), and
+      // do it in place. Re-rendering on every 30s poll blanked the page to a
+      // loading skeleton even though nothing had changed.
+      if (wasRunning && data.status !== "running" && location.pathname === "/") {
+        renderHome({ keepContent: true });
       }
     }).catch(function () {
       pollSyncSoon();
     });
   }
 
-  function renderHome() {
-    setLoading();
+  function renderHome(opts) {
+    opts = opts || {};
+    if (!opts.keepContent) setLoading();
     api("/api/summary").then(function (data) {
       var emptyCache = data.branchCount === 0 && data.commitCount === 0 && data.prCount.total === 0;
       app.innerHTML =
@@ -639,7 +644,7 @@ export function dashboardHtml(env) {
             homePrsPanel(data.recentPrs || []) +
           '</div>' +
         '</div>';
-    }).catch(function (error) { setError(error.message); });
+    }).catch(function (error) { if (!opts.keepContent) setError(error.message); });
   }
 
   function homeBranchesPanel(rows) {
