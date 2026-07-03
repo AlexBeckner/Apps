@@ -1075,12 +1075,18 @@ export function dashboardHtml(env) {
       if (!container) return;
       var count = document.getElementById("commit-branch-count");
       var branches = data.branches || [];
-      if (count) count.textContent = "(" + branches.length + ")";
+      // The DAG path returns the exact total (list capped for display); the live
+      // compare path only knows what it found among the branches it checked.
+      var total = data.source === "dag" ? Number(data.total || 0) : branches.length;
+      if (count) count.textContent = "(" + total.toLocaleString() + ")";
       var rows = branches.length
         ? '<div class="list-scroll">' + branches.map(function (name) { return listRow(branchHref(name), '<span class="mono muted">' + escape(name) + '</span>'); }).join("") + '</div>'
         : empty("No active branches contain this commit.");
       if (data.truncated) {
-        rows += '<div class="tiny subtle" style="padding:8px 12px">Checked the ' + Number(data.evaluatedBranches || 0).toLocaleString() + ' most recently active of ' + Number(data.totalBranches || 0).toLocaleString() + ' branches.</div>';
+        var note = data.source === "dag"
+          ? "Showing the first " + branches.length.toLocaleString() + " of " + total.toLocaleString() + " branches that contain this commit."
+          : "Checked the " + Number(data.evaluatedBranches || 0).toLocaleString() + " most recently active of " + Number(data.totalBranches || 0).toLocaleString() + " branches (live probe).";
+        rows += '<div class="tiny subtle" style="padding:8px 12px">' + note + '</div>';
       }
       container.innerHTML = rows;
     }).catch(function (error) {

@@ -13,10 +13,14 @@
 //   - Metadata only: sha, short sha, author, dates, subject, url. The full commit
 //     MESSAGE body is intentionally NOT stored here (keeps D1 lean); the Worker
 //     lazily fetches + caches the body the first time a commit detail is viewed.
-//   - No parent/DAG edges: the commit_parents table was dropped to fit D1's 500 MB
-//     free-plan cap. off-branch commits are inserted with on_default = 0 (the
-//     Worker owns the on_default flag for the default branch); branch pages fetch
-//     their commit lists live from GitHub instead of walking a stored DAG.
+//   - Parent edges: each commit's parents (git %P) are written to commit_parents
+//     (child_sha, parent_sha, ordinal). This ancestry DAG powers the Worker's
+//     "branches containing this commit" walk. Edges are immutable, so the
+//     incremental ON CONFLICT DO NOTHING insert keeps the DAG complete over time;
+//     a full run backfills history and sets meta.commit_parents_full_at, which is
+//     the signal the Worker waits for before trusting the DAG.
+//   - off-branch commits are inserted with on_default = 0 (the Worker owns the
+//     on_default flag for the default branch).
 //   - INSERT ... ON CONFLICT DO NOTHING: never clobber the richer rows the Worker
 //     writes for default-branch commits (which include the full message + on_default).
 //   - Incremental: a `commit_git_synced_at` watermark in D1 limits each run to
@@ -38,6 +42,7 @@ import { spawn, spawnSync } from "node:child_process";
 import readline from "node:readline";
 
 const COMMIT_BATCH = 200;
+const EDGE_BATCH = 400; // commit_parents rows per INSERT (0-2 edges per commit)
 const US = "\x1f"; // unit separator between git log fields
 const SHA_RE = /^[0-9a-f]{7,64}$/i;
 const DRY_RUN = /^(1|true|yes)$/i.test(process.env.DRY_RUN || "");
@@ -124,12 +129,17 @@ function gitCount(ref) {
 
 function parseLine(line) {
   const parts = line.split(US);
-  if (parts.length < 7) return null;
-  const [sha, short, an, ae, at, ct] = parts;
-  const subject = parts.slice(6).join(US);
+  if (parts.length < 8) return null;
+  const [sha, short, an, ae, at, ct, parentField] = parts;
+  const subject = parts.slice(7).join(US);
   if (!SHA_RE.test(sha)) return null;
   const authoredAt = Number.parseInt(at, 10);
   const committedAt = Number.parseInt(ct, 10);
+  // %P is a space-separated list of full parent hashes (empty for a root commit).
+  const parents = (parentField || "")
+    .trim()
+    .split(/\s+/)
+    .filter((p) => SHA_RE.test(p));
   return {
     sha,
     short: short || sha.slice(0, 7),
@@ -138,6 +148,7 @@ function parseLine(line) {
     authoredAt: Number.isFinite(authoredAt) ? authoredAt : null,
     committedAt: Number.isFinite(committedAt) ? committedAt : null,
     subject: subject || "",
+    parents,
   };
 }
 
@@ -156,6 +167,19 @@ async function flush(batch) {
   await d1(
     `INSERT INTO commits (sha, short_sha, author_name, author_email, authored_at, committed_at, summary, message, url) ` +
       `VALUES ${values} ON CONFLICT(sha) DO NOTHING;`
+  );
+}
+
+// Insert child->parent ancestry edges. Edges are immutable (a commit's parents
+// never change), so ON CONFLICT DO NOTHING makes re-ingest idempotent.
+async function flushEdges(edges) {
+  if (!edges.length) return;
+  const values = edges
+    .map((e) => `(${sqlStr(e.child)}, ${sqlStr(e.parent)}, ${e.ordinal})`)
+    .join(",");
+  await d1(
+    `INSERT INTO commit_parents (child_sha, parent_sha, ordinal) ` +
+      `VALUES ${values} ON CONFLICT(child_sha, parent_sha) DO NOTHING;`
   );
 }
 
@@ -189,7 +213,7 @@ async function main() {
   const logArgs = ["-C", REPO_DIR, "log", "--all", "--no-color"];
   if (sinceArg) logArgs.push(`--since=${sinceArg}`);
   logArgs.push(
-    "--pretty=tformat:%H%x1f%h%x1f%an%x1f%ae%x1f%at%x1f%ct%x1f%s"
+    "--pretty=tformat:%H%x1f%h%x1f%an%x1f%ae%x1f%at%x1f%ct%x1f%P%x1f%s"
   );
 
   console.log(
@@ -211,13 +235,18 @@ async function main() {
   const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
 
   let buf = [];
+  let edgeBuf = [];
   let total = 0;
   let ingested = 0;
+  let edges = 0;
   for await (const line of rl) {
     if (!line) continue;
     const parsed = parseLine(line);
     if (!parsed) continue;
     buf.push(parsed);
+    parsed.parents.forEach((parent, ordinal) => {
+      edgeBuf.push({ child: parsed.sha, parent, ordinal });
+    });
     total++;
     if (buf.length >= COMMIT_BATCH) {
       await flush(buf);
@@ -225,9 +254,16 @@ async function main() {
       buf = [];
       if (ingested % 5000 === 0) console.log(`Ingested ${ingested} commits...`);
     }
+    if (edgeBuf.length >= EDGE_BATCH) {
+      await flushEdges(edgeBuf);
+      edges += edgeBuf.length;
+      edgeBuf = [];
+    }
   }
   await flush(buf);
   ingested += buf.length;
+  await flushEdges(edgeBuf);
+  edges += edgeBuf.length;
 
   const code = await closed;
   if (code !== 0) {
@@ -249,6 +285,14 @@ async function main() {
   }
   await setMeta("commit_git_last_run_count", String(total));
 
+  // Only a full run guarantees complete ancestry coverage. Setting this flag is
+  // the Worker's signal to switch "branches containing this commit" from the live
+  // GitHub compare probe to the recursive commit_parents walk. Once set it stays
+  // set: incremental runs keep the DAG complete (new commits carry their edges).
+  if (isFull) {
+    await setMeta("commit_parents_full_at", String(runStart));
+  }
+
   const totalCount = gitCount("--all");
   if (totalCount !== null) await setMeta("commit_total_count", String(totalCount));
   const defCount = DEFAULT_BRANCH ? gitCount(DEFAULT_BRANCH) : null;
@@ -256,6 +300,7 @@ async function main() {
 
   console.log(
     `Done: enumerated ${total} commits (${isFull ? "full" : "incremental"}), ` +
+      `${edges} parent edges, ` +
       `default_commit_count=${defCount ?? "n/a"}, commit_total_count=${totalCount ?? "n/a"}.`
   );
 }

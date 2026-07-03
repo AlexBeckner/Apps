@@ -6,7 +6,7 @@ const GITHUB_GRAPHQL = "https://api.github.com/graphql";
 const DEFAULT_REPO = "AppliedNeuron/core-stack";
 const GITHUB_PAGE_SIZE = 100;
 const MAX_LIST_LIMIT = 500;
-const SCHEMA_UPGRADE_VERSION = "commits-on-default-2026-07-01";
+const SCHEMA_UPGRADE_VERSION = "commit-parents-dag-2026-07-03";
 
 // All syncing is owned by git-based GitHub Actions (branches; commits+tags; PRs).
 // The Worker no longer syncs anything itself: it serves the dashboard from D1 and
@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS branches (
 CREATE INDEX IF NOT EXISTS idx_branches_last_commit ON branches(last_commit_at DESC);
 CREATE INDEX IF NOT EXISTS idx_branches_deleted ON branches(deleted_at);
 CREATE INDEX IF NOT EXISTS idx_branches_last_seen ON branches(last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_branches_head_sha ON branches(head_sha);
 CREATE TABLE IF NOT EXISTS commits (
   sha           TEXT PRIMARY KEY,
   short_sha     TEXT NOT NULL,
@@ -56,6 +57,13 @@ CREATE TABLE IF NOT EXISTS commits (
 CREATE INDEX IF NOT EXISTS idx_commits_committed ON commits(committed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_commits_short ON commits(short_sha);
 CREATE INDEX IF NOT EXISTS idx_commits_default ON commits(committed_at DESC) WHERE on_default = 1;
+CREATE TABLE IF NOT EXISTS commit_parents (
+  child_sha  TEXT NOT NULL,
+  parent_sha TEXT NOT NULL,
+  ordinal    INTEGER NOT NULL,
+  PRIMARY KEY (child_sha, parent_sha)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_commit_parents_parent ON commit_parents(parent_sha);
 CREATE TABLE IF NOT EXISTS prs (
   number            INTEGER PRIMARY KEY,
   title             TEXT,
@@ -230,15 +238,25 @@ async function ensureSchema(env) {
 
 async function ensureSchemaUpgrades(env) {
   await ensureColumn(env, "branches", "last_seen_at", "INTEGER");
-  // on_default marks commits reachable from the default branch. It replaces the
-  // old commit_parents DAG (dropped to fit D1's 500 MB free-plan cap): the global
-  // Commits tab / summary filter on it instead of walking parent edges.
+  // on_default marks commits reachable from the default branch; the global
+  // Commits tab / summary filter on it (a cheap flag, no graph walk needed).
   await ensureColumn(env, "commits", "on_default", "INTEGER NOT NULL DEFAULT 0");
   const statements = [
     "CREATE INDEX IF NOT EXISTS idx_commits_default ON commits(committed_at DESC) WHERE on_default = 1",
     "CREATE INDEX IF NOT EXISTS idx_prs_head_ref ON prs(head_ref)",
     "CREATE INDEX IF NOT EXISTS idx_prs_base_ref ON prs(base_ref)",
     "CREATE INDEX IF NOT EXISTS idx_branches_last_seen ON branches(last_seen_at)",
+    // Speeds matching branch heads against a commit / its descendants (the DAG
+    // containment walk, the compare fallback, and the commit detail page).
+    "CREATE INDEX IF NOT EXISTS idx_branches_head_sha ON branches(head_sha)",
+    // commit_parents is the child->parent ancestry DAG (one row per edge). It
+    // powers "branches containing this commit": a recursive walk finds every
+    // descendant of a commit, then matches branch heads against it. WITHOUT
+    // ROWID + a single parent index keeps the edge table lean. The ingest
+    // workflow (git log --all %P) is the sole writer; the endpoint only reads
+    // it once meta.commit_parents_full_at is set by a full ingest.
+    "CREATE TABLE IF NOT EXISTS commit_parents (child_sha TEXT NOT NULL, parent_sha TEXT NOT NULL, ordinal INTEGER NOT NULL, PRIMARY KEY (child_sha, parent_sha)) WITHOUT ROWID",
+    "CREATE INDEX IF NOT EXISTS idx_commit_parents_parent ON commit_parents(parent_sha)",
   ];
   for (const statement of statements) {
     await env.DB.prepare(statement).run();
@@ -751,23 +769,75 @@ async function handleCommitDetail(env, sha) {
   };
 }
 
-// "Branches containing this commit" (git branch --contains) is answered live:
-// D1 has no commit-ancestry DAG (it was dropped to fit the free storage cap).
-//   - a branch whose head IS this commit trivially contains it (no API call);
-//   - if the commit is on the default branch, the default branch contains it;
-//   - otherwise compare base=branch, head=commit -- the commit is contained iff
-//     the branch is "behind" or "identical" (the commit is reachable from the
-//     branch head).
-// Each compare is one GitHub subrequest, so we probe at most
-// MAX_CONTAINMENT_CHECKS branches (most-recently-active first) to stay within
-// the Worker per-request subrequest budget.
-const MAX_CONTAINMENT_CHECKS = 45;
-const CONTAINMENT_CONCURRENCY = 6;
+// "Branches containing this commit" (git branch --contains). Preferred path: a
+// recursive walk over the stored commit_parents ancestry DAG (exact + complete,
+// a single D1 query). Until a full ingest populates that DAG (signalled by
+// meta.commit_parents_full_at), fall back to a live GitHub compare probe that is
+// capped at a handful of branches.
+const DAG_BRANCH_DISPLAY_CAP = 500;
 
 async function handleCommitBranches(env, sha) {
   const row = await getCommitRow(env, sha);
   if (!row) throw httpError(404, "Commit not found");
 
+  if (await getMeta(env, "commit_parents_full_at")) {
+    try {
+      return await commitBranchesFromDag(env, row);
+    } catch {
+      // DAG query failed unexpectedly; fall back to the live probe below.
+    }
+  }
+  return await commitBranchesFromCompare(env, row);
+}
+
+// Walk every descendant of the commit through the child->parent DAG, then match
+// branch heads against that set: a branch contains the commit iff its head is the
+// commit itself or any descendant of it. COUNT(*) OVER () returns the true match
+// total so the row list can be capped without losing the count.
+async function commitBranchesFromDag(env, row) {
+  const result = await env.DB.prepare(
+    `WITH RECURSIVE descendants(sha) AS (
+       SELECT ?1
+       UNION
+       SELECT cp.child_sha
+         FROM commit_parents cp
+         JOIN descendants d ON cp.parent_sha = d.sha
+     )
+     SELECT b.name AS name, COUNT(*) OVER () AS total
+       FROM branches b
+      WHERE b.deleted_at IS NULL
+        AND b.head_sha IN (SELECT sha FROM descendants)
+      ORDER BY b.name ASC
+      LIMIT ?2`
+  )
+    .bind(row.sha, DAG_BRANCH_DISPLAY_CAP)
+    .all();
+  const rows = result.results || [];
+  const total = rows.length ? Number(rows[0].total) : 0;
+  const branches = rows.map((r) => r.name);
+  return {
+    sha: row.sha,
+    source: "dag",
+    branches,
+    total,
+    truncated: total > branches.length,
+    stale: false,
+    computedAt: unixNow(),
+  };
+}
+
+// Fallback used before the DAG is populated: probe branches live via the GitHub
+// compare API. D1 has the branch heads but (pre-DAG) no ancestry, so:
+//   - a branch whose head IS this commit trivially contains it (no API call);
+//   - if the commit is on the default branch, the default branch contains it;
+//   - otherwise compare base=branch, head=commit -- contained iff the branch is
+//     "behind" or "identical" (the commit is reachable from the branch head).
+// Each compare is one GitHub subrequest, so we probe at most
+// MAX_CONTAINMENT_CHECKS branches (most-recently-active first).
+const MAX_CONTAINMENT_CHECKS = 45;
+const CONTAINMENT_CONCURRENCY = 6;
+
+async function commitBranchesFromCompare(env, row) {
   const branchRows = await env.DB.prepare(
     `SELECT name, head_sha, is_default FROM branches
      WHERE deleted_at IS NULL
@@ -810,6 +880,7 @@ async function handleCommitBranches(env, sha) {
 
   return {
     sha: row.sha,
+    source: "compare",
     branches: contained,
     totalBranches: allBranches.length,
     evaluatedBranches: freeCount + probeList.length,
