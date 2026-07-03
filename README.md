@@ -9,6 +9,7 @@ any private GitHub or Buildkite data is returned.
 - [dataspeedhashfinder](./dataspeedhashfinder/)
 - [buildkitedeploymentdashboard](./buildkitedeploymentdashboard/)
 - [githubdashboard](./githubdashboard/)
+- [logsearch](./logsearch/)
 
 ## Company Access
 

@@ -1,0 +1,973 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Log Search</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        background: #111;
+        color: #eee;
+        margin: 8px;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+          sans-serif;
+        font-size: 14px;
+      }
+
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+      }
+
+      h1 {
+        font-size: 18px;
+        margin: 8px 0 2px;
+      }
+
+      p {
+        margin: 0;
+      }
+
+      .muted {
+        color: #aaa;
+      }
+
+      .error {
+        color: #ff6b6b;
+      }
+
+      a {
+        color: #7fb2ff;
+      }
+
+      .dropzone {
+        border: 1px dashed #666;
+        border-radius: 6px;
+        cursor: pointer;
+        display: block;
+        margin-top: 12px;
+        padding: 22px 16px;
+        text-align: center;
+        transition: border-color 0.15s ease, background 0.15s ease;
+      }
+
+      .dropzone:hover,
+      .dropzone:focus-within {
+        border-color: #888;
+        background: #161616;
+      }
+
+      .dropzone.dragover {
+        border-color: #7fb2ff;
+        background: #16202e;
+      }
+
+      .dropzone strong {
+        font-size: 15px;
+      }
+
+      .dropzone input[type="file"] {
+        display: none;
+      }
+
+      .controls {
+        align-items: end;
+        display: grid;
+        gap: 8px 12px;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        margin-top: 12px;
+      }
+
+      label {
+        display: block;
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+
+      input[type="text"] {
+        background: #111;
+        border: 1px solid #666;
+        color: #eee;
+        font: inherit;
+        padding: 6px 8px;
+        width: 100%;
+      }
+
+      input[type="text"]::placeholder {
+        color: #888;
+      }
+
+      .toggles {
+        display: flex;
+        gap: 14px;
+        white-space: nowrap;
+      }
+
+      .toggle {
+        align-items: center;
+        cursor: pointer;
+        display: flex;
+        font-weight: 400;
+        gap: 6px;
+        margin: 0;
+      }
+
+      button {
+        background: #2a2a2a;
+        border: 1px solid #666;
+        color: #eee;
+        cursor: pointer;
+        font: inherit;
+        padding: 6px 14px;
+      }
+
+      button:hover:not(:disabled) {
+        border-color: #888;
+      }
+
+      button.primary {
+        background: #1f6feb;
+        border-color: #1f6feb;
+      }
+
+      button:disabled {
+        cursor: default;
+        opacity: 0.5;
+      }
+
+      .actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      .progress {
+        margin-top: 12px;
+      }
+
+      .bar {
+        background: #222;
+        border-radius: 3px;
+        height: 6px;
+        margin-top: 6px;
+        overflow: hidden;
+      }
+
+      .bar > span {
+        background: #1f6feb;
+        display: block;
+        height: 100%;
+        width: 0;
+        transition: width 0.1s linear;
+      }
+
+      .summary {
+        border: 1px solid #333;
+        border-radius: 6px;
+        display: none;
+        gap: 16px;
+        flex-wrap: wrap;
+        margin-top: 14px;
+        padding: 12px;
+      }
+
+      .stat .n {
+        font-size: 20px;
+        font-weight: 700;
+      }
+
+      .stat .k {
+        color: #aaa;
+        font-size: 12px;
+      }
+
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 12px;
+      }
+
+      .chip {
+        background: #1a1a1a;
+        border: 1px solid #444;
+        border-radius: 999px;
+        cursor: pointer;
+        font-size: 12px;
+        padding: 3px 10px;
+      }
+
+      .chip.active {
+        background: #16202e;
+        border-color: #7fb2ff;
+        color: #cfe0ff;
+      }
+
+      .results-head {
+        align-items: center;
+        display: flex;
+        gap: 10px;
+        justify-content: space-between;
+        margin-top: 14px;
+      }
+
+      .results-head input {
+        max-width: 320px;
+      }
+
+      table {
+        border-collapse: collapse;
+        font-size: 13px;
+        margin-top: 8px;
+        table-layout: fixed;
+        width: 100%;
+      }
+
+      th,
+      td {
+        border-bottom: 1px solid #222;
+        overflow: hidden;
+        padding: 5px 8px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        color: #aaa;
+        font-weight: 600;
+        position: sticky;
+        top: 0;
+        background: #111;
+      }
+
+      col.c-file {
+        width: 34%;
+      }
+
+      col.c-line {
+        width: 66px;
+      }
+
+      td.file {
+        overflow-wrap: anywhere;
+      }
+
+      td.file .base {
+        font-weight: 700;
+      }
+
+      td.line {
+        color: #888;
+        font-variant-numeric: tabular-nums;
+      }
+
+      td.text {
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+      }
+
+      mark {
+        background: #6a4a00;
+        color: #ffd479;
+        border-radius: 2px;
+        padding: 0 1px;
+      }
+
+      .note {
+        color: #aaa;
+        margin-top: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Log Search</h1>
+      <p class="muted">
+        Pick or drop a log folder and search every line of every file for
+        <code>ERROR</code>, <code>FATAL</code>, or any terms you add. Files are
+        read locally in your browser and never uploaded.
+      </p>
+
+      <label class="dropzone" id="dropzone" tabindex="0">
+        <strong>Choose a log folder</strong>
+        <p class="muted">or drag &amp; drop a folder here</p>
+        <p class="muted" id="selection">No folder selected yet.</p>
+        <input id="folder" type="file" webkitdirectory directory multiple>
+      </label>
+
+      <div class="controls">
+        <div>
+          <label for="terms">Search terms (comma-separated)</label>
+          <input
+            id="terms"
+            type="text"
+            value="ERROR, FATAL"
+            placeholder="ERROR, FATAL, Exception"
+            autocomplete="off"
+            spellcheck="false"
+          >
+        </div>
+        <div class="toggles">
+          <label class="toggle"><input id="case" type="checkbox"> Case sensitive</label>
+          <label class="toggle"><input id="regex" type="checkbox"> Regex</label>
+        </div>
+        <button id="search" class="primary" type="button" disabled>Search</button>
+      </div>
+
+      <div class="chips" id="quick-chips" aria-label="Quick add terms">
+        <span class="chip" data-add="WARN">+ WARN</span>
+        <span class="chip" data-add="WARNING">+ WARNING</span>
+        <span class="chip" data-add="CRITICAL">+ CRITICAL</span>
+        <span class="chip" data-add="Exception">+ Exception</span>
+        <span class="chip" data-add="Traceback">+ Traceback</span>
+        <span class="chip" data-add="panic">+ panic</span>
+        <span class="chip" data-add="segfault">+ segfault</span>
+      </div>
+
+      <div class="actions">
+        <button id="cancel" type="button" style="display: none;">Cancel</button>
+      </div>
+
+      <div class="progress" id="progress" style="display: none;">
+        <p class="muted" id="progress-text"></p>
+        <div class="bar"><span id="progress-bar"></span></div>
+      </div>
+
+      <p class="error" id="config-error" role="alert"></p>
+
+      <section class="summary" id="summary" aria-live="polite"></section>
+
+      <div class="chips" id="term-filter" aria-label="Filter by term"></div>
+
+      <div class="results-head" id="results-head" style="display: none;">
+        <input id="filter" type="text" placeholder="Filter results by path or text..." autocomplete="off">
+        <button id="download" type="button">Download CSV</button>
+      </div>
+
+      <p class="note" id="results-note"></p>
+
+      <table id="results-table" style="display: none;">
+        <colgroup>
+          <col class="c-file">
+          <col class="c-line">
+          <col>
+        </colgroup>
+        <thead>
+          <tr><th>File</th><th>Line</th><th>Match</th></tr>
+        </thead>
+        <tbody id="results-body"></tbody>
+      </table>
+    </main>
+
+    <script>
+      const STORE_LIMIT = 50000; // max matches kept in memory
+      const RENDER_LIMIT = 2000; // max rows painted into the DOM at once
+      const BINARY_SNIFF_BYTES = 8000;
+
+      const el = (id) => document.getElementById(id);
+      const dropzone = el("dropzone");
+      const folderInput = el("folder");
+      const selectionEl = el("selection");
+      const termsInput = el("terms");
+      const caseInput = el("case");
+      const regexInput = el("regex");
+      const searchBtn = el("search");
+      const cancelBtn = el("cancel");
+      const progressEl = el("progress");
+      const progressText = el("progress-text");
+      const progressBar = el("progress-bar");
+      const configError = el("config-error");
+      const summaryEl = el("summary");
+      const termFilterEl = el("term-filter");
+      const resultsHead = el("results-head");
+      const filterInput = el("filter");
+      const downloadBtn = el("download");
+      const resultsNote = el("results-note");
+      const resultsTable = el("results-table");
+      const resultsBody = el("results-body");
+
+      // Selected files as { file, path }. Kept in memory so re-searching with
+      // new terms just re-reads them (no need to hold every line in memory).
+      let selected = [];
+      let lastRun = null; // results of the most recent completed scan
+      let activeTerm = null; // term chip filter, or null for all
+      let running = false;
+      let cancelRequested = false;
+
+      function setSelection(files) {
+        selected = files;
+        const totalBytes = files.reduce((sum, f) => sum + f.file.size, 0);
+        if (!files.length) {
+          selectionEl.textContent = "No folder selected yet.";
+          searchBtn.disabled = true;
+          return;
+        }
+        const root = files[0].path.split("/")[0] || "(folder)";
+        selectionEl.textContent =
+          `${files.length.toLocaleString()} file${files.length === 1 ? "" : "s"} ` +
+          `(${formatBytes(totalBytes)}) from "${root}"`;
+        searchBtn.disabled = false;
+      }
+
+      function filesFromInput(fileList) {
+        return Array.from(fileList).map((file) => ({
+          file,
+          path: file.webkitRelativePath || file.name,
+        }));
+      }
+
+      folderInput.addEventListener("change", () => {
+        setSelection(filesFromInput(folderInput.files));
+      });
+
+      // Drag & drop of a folder (traverses the directory tree).
+      ["dragenter", "dragover"].forEach((type) =>
+        dropzone.addEventListener(type, (event) => {
+          event.preventDefault();
+          dropzone.classList.add("dragover");
+        })
+      );
+      ["dragleave", "drop"].forEach((type) =>
+        dropzone.addEventListener(type, (event) => {
+          event.preventDefault();
+          dropzone.classList.remove("dragover");
+        })
+      );
+      dropzone.addEventListener("drop", async (event) => {
+        const items = event.dataTransfer && event.dataTransfer.items;
+        if (!items || !items.length) return;
+        const entries = [];
+        for (const item of items) {
+          const entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
+          if (entry) entries.push(entry);
+        }
+        selectionEl.textContent = "Reading folder...";
+        try {
+          const files = [];
+          for (const entry of entries) {
+            await walkEntry(entry, files);
+          }
+          setSelection(files);
+        } catch (error) {
+          selectionEl.textContent = "";
+          showConfigError("Could not read the dropped folder: " + error.message);
+        }
+      });
+      dropzone.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          folderInput.click();
+        }
+      });
+
+      async function walkEntry(entry, out) {
+        if (entry.isFile) {
+          const file = await new Promise((resolve, reject) =>
+            entry.file(resolve, reject)
+          );
+          out.push({ file, path: entry.fullPath.replace(/^\//, "") });
+          return;
+        }
+        if (entry.isDirectory) {
+          const reader = entry.createReader();
+          // readEntries returns results in batches; keep calling until empty.
+          while (true) {
+            const batch = await new Promise((resolve, reject) =>
+              reader.readEntries(resolve, reject)
+            );
+            if (!batch.length) break;
+            for (const child of batch) {
+              await walkEntry(child, out);
+            }
+          }
+        }
+      }
+
+      // Quick-add chips append a term to the terms box.
+      el("quick-chips").addEventListener("click", (event) => {
+        const term = event.target && event.target.getAttribute("data-add");
+        if (!term) return;
+        const current = termsInput.value
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (!current.some((t) => t.toLowerCase() === term.toLowerCase())) {
+          current.push(term);
+          termsInput.value = current.join(", ");
+        }
+      });
+
+      searchBtn.addEventListener("click", runSearch);
+      cancelBtn.addEventListener("click", () => {
+        cancelRequested = true;
+      });
+      termsInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !searchBtn.disabled && !running) runSearch();
+      });
+      filterInput.addEventListener("input", debounce(renderResults, 150));
+      downloadBtn.addEventListener("click", downloadCsv);
+
+      function parseTerms() {
+        return termsInput.value
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+
+      function buildMatchers(terms) {
+        const flags = caseInput.checked ? "" : "i";
+        const asRegex = regexInput.checked;
+        const source = terms
+          .map((t) => (asRegex ? t : escapeRegex(t)))
+          .map((t) => `(?:${t})`)
+          .join("|");
+        // Combined matcher for "does this line match anything" + highlighting.
+        const combined = new RegExp(source, flags);
+        const highlight = new RegExp(source, flags + "g");
+        // Per-term matchers for the summary breakdown.
+        const perTerm = terms.map((t) => ({
+          term: t,
+          re: new RegExp(asRegex ? t : escapeRegex(t), flags),
+        }));
+        return { combined, highlight, perTerm };
+      }
+
+      async function runSearch() {
+        if (running) return;
+        const terms = parseTerms();
+        showConfigError("");
+        if (!selected.length) {
+          showConfigError("Choose a log folder first.");
+          return;
+        }
+        if (!terms.length) {
+          showConfigError("Enter at least one search term.");
+          return;
+        }
+
+        let matchers;
+        try {
+          matchers = buildMatchers(terms);
+        } catch (error) {
+          showConfigError("Invalid regular expression: " + error.message);
+          return;
+        }
+
+        running = true;
+        cancelRequested = false;
+        searchBtn.disabled = true;
+        cancelBtn.style.display = "";
+        progressEl.style.display = "";
+        summaryEl.style.display = "none";
+        resultsHead.style.display = "none";
+        resultsTable.style.display = "none";
+        resultsNote.textContent = "";
+        termFilterEl.innerHTML = "";
+        activeTerm = null;
+
+        const ctx = {
+          matches: [],
+          stored: 0,
+          totalMatches: 0,
+          totalLines: 0,
+          filesScanned: 0,
+          filesSkipped: 0,
+          bytesRead: 0,
+          termCounts: Object.fromEntries(terms.map((t) => [t, 0])),
+          fileCount: 0,
+          matchers,
+          startedAt: performance.now(),
+          lastUi: 0,
+        };
+
+        const totalFiles = selected.length;
+        try {
+          for (let i = 0; i < selected.length; i++) {
+            if (cancelRequested) break;
+            const { file, path } = selected[i];
+            updateProgress(ctx, i, totalFiles, path);
+            await scanFile(file, path, ctx);
+            ctx.filesScanned++;
+          }
+        } catch (error) {
+          showConfigError("Error while scanning: " + error.message);
+        }
+
+        ctx.elapsedMs = performance.now() - ctx.startedAt;
+        ctx.cancelled = cancelRequested;
+        lastRun = ctx;
+
+        running = false;
+        cancelBtn.style.display = "none";
+        searchBtn.disabled = false;
+        progressBar.style.width = "100%";
+        progressText.textContent = ctx.cancelled
+          ? `Cancelled after ${ctx.filesScanned} of ${totalFiles} files.`
+          : `Done. Scanned ${ctx.filesScanned} of ${totalFiles} files.`;
+
+        renderSummary(ctx);
+        renderTermFilter(ctx);
+        renderResults();
+      }
+
+      async function scanFile(fileObj, path, ctx) {
+        let stream;
+        try {
+          stream = fileObj
+            .stream()
+            .pipeThrough(new TextDecoderStream("utf-8", { fatal: false }));
+        } catch (error) {
+          ctx.filesSkipped++;
+          return;
+        }
+
+        const reader = stream.getReader();
+        const { combined, perTerm } = ctx.matchers;
+        let buffer = "";
+        let lineNo = 0;
+        let sniffed = false;
+
+        try {
+          while (true) {
+            if (cancelRequested) break;
+            const { value, done } = await reader.read();
+            if (done) break;
+            let chunk = value;
+            ctx.bytesRead += chunk.length;
+
+            if (!sniffed) {
+              sniffed = true;
+              // NUL byte in the head strongly implies a binary file; skip it.
+              if (chunk.slice(0, BINARY_SNIFF_BYTES).includes("\u0000")) {
+                ctx.filesSkipped++;
+                try {
+                  await reader.cancel();
+                } catch (e) {}
+                return;
+              }
+            }
+
+            buffer += chunk;
+            let nl;
+            while ((nl = buffer.indexOf("\n")) !== -1) {
+              let line = buffer.slice(0, nl);
+              buffer = buffer.slice(nl + 1);
+              if (line.endsWith("\r")) line = line.slice(0, -1);
+              lineNo++;
+              ctx.totalLines++;
+              testLine(line, lineNo, path, ctx, combined, perTerm);
+            }
+
+            const now = performance.now();
+            if (now - ctx.lastUi > 120) {
+              ctx.lastUi = now;
+              liveProgress(ctx, path);
+            }
+          }
+
+          if (buffer.length && !cancelRequested) {
+            if (buffer.endsWith("\r")) buffer = buffer.slice(0, -1);
+            lineNo++;
+            ctx.totalLines++;
+            testLine(buffer, lineNo, path, ctx, combined, perTerm);
+          }
+        } finally {
+          try {
+            reader.releaseLock();
+          } catch (e) {}
+        }
+      }
+
+      function testLine(line, lineNo, path, ctx, combined, perTerm) {
+        if (!combined.test(line)) return;
+        ctx.totalMatches++;
+        for (const t of perTerm) {
+          if (t.re.test(line)) ctx.termCounts[t.term]++;
+        }
+        if (ctx.stored < STORE_LIMIT) {
+          // Guard against pathologically long lines blowing up memory/DOM.
+          const text = line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
+          ctx.matches.push({ path, lineNo, text });
+          ctx.stored++;
+        }
+      }
+
+      function updateProgress(ctx, index, total, path) {
+        progressBar.style.width = `${Math.round((index / total) * 100)}%`;
+        progressText.textContent =
+          `Scanning ${index + 1} / ${total}: ${path} ` +
+          `-- ${ctx.totalMatches.toLocaleString()} matches`;
+      }
+
+      function liveProgress(ctx, path) {
+        progressText.textContent =
+          `Scanning: ${path} -- ` +
+          `${ctx.totalMatches.toLocaleString()} matches, ` +
+          `${ctx.totalLines.toLocaleString()} lines`;
+      }
+
+      function renderSummary(ctx) {
+        const stats = [
+          ["Matches", ctx.totalMatches],
+          ["Files scanned", ctx.filesScanned],
+          ["Files skipped", ctx.filesSkipped],
+          ["Lines searched", ctx.totalLines],
+          ["Time", `${(ctx.elapsedMs / 1000).toFixed(1)}s`],
+        ];
+        summaryEl.innerHTML = "";
+        for (const [k, v] of stats) {
+          const stat = document.createElement("div");
+          stat.className = "stat";
+          const n = document.createElement("div");
+          n.className = "n";
+          n.textContent = typeof v === "number" ? v.toLocaleString() : v;
+          const label = document.createElement("div");
+          label.className = "k";
+          label.textContent = k;
+          stat.append(n, label);
+          summaryEl.appendChild(stat);
+        }
+        summaryEl.style.display = "flex";
+      }
+
+      function renderTermFilter(ctx) {
+        termFilterEl.innerHTML = "";
+        const terms = Object.keys(ctx.termCounts);
+        if (terms.length <= 1 && !ctx.totalMatches) return;
+
+        const all = document.createElement("span");
+        all.className = "chip" + (activeTerm === null ? " active" : "");
+        all.textContent = `All (${ctx.totalMatches.toLocaleString()})`;
+        all.addEventListener("click", () => {
+          activeTerm = null;
+          syncTermChips();
+          renderResults();
+        });
+        termFilterEl.appendChild(all);
+
+        for (const term of terms) {
+          const chip = document.createElement("span");
+          chip.className = "chip" + (activeTerm === term ? " active" : "");
+          chip.dataset.term = term;
+          chip.textContent = `${term} (${ctx.termCounts[term].toLocaleString()})`;
+          chip.addEventListener("click", () => {
+            activeTerm = activeTerm === term ? null : term;
+            syncTermChips();
+            renderResults();
+          });
+          termFilterEl.appendChild(chip);
+        }
+      }
+
+      function syncTermChips() {
+        for (const chip of termFilterEl.children) {
+          const term = chip.dataset.term || null;
+          chip.classList.toggle("active", term === activeTerm);
+        }
+      }
+
+      function activeTermRegex() {
+        if (!activeTerm) return null;
+        const flags = caseInput.checked ? "" : "i";
+        const src = regexInput.checked ? activeTerm : escapeRegex(activeTerm);
+        try {
+          return new RegExp(src, flags);
+        } catch (e) {
+          return null;
+        }
+      }
+
+      function renderResults() {
+        if (!lastRun) return;
+        const filterText = filterInput.value.trim().toLowerCase();
+        const termRe = activeTermRegex();
+
+        const rows = [];
+        for (const m of lastRun.matches) {
+          if (termRe && !termRe.test(m.text)) continue;
+          if (
+            filterText &&
+            !m.text.toLowerCase().includes(filterText) &&
+            !m.path.toLowerCase().includes(filterText)
+          ) {
+            continue;
+          }
+          rows.push(m);
+          if (rows.length >= RENDER_LIMIT) break;
+        }
+
+        // Count total matching (beyond render cap) for the note.
+        let totalMatching = 0;
+        if (termRe || filterText) {
+          for (const m of lastRun.matches) {
+            if (termRe && !termRe.test(m.text)) continue;
+            if (
+              filterText &&
+              !m.text.toLowerCase().includes(filterText) &&
+              !m.path.toLowerCase().includes(filterText)
+            ) {
+              continue;
+            }
+            totalMatching++;
+          }
+        } else {
+          totalMatching = lastRun.matches.length;
+        }
+
+        resultsBody.innerHTML = "";
+        const frag = document.createDocumentFragment();
+        const highlight = lastRun.matchers.highlight;
+        for (const m of rows) {
+          const tr = document.createElement("tr");
+
+          const fileTd = document.createElement("td");
+          fileTd.className = "file";
+          fileTd.innerHTML = formatPath(m.path);
+
+          const lineTd = document.createElement("td");
+          lineTd.className = "line";
+          lineTd.textContent = m.lineNo;
+
+          const textTd = document.createElement("td");
+          textTd.className = "text";
+          textTd.innerHTML = highlightText(m.text, highlight);
+
+          tr.append(fileTd, lineTd, textTd);
+          frag.appendChild(tr);
+        }
+        resultsBody.appendChild(frag);
+
+        resultsTable.style.display = rows.length ? "table" : "none";
+        resultsHead.style.display = lastRun.matches.length ? "flex" : "none";
+
+        if (!lastRun.totalMatches) {
+          resultsNote.textContent = "No matches found.";
+        } else {
+          const parts = [];
+          parts.push(
+            `Showing ${rows.length.toLocaleString()} of ` +
+              `${totalMatching.toLocaleString()} matching line${totalMatching === 1 ? "" : "s"}.`
+          );
+          if (lastRun.totalMatches > lastRun.stored) {
+            parts.push(
+              `Only the first ${lastRun.stored.toLocaleString()} of ` +
+                `${lastRun.totalMatches.toLocaleString()} total matches were kept ` +
+                `(narrow your terms to see the rest).`
+            );
+          } else if (totalMatching > rows.length) {
+            parts.push("Refine the filter or download the CSV to see them all.");
+          }
+          resultsNote.textContent = parts.join(" ");
+        }
+      }
+
+      function highlightText(text, highlightRe) {
+        highlightRe.lastIndex = 0;
+        let result = "";
+        let last = 0;
+        let match;
+        let guard = 0;
+        while ((match = highlightRe.exec(text)) !== null) {
+          if (match.index >= last) {
+            result += escapeHtml(text.slice(last, match.index));
+            result += "<mark>" + escapeHtml(match[0]) + "</mark>";
+            last = match.index + match[0].length;
+          }
+          // Avoid infinite loop on zero-width matches.
+          if (match.index === highlightRe.lastIndex) highlightRe.lastIndex++;
+          if (++guard > 5000) break;
+        }
+        result += escapeHtml(text.slice(last));
+        return result;
+      }
+
+      function formatPath(path) {
+        const idx = path.lastIndexOf("/");
+        if (idx === -1) return `<span class="base">${escapeHtml(path)}</span>`;
+        const dir = path.slice(0, idx + 1);
+        const base = path.slice(idx + 1);
+        return (
+          escapeHtml(dir) + `<span class="base">${escapeHtml(base)}</span>`
+        );
+      }
+
+      function downloadCsv() {
+        if (!lastRun || !lastRun.matches.length) return;
+        const rows = [["file", "line", "text"]];
+        for (const m of lastRun.matches) {
+          rows.push([m.path, String(m.lineNo), m.text]);
+        }
+        const csv = rows
+          .map((r) => r.map(csvCell).join(","))
+          .join("\r\n");
+        const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "log-search-results.csv";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      }
+
+      function csvCell(value) {
+        const needsQuotes = /[",\r\n]/.test(value);
+        const escaped = value.replace(/"/g, '""');
+        return needsQuotes ? `"${escaped}"` : escaped;
+      }
+
+      function showConfigError(message) {
+        configError.textContent = message || "";
+      }
+
+      function escapeRegex(value) {
+        return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      }
+
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        }[c]));
+      }
+
+      function formatBytes(bytes) {
+        if (bytes < 1024) return `${bytes} B`;
+        const units = ["KB", "MB", "GB", "TB"];
+        let value = bytes / 1024;
+        let unit = 0;
+        while (value >= 1024 && unit < units.length - 1) {
+          value /= 1024;
+          unit++;
+        }
+        return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`;
+      }
+
+      function debounce(callback, waitMs) {
+        let timeoutId;
+        return (...args) => {
+          window.clearTimeout(timeoutId);
+          timeoutId = window.setTimeout(() => callback(...args), waitMs);
+        };
+      }
+
+      if (!("TextDecoderStream" in window)) {
+        showConfigError(
+          "This browser lacks TextDecoderStream. Use a recent Chrome, Edge, or Safari."
+        );
+        searchBtn.disabled = true;
+      }
+    </script>
+  </body>
+</html>
