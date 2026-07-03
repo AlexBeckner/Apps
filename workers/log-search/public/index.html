@@ -368,6 +368,147 @@
         color: #aaa;
         margin-top: 8px;
       }
+
+      .heat-head {
+        align-items: center;
+        display: flex;
+        gap: 10px;
+        justify-content: space-between;
+        margin-bottom: 8px;
+      }
+
+      .heat-head h2 {
+        margin: 0;
+      }
+
+      .heat-toggle {
+        color: #aaa;
+        flex-shrink: 0;
+        font-size: 12px;
+      }
+
+      tbody tr.res-row {
+        cursor: pointer;
+      }
+
+      tbody tr.res-row:hover td {
+        background: #161616;
+      }
+
+      .viewer {
+        background: rgba(0, 0, 0, 0.6);
+        display: flex;
+        inset: 0;
+        padding: 24px;
+        position: fixed;
+        z-index: 50;
+      }
+
+      .viewer[hidden] {
+        display: none;
+      }
+
+      .viewer-box {
+        background: #0d0d0d;
+        border: 1px solid #333;
+        border-radius: 8px;
+        display: flex;
+        flex-direction: column;
+        margin: auto;
+        max-height: 100%;
+        max-width: 1100px;
+        overflow: hidden;
+        width: 100%;
+      }
+
+      .viewer-head {
+        align-items: center;
+        border-bottom: 1px solid #222;
+        display: flex;
+        gap: 12px;
+        justify-content: space-between;
+        padding: 10px 12px;
+      }
+
+      .viewer-title {
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }
+
+      .viewer-title .base {
+        font-weight: 700;
+      }
+
+      .viewer-nav {
+        align-items: center;
+        display: flex;
+        flex-shrink: 0;
+        gap: 8px;
+      }
+
+      .viewer-nav .minfo {
+        color: #aaa;
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+
+      .viewer-body {
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 12.5px;
+        line-height: 1.5;
+        overflow: auto;
+        padding: 6px 0;
+      }
+
+      .viewer-body:focus {
+        outline: none;
+      }
+
+      .v-line {
+        display: flex;
+        gap: 12px;
+        overflow-wrap: anywhere;
+        padding: 0 12px;
+        white-space: pre-wrap;
+      }
+
+      .v-line:hover {
+        background: #141414;
+      }
+
+      .v-line.v-hit {
+        background: #16202e;
+      }
+
+      .v-ln {
+        color: #666;
+        flex-shrink: 0;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+        user-select: none;
+        width: 60px;
+      }
+
+      .v-tx {
+        flex: 1;
+        min-width: 0;
+      }
+
+      mark.v-cur {
+        background: #ffd479;
+        color: #000;
+        outline: 2px solid #ffd479;
+      }
+
+      .viewer-note {
+        border-top: 1px solid #222;
+        color: #aaa;
+        font-size: 12px;
+        margin: 0;
+        padding: 8px 12px;
+      }
     </style>
   </head>
   <body>
@@ -458,11 +599,30 @@
       </table>
     </main>
 
+    <div class="viewer" id="viewer" hidden>
+      <div class="viewer-box" role="dialog" aria-modal="true" aria-label="File viewer">
+        <div class="viewer-head">
+          <div class="viewer-title" id="viewer-title"></div>
+          <div class="viewer-nav">
+            <span class="minfo" id="viewer-minfo"></span>
+            <button id="viewer-prev" type="button" title="Previous match (Up / Left arrow)">&uarr; Prev</button>
+            <button id="viewer-next" type="button" title="Next match (Down / Right arrow)">&darr; Next</button>
+            <button id="viewer-close" type="button" title="Close (Esc)">Close</button>
+          </div>
+        </div>
+        <div class="viewer-body" id="viewer-body" tabindex="0"></div>
+        <p class="viewer-note" id="viewer-note" hidden></p>
+      </div>
+    </div>
+
     <script src="archives.js"></script>
     <script>
       const STORE_LIMIT = 50000; // max matches kept in memory
       const RENDER_LIMIT = 2000; // max rows painted into the DOM at once
       const BINARY_SNIFF_BYTES = 8000;
+      const VIEWER_MAX_BYTES = 10 * 1024 * 1024; // bytes loaded into the file viewer
+      const VIEWER_MAX_LINES = 60000; // lines rendered in the file viewer
+      const VIEWER_MAX_LINE_LEN = 20000; // per-line character cap in the viewer
 
       const el = (id) => document.getElementById(id);
       const dropzone = el("dropzone");
@@ -489,6 +649,14 @@
       const scanNote = el("scan-note");
       const resultsTable = el("results-table");
       const resultsBody = el("results-body");
+      const viewer = el("viewer");
+      const viewerTitle = el("viewer-title");
+      const viewerMinfo = el("viewer-minfo");
+      const viewerPrev = el("viewer-prev");
+      const viewerNext = el("viewer-next");
+      const viewerClose = el("viewer-close");
+      const viewerBody = el("viewer-body");
+      const viewerNote = el("viewer-note");
 
       // Archive expansion (.zip/.tar/.tar.gz/.tgz/.gz) runs client-side via
       // archives.js. It needs the native DecompressionStream API; if that is
@@ -505,6 +673,10 @@
       let activeFile = null; // heatmap file filter, or null for all
       let running = false;
       let cancelRequested = false;
+      let heatShowPercent = false; // heatmap counts shown as % of all matches
+      let viewerMarks = []; // <mark> nodes in the open file viewer
+      let viewerIdx = -1; // index of the currently focused match
+      let viewerToken = 0; // guards against races when opening files quickly
 
       function setSelection(files) {
         selected = files;
@@ -634,6 +806,36 @@
       });
       filterInput.addEventListener("input", debounce(renderResults, 150));
       downloadBtn.addEventListener("click", downloadCsv);
+
+      // Clicking a results row opens that file in the viewer, jumped to the
+      // clicked line. Ignore the click if the user is selecting text.
+      resultsBody.addEventListener("click", (event) => {
+        const tr = event.target.closest("tr");
+        if (!tr || !tr.dataset.path) return;
+        const selection = window.getSelection && window.getSelection();
+        if (selection && !selection.isCollapsed) return;
+        openViewer(tr.dataset.path, Number(tr.dataset.line));
+      });
+
+      viewerPrev.addEventListener("click", () => setViewerMatch(viewerIdx - 1));
+      viewerNext.addEventListener("click", () => setViewerMatch(viewerIdx + 1));
+      viewerClose.addEventListener("click", closeViewer);
+      // Click on the backdrop (not the dialog box) closes the viewer.
+      viewer.addEventListener("mousedown", (event) => {
+        if (event.target === viewer) closeViewer();
+      });
+      document.addEventListener("keydown", (event) => {
+        if (viewer.hidden) return;
+        if (event.key === "Escape") {
+          closeViewer();
+        } else if (event.key === "ArrowDown" || event.key === "ArrowRight") {
+          event.preventDefault();
+          setViewerMatch(viewerIdx + 1);
+        } else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
+          event.preventDefault();
+          setViewerMatch(viewerIdx - 1);
+        }
+      });
 
       function parseTerms() {
         return termsInput.value
@@ -1020,12 +1222,28 @@
         const shown = entries.slice(0, HEAT_LIMIT);
         const max = entries[0][1];
 
+        const head = document.createElement("div");
+        head.className = "heat-head";
+
         const heading = document.createElement("h2");
         heading.textContent =
-          `File heatmap -- ${entries.length.toLocaleString()} ` +
+          `${entries.length.toLocaleString()} ` +
           `file${entries.length === 1 ? "" : "s"} with matches ` +
           `(click to filter)`;
-        heatmapEl.appendChild(heading);
+
+        const toggle = document.createElement("label");
+        toggle.className = "toggle heat-toggle";
+        const toggleInput = document.createElement("input");
+        toggleInput.type = "checkbox";
+        toggleInput.checked = heatShowPercent;
+        toggleInput.addEventListener("change", () => {
+          heatShowPercent = toggleInput.checked;
+          updateHeatCounts();
+        });
+        toggle.append(toggleInput, document.createTextNode(" Show %"));
+
+        head.append(heading, toggle);
+        heatmapEl.appendChild(head);
 
         const list = document.createElement("div");
         list.className = "heat-list";
@@ -1056,7 +1274,8 @@
 
           const countEl = document.createElement("div");
           countEl.className = "heat-count";
-          countEl.textContent = count.toLocaleString();
+          countEl.dataset.count = count;
+          countEl.textContent = formatHeatCount(count);
 
           row.append(hp, track, countEl);
           row.addEventListener("click", () => {
@@ -1092,6 +1311,27 @@
         const r = Math.max(0, Math.min(1, ratio));
         const hue = 210 - 210 * r;
         return `hsl(${hue}, 85%, 52%)`;
+      }
+
+      // Heatmap counts render either as a raw number or as a share of all
+      // matches, controlled by the "Show %" toggle in the heatmap header.
+      function formatHeatCount(count) {
+        if (!heatShowPercent) return count.toLocaleString();
+        return formatPercent(count, lastRun ? lastRun.totalMatches : 0);
+      }
+
+      function formatPercent(part, total) {
+        if (!total) return "0%";
+        const pct = (part / total) * 100;
+        if (pct >= 10) return `${pct.toFixed(0)}%`;
+        if (pct >= 0.1) return `${pct.toFixed(1)}%`;
+        return pct > 0 ? "<0.1%" : "0%";
+      }
+
+      function updateHeatCounts() {
+        for (const cell of heatmapEl.querySelectorAll(".heat-count")) {
+          cell.textContent = formatHeatCount(Number(cell.dataset.count) || 0);
+        }
       }
 
       function renderTermFilter(ctx) {
@@ -1174,6 +1414,10 @@
         const highlight = lastRun.matchers.highlight;
         for (const m of rows) {
           const tr = document.createElement("tr");
+          tr.className = "res-row";
+          tr.dataset.path = m.path;
+          tr.dataset.line = m.lineNo;
+          tr.title = "Click to open this file with matches highlighted";
 
           const fileTd = document.createElement("td");
           fileTd.className = "file";
@@ -1273,6 +1517,257 @@
         const needsQuotes = /[",\r\n]/.test(value);
         const escaped = value.replace(/"/g, '""');
         return needsQuotes ? `"${escaped}"` : escaped;
+      }
+
+      // ---- file viewer -------------------------------------------------------
+
+      // Map a result path back to the selected source that can produce its bytes.
+      // Plain files match directly; archived entries are prefixed with their
+      // archive's path (except single .gz files, whose entry drops the suffix).
+      function findSource(path) {
+        for (const item of selected) {
+          const kind = window.LogArchives
+            ? LogArchives.archiveKind(item.path)
+            : null;
+          if (!kind && item.path === path) {
+            return { kind: "file", file: item.file };
+          }
+        }
+        for (const item of selected) {
+          const kind = window.LogArchives
+            ? LogArchives.archiveKind(item.path)
+            : null;
+          if (!kind) continue;
+          if (kind === "gzip") {
+            const inner = item.path.replace(/\.(gz|gzip)$/i, "") || item.path;
+            if (path === inner) {
+              return {
+                kind: "archive",
+                file: item.file,
+                archivePath: item.path,
+                innerPath: inner,
+              };
+            }
+          } else if (path.startsWith(item.path + "/")) {
+            return {
+              kind: "archive",
+              file: item.file,
+              archivePath: item.path,
+              innerPath: path,
+            };
+          }
+        }
+        return null;
+      }
+
+      async function readPlainFile(file, maxBytes) {
+        const truncated = file.size > maxBytes;
+        const blob = truncated ? file.slice(0, maxBytes) : file;
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+        return { text, truncated };
+      }
+
+      // Re-extract a single entry from its archive, capturing only the bytes of
+      // the target file and stopping the extraction once we have them.
+      async function readArchiveEntry(file, archivePath, targetPath, maxBytes) {
+        const chunks = [];
+        let found = false;
+        let doneTarget = false;
+        let truncated = false;
+        let size = 0;
+        const sink = {
+          open(name) {
+            if (doneTarget || name !== targetPath) return null;
+            found = true;
+            return { name };
+          },
+          chunk(_handle, bytes) {
+            if (size >= maxBytes) {
+              truncated = true;
+              return false;
+            }
+            chunks.push(bytes.slice());
+            size += bytes.length;
+            if (size >= maxBytes) {
+              truncated = true;
+              return false;
+            }
+            return true;
+          },
+          close() {
+            if (found) doneTarget = true;
+          },
+          skip() {},
+          error() {},
+        };
+        try {
+          await LogArchives.extract(file, archivePath, sink, {
+            isCancelled: () => doneTarget,
+          });
+        } catch (error) {
+          return null;
+        }
+        if (!found) return null;
+        const buffer = new Uint8Array(size);
+        let offset = 0;
+        for (const part of chunks) {
+          buffer.set(part, offset);
+          offset += part.length;
+        }
+        const text = new TextDecoder("utf-8", { fatal: false }).decode(buffer);
+        return { text, truncated };
+      }
+
+      function viewerMessage(message) {
+        viewerBody.innerHTML = "";
+        const line = document.createElement("div");
+        line.className = "v-line";
+        const text = document.createElement("span");
+        text.className = "v-tx";
+        text.textContent = message;
+        line.appendChild(text);
+        viewerBody.appendChild(line);
+      }
+
+      async function openViewer(path, lineNo) {
+        if (!lastRun) return;
+        const token = ++viewerToken;
+        viewer.hidden = false;
+        document.body.style.overflow = "hidden";
+        viewerTitle.innerHTML = formatPath(path);
+        viewerNote.hidden = true;
+        viewerNote.textContent = "";
+        viewerMarks = [];
+        viewerIdx = -1;
+        updateViewerInfo();
+        viewerMessage("Loading...");
+
+        const source = findSource(path);
+        if (!source) {
+          viewerMessage(
+            "Could not locate this file to open. Re-select the folder or " +
+              "archive and search again."
+          );
+          return;
+        }
+
+        let result;
+        try {
+          result =
+            source.kind === "file"
+              ? await readPlainFile(source.file, VIEWER_MAX_BYTES)
+              : await readArchiveEntry(
+                  source.file,
+                  source.archivePath,
+                  source.innerPath,
+                  VIEWER_MAX_BYTES
+                );
+        } catch (error) {
+          result = null;
+        }
+
+        // Bail if the viewer was closed or another file opened while loading.
+        if (viewer.hidden || token !== viewerToken) return;
+        if (!result || result.text == null) {
+          viewerMessage("Could not read this file.");
+          return;
+        }
+
+        const info = renderViewerContent(result.text, lineNo);
+        viewerMarks = Array.from(viewerBody.querySelectorAll("mark"));
+
+        const hit = viewerBody.querySelector(`.v-line[data-ln="${lineNo}"]`);
+        let start = viewerMarks.findIndex((mark) => {
+          const row = mark.closest(".v-line");
+          return row && Number(row.dataset.ln) >= lineNo;
+        });
+        if (start < 0 && viewerMarks.length) start = 0;
+        if (start >= 0) {
+          setViewerMatch(start, false);
+        } else {
+          if (hit) hit.scrollIntoView({ block: "center" });
+          updateViewerInfo();
+        }
+
+        const notes = [];
+        if (result.truncated) {
+          notes.push(
+            `Showing the first ${formatBytes(VIEWER_MAX_BYTES)} of a larger file.`
+          );
+        }
+        if (info.total > info.rendered) {
+          notes.push(
+            `Showing the first ${info.rendered.toLocaleString()} of ` +
+              `${info.total.toLocaleString()} lines.`
+          );
+        }
+        if (notes.length) {
+          viewerNote.textContent = notes.join(" ");
+          viewerNote.hidden = false;
+        }
+        viewerBody.focus();
+      }
+
+      function renderViewerContent(text, hitLine) {
+        const highlight = lastRun.matchers.highlight;
+        const lines = text.split("\n");
+        const rendered = Math.min(lines.length, VIEWER_MAX_LINES);
+        const parts = [];
+        for (let i = 0; i < rendered; i++) {
+          let line = lines[i];
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+          if (line.length > VIEWER_MAX_LINE_LEN) {
+            line = line.slice(0, VIEWER_MAX_LINE_LEN) + " ...[truncated]";
+          }
+          const ln = i + 1;
+          const cls = ln === hitLine ? "v-line v-hit" : "v-line";
+          parts.push(
+            `<div class="${cls}" data-ln="${ln}">` +
+              `<span class="v-ln">${ln}</span>` +
+              `<span class="v-tx">${highlightText(line, highlight)}</span>` +
+              `</div>`
+          );
+        }
+        viewerBody.innerHTML = parts.join("");
+        return { rendered, total: lines.length };
+      }
+
+      function setViewerMatch(index, smooth = true) {
+        if (!viewerMarks.length) {
+          updateViewerInfo();
+          return;
+        }
+        const next = Math.max(0, Math.min(index, viewerMarks.length - 1));
+        if (viewerIdx >= 0 && viewerMarks[viewerIdx]) {
+          viewerMarks[viewerIdx].classList.remove("v-cur");
+        }
+        viewerIdx = next;
+        const mark = viewerMarks[viewerIdx];
+        mark.classList.add("v-cur");
+        mark.scrollIntoView({
+          block: "center",
+          behavior: smooth ? "smooth" : "auto",
+        });
+        updateViewerInfo();
+      }
+
+      function updateViewerInfo() {
+        const has = viewerMarks.length > 0;
+        viewerMinfo.textContent = has
+          ? `Match ${viewerIdx + 1} / ${viewerMarks.length.toLocaleString()}`
+          : "No matches";
+        viewerPrev.disabled = !has;
+        viewerNext.disabled = !has;
+      }
+
+      function closeViewer() {
+        viewer.hidden = true;
+        viewerBody.innerHTML = "";
+        viewerNote.hidden = true;
+        viewerMarks = [];
+        viewerIdx = -1;
+        document.body.style.overflow = "";
       }
 
       function showConfigError(message) {
