@@ -356,7 +356,11 @@ function htmlResponse(html, init = {}) {
 }
 
 function isAssetRoute(pathname) {
-  return pathname === "/" || pathname === "/config.js";
+  return (
+    pathname === "/" ||
+    pathname === "/config.js" ||
+    pathname === "/favicon.png"
+  );
 }
 
 function httpError(status, message) {

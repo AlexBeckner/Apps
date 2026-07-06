@@ -125,6 +125,13 @@ export default {
         return authResponse;
       }
 
+      if (
+        request.method === "GET" &&
+        new URL(request.url).pathname === "/favicon.png"
+      ) {
+        return env.ASSETS.fetch(request);
+      }
+
       await ensureSchema(env);
 
       const url = new URL(request.url);
