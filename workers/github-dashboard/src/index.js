@@ -6,7 +6,7 @@ const GITHUB_GRAPHQL = "https://api.github.com/graphql";
 const DEFAULT_REPO = "AppliedNeuron/core-stack";
 const GITHUB_PAGE_SIZE = 100;
 const MAX_LIST_LIMIT = 500;
-const SCHEMA_UPGRADE_VERSION = "commit-parents-dag-2026-07-03";
+const SCHEMA_UPGRADE_VERSION = "tag-tagger-2026-07-06";
 
 // All syncing is owned by git-based GitHub Actions (branches; commits+tags; PRs).
 // The Worker no longer syncs anything itself: it serves the dashboard from D1 and
@@ -92,6 +92,8 @@ CREATE TABLE IF NOT EXISTS tags (
   target_sha     TEXT NOT NULL,
   is_annotated   INTEGER NOT NULL DEFAULT 0,
   tagged_at      INTEGER,
+  tagger_name    TEXT,
+  tagger_email   TEXT,
   message        TEXT,
   first_seen_at  INTEGER NOT NULL,
   deleted_at     INTEGER
@@ -248,6 +250,10 @@ async function ensureSchemaUpgrades(env) {
   // on_default marks commits reachable from the default branch; the global
   // Commits tab / summary filter on it (a cheap flag, no graph walk needed).
   await ensureColumn(env, "commits", "on_default", "INTEGER NOT NULL DEFAULT 0");
+  // Annotated tags carry a tagger (name + email); the tag pages surface it.
+  // Lightweight tags have none, so these stay NULL for them.
+  await ensureColumn(env, "tags", "tagger_name", "TEXT");
+  await ensureColumn(env, "tags", "tagger_email", "TEXT");
   const statements = [
     "CREATE INDEX IF NOT EXISTS idx_commits_default ON commits(committed_at DESC) WHERE on_default = 1",
     "CREATE INDEX IF NOT EXISTS idx_prs_head_ref ON prs(head_ref)",
@@ -714,11 +720,7 @@ async function handleTagDetail(env, name) {
 
   const target = await getCommitRow(env, row.target_sha);
   return {
-    tag: {
-      ...toTag(row),
-      taggerName: null,
-      taggerEmail: null,
-    },
+    tag: toTag(row),
     target: target ? toCommit(target) : null,
   };
 }
@@ -1425,6 +1427,8 @@ function toTag(row) {
     shortTargetSha: row.target_sha?.slice(0, 7) || "",
     isAnnotated: !!row.is_annotated,
     taggedAt: row.tagged_at ?? null,
+    taggerName: row.tagger_name ?? null,
+    taggerEmail: row.tagger_email ?? null,
     message: row.message,
     deletedAt: row.deleted_at ?? null,
   };

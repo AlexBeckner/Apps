@@ -729,7 +729,7 @@ export function dashboardHtml(env) {
             return [
               '<a class="table-link mono" href="' + attr(tagHref(t.name)) + '" data-link>' + escape(t.name) + (t.deletedAt ? ' <span class="pill pill-danger">deleted</span>' : '') + '</a>',
               '<a class="table-link mono small" href="/commits/' + attr(t.targetSha) + '" data-link>' + escape(t.shortTargetSha) + '</a>',
-              '<span class="subtle">-</span>',
+              t.taggerName ? '<span class="muted truncate">' + escape(t.taggerName) + '</span>' : '<span class="subtle">-</span>',
               '<span class="subtle">' + relativeTime(t.taggedAt) + '</span>'
             ];
           })) +
@@ -1011,8 +1011,8 @@ export function dashboardHtml(env) {
       var t = data.tag;
       app.innerHTML =
         '<div class="page"><div><div class="crumb small subtle"><a href="/tags" data-link>Tags</a> /</div><h1 class="mono break"><a class="link" href="https://github.com/' + attr(config.repo) + '/releases/tag/' + attr(t.name) + '" target="_blank" rel="noopener noreferrer">' + escape(t.name) + '</a> ' + (t.deletedAt ? '<span class="pill pill-danger">deleted</span>' : '') + '</h1></div>' +
-        '<div class="stat-grid">' + stat("Target", '<a class="table-link mono" href="/commits/' + attr(t.targetSha) + '" data-link>' + escape(t.shortTargetSha) + '</a>') + stat("Tagged", '<span class="muted">' + relativeTime(t.taggedAt) + '</span>') + stat("Annotated", t.isAnnotated ? "yes" : "no") + '</div>' +
-        (t.message ? panel("Tag message", "", '<pre class="message">' + escape(t.message) + '</pre>') : '') +
+        '<div class="stat-grid">' + stat("Target", '<a class="table-link mono" href="/commits/' + attr(t.targetSha) + '" data-link>' + escape(t.shortTargetSha) + '</a>') + stat("Tagger", t.taggerName ? '<span class="muted">' + escape(t.taggerName) + (t.taggerEmail ? ' <span class="subtle">&lt;' + escape(t.taggerEmail) + '&gt;</span>' : '') + '</span>' : '<span class="subtle">-</span>') + stat("Tagged", '<span class="muted">' + relativeTime(t.taggedAt) + '</span>') + '</div>' +
+        (t.message ? '<pre class="message">' + escape(t.message) + '</pre>' : '') +
         tagCommitsPanel(commitsPage, commitsOffset, pageSize) +
         '</div>';
       bindTagDetailControls(name, commitsPage, pageSize, opts.restoreFocusId);

@@ -172,7 +172,10 @@ Shared Actions secrets (in the repo that hosts the workflows, `ACTIONS_REPO`):
 - `workers/github-dashboard/scripts/ingest-tags.mjs` - runs
   `git for-each-ref refs/tags` on the same clone and upserts every tag into `tags`
   (dereferencing annotated tags to their commit), then prunes tags no longer
-  present. Advances a `tag_git_synced_at` watermark. `DRY_RUN=1
+  present. For annotated tags it also records the **tagger** (name + email) and
+  the **full message** (subject + body, so the tag page reads like a PR
+  description); lightweight tags have no tagger and fall back to the target
+  commit's subject. Advances a `tag_git_synced_at` watermark. `DRY_RUN=1
   REPO_DIR=<clone> node …/ingest-tags.mjs` previews the SQL.
 
 ### PR sync
