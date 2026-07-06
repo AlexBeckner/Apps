@@ -7,7 +7,7 @@ any private GitHub or Buildkite data is returned.
 ## Apps
 
 - [dataspeedhashfinder](./dataspeedhashfinder/)
-- [buildkitedeploymentdashboard](./buildkitedeploymentdashboard/)
+- [deploydashboard](./deploydashboard/)
 - [githubdashboard](./githubdashboard/)
 - [logsearch](./logsearch/)
 

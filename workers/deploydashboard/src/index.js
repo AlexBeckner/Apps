@@ -224,7 +224,7 @@ export default {
       return jsonResponse(request, env, { error: "Not found" }, { status: 404 });
     } catch (error) {
       const status = Number.isInteger(error.status) ? error.status : 500;
-      console.error("rig-deployment-dashboard request failed", {
+      console.error("deploydashboard request failed", {
         status,
         message: error.message || String(error),
         stack: error.stack || null,
@@ -299,7 +299,7 @@ async function ensureRefreshScheduler(env, { fallbackToRefresh = false } = {}) {
   try {
     return await stub.start();
   } catch (error) {
-    console.error("rig-deployment-dashboard refresh scheduler start failed", {
+    console.error("deploydashboard refresh scheduler start failed", {
       message: error.message || String(error),
       stack: error.stack || null,
     });
@@ -340,14 +340,14 @@ async function runRefreshSchedulerAlarm(ctx, env) {
     await setMeta(env, schedulerMetaKey("last_finished_at"), String(Math.floor(Date.now() / 1000)));
     await setMeta(env, schedulerMetaKey("last_error"), "");
   } catch (error) {
-    console.error("rig-deployment-dashboard scheduled refresh failed", {
+    console.error("deploydashboard scheduled refresh failed", {
       message: error.message || String(error),
       stack: error.stack || null,
     });
     try {
       await setMeta(env, schedulerMetaKey("last_error"), String(error.message || error).slice(0, 300));
     } catch (metaError) {
-      console.error("rig-deployment-dashboard scheduler metadata write failed", {
+      console.error("deploydashboard scheduler metadata write failed", {
         message: metaError.message || String(metaError),
       });
     }
@@ -427,7 +427,7 @@ async function readCachedSnapshot(env, sourceKey, historySize = HISTORY_SIZE) {
   try {
     return trimSnapshotHistory(JSON.parse(raw), historySize);
   } catch (error) {
-    console.error("rig-deployment-dashboard cached snapshot decode failed", {
+    console.error("deploydashboard cached snapshot decode failed", {
       source: sourceKey,
       message: error.message || String(error),
     });
@@ -524,7 +524,7 @@ async function buildkiteJson(env, url) {
     headers: {
       Accept: "application/json",
       Authorization: `Bearer ${env.BUILDKITE_API_TOKEN}`,
-      "User-Agent": "rig-deployment-dashboard-worker/0.1",
+      "User-Agent": "deploydashboard-worker/0.1",
     },
   });
   const text = await response.text();
@@ -991,7 +991,7 @@ async function releaseRefreshLease(env, sourceKey, lease) {
       await setMeta(env, key, "0");
     }
   } catch (error) {
-    console.error("rig-deployment-dashboard refresh lease release failed", {
+    console.error("deploydashboard refresh lease release failed", {
       source: sourceKey,
       message: error.message || String(error),
     });
@@ -1589,7 +1589,7 @@ function dashboardHtml() {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>buildkitedeploymentdashboard</title>
+    <title>deploydashboard</title>
     <style>
       * { box-sizing: border-box; }
       body {
@@ -1620,7 +1620,7 @@ function dashboardHtml() {
     <main>
       <header>
         <div>
-          <h1>buildkitedeploymentdashboard</h1>
+          <h1>deploydashboard</h1>
           <p id="subtitle">Loading deployments...</p>
         </div>
         <div class="controls">

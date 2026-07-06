@@ -1,17 +1,17 @@
-name = "rig-deployment-dashboard"
+name = "deploydashboard"
 main = "src/index.js"
 compatibility_date = "2024-09-23"
 keep_vars = true
 
 [vars]
 # Same-origin Worker-hosted app. Override to "*" in local `.dev.vars` if needed.
-ALLOWED_ORIGIN = "https://rig-deployment-dashboard.appliedapps.workers.dev"
+ALLOWED_ORIGIN = "https://deploydashboard.appliedapps.workers.dev"
 SNAPSHOT_SIZE = "10"
 CACHE_SECONDS = "10"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "rig-deployment-dashboard"
+database_name = "deploydashboard"
 database_id = "a1ee14ef-c799-4caa-a42f-7653919f0ea3"
 
 [[durable_objects.bindings]]

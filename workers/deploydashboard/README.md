@@ -1,6 +1,6 @@
-# buildkitedeploymentdashboard Worker
+# deploydashboard Worker
 
-Cloudflare Worker backend for buildkitedeploymentdashboard.
+Cloudflare Worker backend for deploydashboard.
 
 The Worker keeps `BUILDKITE_API_TOKEN` server-side, stores deployment history in
 D1, refreshes snapshots from a Durable Object alarm every `CACHE_SECONDS`, and
@@ -42,7 +42,7 @@ user clicks **Unlock controls** and enters the token. Do not put this token in
 2. Create the D1 database:
 
    ```sh
-   npx wrangler d1 create rig-deployment-dashboard
+   npx wrangler d1 create deploydashboard
    ```
 
 3. Copy the returned database id into `wrangler.toml`.
