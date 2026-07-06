@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Set the AUTH_SECRET (session-cookie signing key) on every Worker in this folder.
+#
+#   cd Apps/workers && ./updateauthtoken
+#
+# Leave the value blank to auto-generate a unique 48-char secret per Worker
+# (recommended -- cookies are per-origin, so the secret need not be shared).
+# Rotating AUTH_SECRET invalidates all existing sessions (everyone signs in again).
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+workers=()
+for dir in */; do
+  if [[ -f "${dir}wrangler.toml" || -f "${dir}wrangler.jsonc" || -f "${dir}wrangler.json" ]]; then
+    workers+=("${dir%/}")
+  fi
+done
+
+if [[ ${#workers[@]} -eq 0 ]]; then
+  echo "No Workers found in $SCRIPT_DIR" >&2
+  exit 1
+fi
+
+gen_secret() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 36 | tr -d '\n'
+  else
+    head -c 36 /dev/urandom | base64 | tr -d '\n'
+  fi
+}
+
+echo "Workers to update (AUTH_SECRET):"
+printf '  - %s\n' "${workers[@]}"
+echo
+echo "Note: rotating AUTH_SECRET signs everyone out (existing sessions become invalid)."
+echo
+
+read -rsp "New AUTH_SECRET (blank = auto-generate unique per Worker): " SECRET; echo
+GENERATE=0
+if [[ -z "$SECRET" ]]; then
+  GENERATE=1
+  echo "Auto-generating a unique secret for each Worker."
+elif [[ ${#SECRET} -lt 32 ]]; then
+  echo "AUTH_SECRET must be at least 32 characters." >&2
+  exit 1
+fi
+
+read -rp "Set AUTH_SECRET on ${#workers[@]} Worker(s)? [y/N] " ok
+if [[ ! "$ok" =~ ^[Yy]$ ]]; then
+  echo "Aborted."
+  exit 0
+fi
+
+fail=0
+for w in "${workers[@]}"; do
+  echo "-> $w"
+  value="$SECRET"
+  if [[ $GENERATE -eq 1 ]]; then
+    value="$(gen_secret)"
+  fi
+  # printf '%s' avoids piping a trailing newline into the secret value.
+  if ! ( cd "$w" && printf '%s' "$value" | npx wrangler secret put AUTH_SECRET ); then
+    echo "  FAILED: $w" >&2
+    fail=1
+  fi
+  unset value
+done
+unset SECRET
+
+if [[ $fail -ne 0 ]]; then
+  echo "Done with errors -- see above." >&2
+  exit 1
+fi
+echo "AUTH_SECRET updated on all Workers."
