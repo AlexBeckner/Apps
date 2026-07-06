@@ -651,6 +651,9 @@
       let lastRun = null; // results of the most recent completed scan
       let activeTerm = null; // term chip filter, or null for all
       let activeFile = null; // heatmap file filter, or null for all
+      let activeFileMatches = null; // all matches for activeFile, re-read on demand
+      let activeFileCapped = false; // that re-read hit the per-file cap
+      let fileScanToken = 0; // guards against races when switching files fast
       let running = false;
       let cancelRequested = false;
       let displayRoot = ""; // shared root folder/archive trimmed from shown paths
@@ -888,6 +891,9 @@
         termFilterEl.innerHTML = "";
         activeTerm = null;
         activeFile = null;
+        activeFileMatches = null;
+        activeFileCapped = false;
+        fileScanToken++;
 
         const ctx = {
           matches: [],
@@ -1146,17 +1152,16 @@
 
       function testLine(line, lineNo, path, ctx, combined, perTerm) {
         if (!combined.test(line)) return;
+        // Counts are the *true* totals across the whole scan so the heatmap,
+        // term chips, and summary show the real picture. The results list can
+        // only hold STORE_LIMIT lines in memory, but a click on any file re-reads
+        // just that file to recover every one of its matches on demand.
         ctx.totalMatches++;
-        // Only matches we actually keep may feed the heatmap and term chips.
-        // Those counters drive the filters (which iterate ctx.matches), so if we
-        // counted matches dropped past STORE_LIMIT the UI would advertise files
-        // or terms that produce zero rows when clicked. The true grand total
-        // still lives in ctx.totalMatches for the summary + capped note.
+        ctx.fileCounts[path] = (ctx.fileCounts[path] || 0) + 1;
+        for (const t of perTerm) {
+          if (t.re.test(line)) ctx.termCounts[t.term]++;
+        }
         if (ctx.stored < STORE_LIMIT) {
-          ctx.fileCounts[path] = (ctx.fileCounts[path] || 0) + 1;
-          for (const t of perTerm) {
-            if (t.re.test(line)) ctx.termCounts[t.term]++;
-          }
           // Guard against pathologically long lines blowing up memory/DOM.
           const text = line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
           ctx.matches.push({ path, lineNo, text });
@@ -1238,7 +1243,7 @@
           row.dataset.file = path;
           row.title =
             `${path} -- ${count.toLocaleString()} match${count === 1 ? "" : "es"} ` +
-            `(${formatPercent(count, ctx.stored)})`;
+            `(${formatPercent(count, ctx.totalMatches)})`;
 
           const hp = document.createElement("div");
           hp.className = "hp";
@@ -1261,18 +1266,11 @@
           countN.textContent = count.toLocaleString();
           const countP = document.createElement("span");
           countP.className = "hc-p";
-          countP.textContent = `(${formatPercent(count, ctx.stored)})`;
+          countP.textContent = `(${formatPercent(count, ctx.totalMatches)})`;
           countEl.append(countN, countP);
 
           row.append(hp, track, countEl);
-          row.addEventListener("click", () => {
-            activeFile = activeFile === path ? null : path;
-            syncHeatRows();
-            renderResults();
-            if (activeFile && resultsHead.style.display !== "none") {
-              resultsHead.scrollIntoView({ behavior: "smooth", block: "nearest" });
-            }
-          });
+          row.addEventListener("click", () => selectHeatFile(path));
           list.appendChild(row);
         }
         heatmapEl.appendChild(list);
@@ -1288,9 +1286,9 @@
           const capNote = document.createElement("p");
           capNote.className = "heat-note";
           capNote.textContent =
-            `Counts cover the first ${ctx.stored.toLocaleString()} of ` +
-            `${ctx.totalMatches.toLocaleString()} matches (the rest were not kept ` +
-            `for filtering) -- narrow your search terms to include them.`;
+            `Over ${ctx.stored.toLocaleString()} matches found, so the results ` +
+            `list below starts with the first ${ctx.stored.toLocaleString()}. ` +
+            `Click any file to load all of its matching lines.`;
           heatmapEl.appendChild(capNote);
         }
         heatmapEl.style.display = "block";
@@ -1300,6 +1298,100 @@
         for (const row of heatmapEl.querySelectorAll(".heat-row")) {
           row.classList.toggle("active", (row.dataset.file || null) === activeFile);
         }
+      }
+
+      function scrollToResults() {
+        if (resultsHead.style.display !== "none") {
+          resultsHead.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+      }
+
+      // Clicking a heatmap file filters the results to it. If the scan dropped
+      // matches past STORE_LIMIT, this file's rows may be missing from the
+      // in-memory store, so re-read just this one file to recover all of them.
+      async function selectHeatFile(path) {
+        const turningOff = activeFile === path;
+        activeFile = turningOff ? null : path;
+        activeFileMatches = null;
+        activeFileCapped = false;
+        fileScanToken++;
+        syncHeatRows();
+
+        if (!activeFile) {
+          renderResults();
+          return;
+        }
+
+        // Fast path: nothing was dropped, so the store already has every match.
+        if (!lastRun || lastRun.totalMatches <= lastRun.stored) {
+          renderResults();
+          scrollToResults();
+          return;
+        }
+
+        const token = fileScanToken;
+        const expected = (lastRun.fileCounts[path] || 0).toLocaleString();
+        resultsHead.style.display = "none";
+        resultsTable.style.display = "none";
+        resultsBody.innerHTML = "";
+        resultsNote.textContent =
+          `Loading all ${expected} matches in "${stripRoot(path)}"...`;
+
+        let rescanned = null;
+        try {
+          rescanned = await rescanFileMatches(path);
+        } catch (e) {
+          rescanned = null;
+        }
+        // Bail if the user switched files (or cleared) while we were reading.
+        if (token !== fileScanToken || activeFile !== path) return;
+
+        if (rescanned) {
+          activeFileMatches = rescanned.matches;
+          activeFileCapped = rescanned.capped;
+        }
+        renderResults();
+        scrollToResults();
+      }
+
+      // Re-read one file (from disk or its archive) and collect every matching
+      // line, mirroring how the streaming scanner counts lines and truncates
+      // very long ones. Capped per file to keep memory bounded.
+      async function rescanFileMatches(path) {
+        const source = findSource(path);
+        if (!source) return null;
+
+        let result;
+        try {
+          result =
+            source.kind === "file"
+              ? await readPlainFile(source.file)
+              : await readArchiveEntry(
+                  source.file,
+                  source.archivePath,
+                  source.innerPath
+                );
+        } catch (error) {
+          result = null;
+        }
+        if (!result || result.text == null) return null;
+
+        const combined = lastRun.matchers.combined;
+        const lines = result.text.split("\n");
+        const matches = [];
+        let capped = false;
+        for (let i = 0; i < lines.length; i++) {
+          let line = lines[i];
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+          if (!combined.test(line)) continue;
+          if (matches.length >= STORE_LIMIT) {
+            capped = true;
+            break;
+          }
+          const text = line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
+          matches.push({ path, lineNo: i + 1, text });
+        }
+        return { matches, capped };
       }
 
       // Blue (few hits) -> red (most hits) heat scale for the dark theme.
@@ -1325,7 +1417,7 @@
 
         const all = document.createElement("span");
         all.className = "chip" + (activeTerm === null ? " active" : "");
-        all.textContent = `All (${ctx.stored.toLocaleString()})`;
+        all.textContent = `All (${ctx.totalMatches.toLocaleString()})`;
         all.addEventListener("click", () => {
           activeTerm = null;
           syncTermChips();
@@ -1365,13 +1457,24 @@
         }
       }
 
-      function renderResults() {
-        if (!lastRun) return;
+      // The active match set: a heatmap file's fully re-read matches when one is
+      // selected, otherwise the global (capped) store.
+      function currentSource() {
+        const usingFileSet = !!(activeFile && activeFileMatches);
+        return {
+          usingFileSet,
+          matches: usingFileSet ? activeFileMatches : lastRun.matches,
+        };
+      }
+
+      // Predicate for the term chip + free-text filters over the active set.
+      function currentPredicate(usingFileSet) {
         const filterText = filterInput.value.trim().toLowerCase();
         const termRe = activeTermRegex();
-
-        const passes = (m) => {
-          if (activeFile && m.path !== activeFile) return false;
+        return (m) => {
+          // currentSource already scopes to the file when a re-read set is in
+          // use; only the shared global store needs the explicit path check.
+          if (activeFile && !usingFileSet && m.path !== activeFile) return false;
           if (termRe && !termRe.test(m.text)) return false;
           if (
             filterText &&
@@ -1382,12 +1485,18 @@
           }
           return true;
         };
+      }
+
+      function renderResults() {
+        if (!lastRun) return;
+        const { usingFileSet, matches: source } = currentSource();
+        const passes = currentPredicate(usingFileSet);
 
         // Single pass: collect up to the render cap, but count every match so
         // the note can report the true total (which may exceed the cap).
         const rows = [];
         let totalMatching = 0;
-        for (const m of lastRun.matches) {
+        for (const m of source) {
           if (!passes(m)) continue;
           totalMatching++;
           if (rows.length < RENDER_LIMIT) rows.push(m);
@@ -1425,26 +1534,49 @@
 
         if (!lastRun.totalMatches) {
           resultsNote.textContent = "No matches found.";
-        } else {
-          const parts = [];
-          if (activeFile) {
-            parts.push(`Filtered to file "${stripRoot(activeFile)}" (click it again to clear).`);
-          }
+          return;
+        }
+
+        const capped = lastRun.totalMatches > lastRun.stored;
+        const parts = [];
+        if (activeFile) {
           parts.push(
-            `Showing ${rows.length.toLocaleString()} of ` +
-              `${totalMatching.toLocaleString()} matching line${totalMatching === 1 ? "" : "s"}.`
+            `Filtered to file "${stripRoot(activeFile)}" (click it again to clear).`
           );
-          if (lastRun.totalMatches > lastRun.stored) {
+        }
+        parts.push(
+          `Showing ${rows.length.toLocaleString()} of ` +
+            `${totalMatching.toLocaleString()} matching line${totalMatching === 1 ? "" : "s"}.`
+        );
+
+        if (usingFileSet) {
+          // This file's lines were re-read from disk in full.
+          if (activeFileCapped) {
             parts.push(
-              `Only the first ${lastRun.stored.toLocaleString()} of ` +
-                `${lastRun.totalMatches.toLocaleString()} total matches were kept ` +
-                `(narrow your terms to see the rest).`
+              `Only the first ${STORE_LIMIT.toLocaleString()} matches in this file ` +
+                `were loaded; filter or download the CSV to narrow them.`
             );
           } else if (totalMatching > rows.length) {
             parts.push("Refine the filter or download the CSV to see them all.");
           }
-          resultsNote.textContent = parts.join(" ");
+        } else if (activeFile && capped) {
+          // A file is selected but we fell back to the in-memory store (re-read
+          // was unavailable), so some of its lines may be missing.
+          parts.push(
+            "Showing only the matches kept in memory for this file; a re-read " +
+              "was unavailable, so some may be missing."
+          );
+        } else if (!activeFile && capped) {
+          // Term / free-text filters run over the first STORE_LIMIT matches only.
+          parts.push(
+            `Searched the first ${lastRun.stored.toLocaleString()} of ` +
+              `${lastRun.totalMatches.toLocaleString()} total matches -- click a ` +
+              `file above to load all of its lines, or narrow your terms.`
+          );
+        } else if (totalMatching > rows.length) {
+          parts.push("Refine the filter or download the CSV to see them all.");
         }
+        resultsNote.textContent = parts.join(" ");
       }
 
       function highlightText(text, highlightRe) {
@@ -1498,11 +1630,16 @@
       }
 
       function downloadCsv() {
-        if (!lastRun || !lastRun.matches.length) return;
+        if (!lastRun) return;
+        // Export exactly what the current filters show (file, term, free text),
+        // including a heatmap file's fully re-read matches.
+        const { usingFileSet, matches: source } = currentSource();
+        const passes = currentPredicate(usingFileSet);
         const rows = [["file", "line", "text"]];
-        for (const m of lastRun.matches) {
-          rows.push([m.path, String(m.lineNo), m.text]);
+        for (const m of source) {
+          if (passes(m)) rows.push([m.path, String(m.lineNo), m.text]);
         }
+        if (rows.length === 1) return;
         const csv = rows
           .map((r) => r.map(csvCell).join(","))
           .join("\r\n");
