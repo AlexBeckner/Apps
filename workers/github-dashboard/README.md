@@ -105,9 +105,17 @@ each taking one authoritative `git` snapshot per run and writing straight to D1:
 
 | Workflow | Source | Writes to D1 | Cron |
 | --- | --- | --- | --- |
-| `sync-branches.yml` | `git for-each-ref refs/heads` | `branches` | hourly (`:05`) |
+| `sync-branches.yml` | `git for-each-ref refs/heads` | `branches` | hourly (`:25`) |
 | `sync-commits.yml` | `git log --all` + `git for-each-ref refs/tags` | `commits`, `tags` | hourly (`:25`) |
-| `sync-prs.yml` | REST `/pulls?state=all` | `prs` | hourly (`:45`) |
+| `sync-prs.yml` | REST `/pulls?state=all` | `prs` | hourly (`:25`) |
+
+All three fire at the same time (`:25`) and run as independent, concurrent
+workflow runs — the same simultaneous dispatch the "Sync now" button already
+triggers. They touch disjoint tables, except that `sync-commits` also snapshots
+branch heads (for DAG/branch consistency) using the same mark-and-sweep as
+`sync-branches`; those two don't collide in practice because the commits run
+reaches its branch-snapshot step only after a multi-minute blobless clone +
+`git log --all`, long after the fast standalone branch run has finished.
 
 Each ingest script records a per-source watermark in `meta`
 (`branch_external_synced_at`, `commit_git_synced_at`, `tag_git_synced_at`,

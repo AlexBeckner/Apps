@@ -12,7 +12,7 @@ name: Sync branches to dashboard D1
 # incremental fetches.
 on:
   schedule:
-    - cron: "5 * * * *" # hourly (offset from commits :25 and PRs :45)
+    - cron: "25 * * * *" # hourly at :25 — aligned with sync-commits and sync-prs so all three run together
   workflow_dispatch: {}
 
 concurrency:

@@ -18,7 +18,7 @@ name: Sync commits + tags to dashboard D1
 
 on:
   schedule:
-    - cron: "25 * * * *" # hourly (offset from branches :05 and PRs :45)
+    - cron: "25 * * * *" # hourly at :25 — aligned with sync-branches and sync-prs so all three run together
   workflow_dispatch:
     inputs:
       full:
