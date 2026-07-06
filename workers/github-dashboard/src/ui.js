@@ -128,6 +128,10 @@ export function dashboardHtml(env) {
       th, td { border-bottom: 1px solid rgba(42, 49, 64, .6); padding: 8px 16px; vertical-align: top; }
       tr:last-child td { border-bottom: 0; }
       .table-link { color: var(--text-muted); }
+      .table-tight { table-layout: auto; }
+      .table-tight th, .table-tight td { white-space: nowrap; }
+      .table-tight .col-sha, .table-tight .col-nowrap { width: 1%; }
+      .table-tight .cell-flex { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; }
       .state { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: 999px; padding: 3px 8px; font-size: 11px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
       .state:before { content: ""; width: 8px; height: 8px; border-radius: 999px; background: currentColor; }
       .state-open { border-color: rgba(46, 160, 67, .4); background: rgba(46, 160, 67, .1); color: var(--success); }
@@ -769,11 +773,11 @@ export function dashboardHtml(env) {
           table(["SHA", "Message", "Author", "Committed"], rows.map(function (c) {
             return [
               '<a class="table-link mono small" href="/commits/' + attr(c.sha) + '" data-link>' + escape(c.shortSha) + '</a>',
-              '<a class="link truncate" href="/commits/' + attr(c.sha) + '" data-link>' + escape(c.summary || "(no message)") + '</a>',
+              '<a class="link" href="/commits/' + attr(c.sha) + '" data-link>' + escape(c.summary || "(no message)") + '</a>',
               '<span class="muted">' + escape(c.authorName || "?") + '</span>',
               '<span class="subtle">' + relativeTime(c.committedAt) + '</span>'
             ];
-          })) +
+          }), { className: "table-tight", colClasses: ["col-sha", "cell-flex", "", "col-nowrap"] }) +
           pager(offset, pageSize, data.total, state.commits.page, totalPages, "commit") +
         '</div>';
       bindCommitControls(totalPages);
@@ -1114,9 +1118,13 @@ export function dashboardHtml(env) {
     return '<div class="stat"><div class="stat-label">' + escape(label) + '</div><div class="stat-value">' + value + '</div></div>';
   }
 
-  function table(headers, rows) {
+  function table(headers, rows, opts) {
+    opts = opts || {};
     if (!rows.length) return '<div class="panel">' + empty("No rows to show.") + '</div>';
-    return '<div class="table-wrap"><table><thead><tr>' + headers.map(function (h) { return '<th>' + escape(h) + '</th>'; }).join("") + '</tr></thead><tbody>' + rows.map(function (row) { return '<tr>' + row.map(function (cell) { return '<td>' + cell + '</td>'; }).join("") + '</tr>'; }).join("") + '</tbody></table></div>';
+    var colClasses = opts.colClasses || [];
+    var colAttr = function (i) { return colClasses[i] ? ' class="' + colClasses[i] + '"' : ''; };
+    var tableAttr = opts.className ? ' class="' + opts.className + '"' : '';
+    return '<div class="table-wrap"><table' + tableAttr + '><thead><tr>' + headers.map(function (h, i) { return '<th' + colAttr(i) + '>' + escape(h) + '</th>'; }).join("") + '</tr></thead><tbody>' + rows.map(function (row) { return '<tr>' + row.map(function (cell, i) { return '<td' + colAttr(i) + '>' + cell + '</td>'; }).join("") + '</tr>'; }).join("") + '</tbody></table></div>';
   }
 
   function pager(offset, pageSize, total, page, totalPages, key) {
