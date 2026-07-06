@@ -1744,6 +1744,15 @@
           renderErrors(snapshot);
           renderTable();
           renderFavicon(deriveFaviconState(snapshot));
+          // The snapshot poll re-renders the main table + rig-history rows,
+          // but the expanded build-attempts (steps) panel and the standalone
+          // history panel each read from their own cache that only loads on
+          // user interaction. Without re-pulling them here they freeze at
+          // whatever they showed when opened — a build's steps keep reading
+          // "running" long after the rig status pill flipped to "waiting" —
+          // until a full page reload. Refresh them on every snapshot so the
+          // nested steps track the rest of the row.
+          refreshOpenDetailPanels();
         } catch (err) {
           if (requestId !== state.snapshotRequestId || requestedSource !== state.source) {
             return;
@@ -1765,6 +1774,29 @@
             state.snapshotLoading = false;
           }
           if (force) setRefreshSpinning(false);
+        }
+      }
+
+      // Silently re-pull the expanded detail panels so their nested content
+      // stays in sync with each snapshot refresh. Both reads hit the server's
+      // D1-backed cache (the Worker alarm owns the Buildkite refresh cadence),
+      // so re-polling them every 10s doesn't spend Buildkite API budget.
+      function refreshOpenDetailPanels() {
+        // Build-attempts (steps) panels. Only refresh ones whose initial load
+        // already finished: a still-loading panel has a request in flight, and
+        // silently refreshing an errored panel would swap it for a spinner on
+        // every tick (its catch branch is a no-op when silent, so it'd never
+        // clear). Those cases resolve on the next user interaction instead.
+        for (const buildNumber of state.expandedBuilds) {
+          const entry = state.buildAttempts[buildNumber];
+          if (entry && entry.data) {
+            loadBuildAttempts(buildNumber, { silent: true });
+          }
+        }
+        // The standalone rig-history panel, if open. Silent keeps the current
+        // panel on screen (no "Loading..." flash) while fresh data streams in.
+        if (state.history && state.history.rig) {
+          loadHistory(state.history.rig, { silent: true });
         }
       }
 
