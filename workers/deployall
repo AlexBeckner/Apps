@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Deploy every Worker in this folder with `npm run deploy`.
+#
+#   cd Apps/workers && ./deployall
+#   cd Apps/workers && ./deployall -y   # skip the confirmation prompt
+#
+# Discovers Workers automatically (any subfolder containing a wrangler config)
+# and runs `npm run deploy` in each. Deploys run sequentially; a failure in one
+# Worker is reported but does not stop the others.
+set -uo pipefail
+
+ASSUME_YES=0
+for arg in "$@"; do
+  case "$arg" in
+    -y|--yes) ASSUME_YES=1 ;;
+    -h|--help)
+      echo "Usage: ./deployall [-y|--yes]"
+      echo "  Deploys every Worker in this folder via 'npm run deploy'."
+      echo "  -y, --yes   Skip the confirmation prompt."
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $arg" >&2
+      echo "Usage: ./deployall [-y|--yes]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+workers=()
+for dir in */; do
+  if [[ -f "${dir}wrangler.toml" || -f "${dir}wrangler.jsonc" || -f "${dir}wrangler.json" ]]; then
+    workers+=("${dir%/}")
+  fi
+done
+
+if [[ ${#workers[@]} -eq 0 ]]; then
+  echo "No Workers found in $SCRIPT_DIR" >&2
+  exit 1
+fi
+
+echo "Workers to deploy:"
+printf '  - %s\n' "${workers[@]}"
+echo
+
+if [[ $ASSUME_YES -ne 1 ]]; then
+  read -rp "Deploy ${#workers[@]} Worker(s) to production? [y/N] " ok
+  if [[ ! "$ok" =~ ^[Yy]$ ]]; then
+    echo "Aborted."
+    exit 0
+  fi
+fi
+
+fail=0
+failed_workers=()
+for w in "${workers[@]}"; do
+  echo
+  echo "=== Deploying $w ==="
+  if ! ( cd "$w" && npm run deploy ); then
+    echo "  FAILED: $w" >&2
+    fail=1
+    failed_workers+=("$w")
+  fi
+done
+
+echo
+if [[ $fail -ne 0 ]]; then
+  echo "Deploy finished with errors. Failed: ${failed_workers[*]}" >&2
+  exit 1
+fi
+echo "All Workers deployed successfully."
