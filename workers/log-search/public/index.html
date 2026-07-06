@@ -1147,11 +1147,16 @@
       function testLine(line, lineNo, path, ctx, combined, perTerm) {
         if (!combined.test(line)) return;
         ctx.totalMatches++;
-        ctx.fileCounts[path] = (ctx.fileCounts[path] || 0) + 1;
-        for (const t of perTerm) {
-          if (t.re.test(line)) ctx.termCounts[t.term]++;
-        }
+        // Only matches we actually keep may feed the heatmap and term chips.
+        // Those counters drive the filters (which iterate ctx.matches), so if we
+        // counted matches dropped past STORE_LIMIT the UI would advertise files
+        // or terms that produce zero rows when clicked. The true grand total
+        // still lives in ctx.totalMatches for the summary + capped note.
         if (ctx.stored < STORE_LIMIT) {
+          ctx.fileCounts[path] = (ctx.fileCounts[path] || 0) + 1;
+          for (const t of perTerm) {
+            if (t.re.test(line)) ctx.termCounts[t.term]++;
+          }
           // Guard against pathologically long lines blowing up memory/DOM.
           const text = line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
           ctx.matches.push({ path, lineNo, text });
@@ -1233,7 +1238,7 @@
           row.dataset.file = path;
           row.title =
             `${path} -- ${count.toLocaleString()} match${count === 1 ? "" : "es"} ` +
-            `(${formatPercent(count, ctx.totalMatches)})`;
+            `(${formatPercent(count, ctx.stored)})`;
 
           const hp = document.createElement("div");
           hp.className = "hp";
@@ -1256,7 +1261,7 @@
           countN.textContent = count.toLocaleString();
           const countP = document.createElement("span");
           countP.className = "hc-p";
-          countP.textContent = `(${formatPercent(count, ctx.totalMatches)})`;
+          countP.textContent = `(${formatPercent(count, ctx.stored)})`;
           countEl.append(countN, countP);
 
           row.append(hp, track, countEl);
@@ -1278,6 +1283,15 @@
           note.textContent =
             `Showing the top ${shown.length} files by hit count.`;
           heatmapEl.appendChild(note);
+        }
+        if (ctx.totalMatches > ctx.stored) {
+          const capNote = document.createElement("p");
+          capNote.className = "heat-note";
+          capNote.textContent =
+            `Counts cover the first ${ctx.stored.toLocaleString()} of ` +
+            `${ctx.totalMatches.toLocaleString()} matches (the rest were not kept ` +
+            `for filtering) -- narrow your search terms to include them.`;
+          heatmapEl.appendChild(capNote);
         }
         heatmapEl.style.display = "block";
       }
@@ -1311,7 +1325,7 @@
 
         const all = document.createElement("span");
         all.className = "chip" + (activeTerm === null ? " active" : "");
-        all.textContent = `All (${ctx.totalMatches.toLocaleString()})`;
+        all.textContent = `All (${ctx.stored.toLocaleString()})`;
         all.addEventListener("click", () => {
           activeTerm = null;
           syncTermChips();
