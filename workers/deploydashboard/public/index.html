@@ -821,7 +821,7 @@
                   : `<span class="font-mono">${highlightTerm(deploy.branch, filter)}</span>`)
               : "-");
         const commitCell = deploy.commit
-          ? `<a href="${escapeHtml(deploy.commit_url)}" target="_blank" rel="noopener" class="font-mono hover:underline" title="${escapeHtml(deploy.commit_subject)}">${highlightTerm(deploy.commit_short, filter)}</a>`
+          ? `<a href="${escapeHtml(deploy.commit_url)}" target="_blank" rel="noopener" class="font-mono hover:underline" title="View Commit on GitHub">${highlightTerm(deploy.commit_short, filter)}</a>`
           : "-";
         const authorCell = deploy.triggered_by
           ? highlightTerm(deploy.triggered_by, filter)
@@ -837,9 +837,16 @@
         const whenCell = when
           ? `<span>${escapeHtml(formatTimestamp(when))}</span>`
           : "-";
+        // Hovering the build number shows the Buildkite build message
+        // (usually the commit message). Falls back to the subject line for
+        // older cached snapshots that only carried commit_subject.
+        const buildMessage = deploy.commit_message || deploy.commit_subject || "";
+        const buildTitleAttr = buildMessage
+          ? ` title="${escapeHtml(buildMessage)}"`
+          : "";
         const buildCell = deploy.build_url
-          ? `<a href="${escapeHtml(deploy.build_url)}" target="_blank" rel="noopener" class="hover:underline">#${deploy.build_number}</a>`
-          : `#${deploy.build_number}`;
+          ? `<a href="${escapeHtml(deploy.build_url)}" target="_blank" rel="noopener" class="hover:underline"${buildTitleAttr}>#${deploy.build_number}</a>`
+          : `<span${buildTitleAttr}>#${deploy.build_number}</span>`;
         return {
           status: statusPill(deploy.state),
           branch: branchCell,
