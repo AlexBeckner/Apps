@@ -63,17 +63,63 @@
         background: #161616;
       }
 
-      .dropzone.dragover {
-        border-color: #7fb2ff;
-        background: #16202e;
+      .dropzone-plus {
+        color: #888;
+        display: block;
+        font-size: 40px;
+        font-weight: 300;
+        line-height: 1;
+        /* The "+" glyph sits a hair below its line-box center; nudge it up. */
+        transform: translateY(-0.06em);
       }
 
-      .dropzone strong {
-        font-size: 15px;
+      /* Exactly one of the plus sign / info line shows at a time. */
+      .dropzone.has-selection .dropzone-plus {
+        display: none;
+      }
+
+      .dropzone:not(.has-selection) #selection {
+        display: none;
       }
 
       .dropzone input[type="file"] {
         display: none;
+      }
+
+      /* Full-screen drop target: shown only while files are dragged over the
+         page, so a folder/archive can be dropped anywhere, not just the box. */
+      .drop-overlay {
+        align-items: center;
+        background: rgba(10, 16, 26, 0.82);
+        display: none;
+        inset: 0;
+        justify-content: center;
+        padding: 24px;
+        position: fixed;
+        z-index: 100;
+      }
+
+      .drop-overlay.active {
+        display: flex;
+      }
+
+      .drop-overlay-inner {
+        border: 2px dashed #7fb2ff;
+        border-radius: 16px;
+        color: #cfe0ff;
+        font-size: 96px;
+        font-weight: 300;
+        line-height: 1;
+        padding: 40px 64px;
+        /* Let drag events fall through to a single target so the enter/leave
+           counter that toggles the overlay never flickers on child edges. */
+        pointer-events: none;
+      }
+
+      /* Nudge just the glyph up (not the dashed box) to optically center it. */
+      .drop-overlay-plus {
+        display: block;
+        transform: translateY(-0.06em);
       }
 
       .controls {
@@ -499,24 +545,20 @@
     </style>
   </head>
   <body>
+    <div class="drop-overlay" id="drop-overlay" aria-hidden="true">
+      <div class="drop-overlay-inner"><span class="drop-overlay-plus">+</span></div>
+    </div>
     <main>
-      <label class="dropzone" id="dropzone" tabindex="0">
-        <strong>Choose a log folder</strong>
-        <p class="muted">or drag &amp; drop a folder or archive here</p>
-        <p class="muted">Archives expand automatically: .zip, .tar, .tar.gz, .tgz, .gz</p>
-        <p class="muted" id="selection">No folder selected yet.</p>
+      <label
+        class="dropzone"
+        id="dropzone"
+        tabindex="0"
+        aria-label="Choose a log folder, or drag and drop a folder or archive anywhere on the page"
+      >
+        <span class="dropzone-plus" aria-hidden="true">+</span>
+        <p class="muted" id="selection"></p>
         <input id="folder" type="file" webkitdirectory directory multiple>
       </label>
-      <p class="note" style="margin-top: 6px;">
-        <a href="#" id="pick-archives" role="button">Choose archive file(s) instead</a>
-      </p>
-      <input
-        id="archive-files"
-        type="file"
-        accept=".zip,.tar,.gz,.tgz,.gzip,.tar.gz,application/zip,application/gzip,application/x-tar"
-        multiple
-        hidden
-      >
 
       <div class="controls">
         <div>
@@ -613,9 +655,8 @@
 
       const el = (id) => document.getElementById(id);
       const dropzone = el("dropzone");
+      const dropOverlay = el("drop-overlay");
       const folderInput = el("folder");
-      const archiveInput = el("archive-files");
-      const pickArchives = el("pick-archives");
       const selectionEl = el("selection");
       const termsInput = el("terms");
       const caseInput = el("case");
@@ -670,24 +711,32 @@
       let viewerToken = 0; // guards against races when opening files quickly
       let viewerObserver = null; // populates/releases viewer blocks on scroll
 
+      // The drop box shows a single status line; empty text collapses it and
+      // brings back the plus sign.
+      function setDropInfo(text) {
+        selectionEl.textContent = text || "";
+        dropzone.classList.toggle("has-selection", !!text);
+      }
+
       function setSelection(files) {
         selected = files;
-        const totalBytes = files.reduce((sum, f) => sum + f.file.size, 0);
         if (!files.length) {
-          selectionEl.textContent = "No folder selected yet.";
+          setDropInfo("");
           searchBtn.disabled = true;
           return;
         }
+        const totalBytes = files.reduce((sum, f) => sum + f.file.size, 0);
         const root = files[0].path.split("/")[0] || "(folder)";
         const archiveCount = files.filter(
           (f) => window.LogArchives && LogArchives.archiveKind(f.path)
         ).length;
-        selectionEl.textContent =
+        setDropInfo(
           `${files.length.toLocaleString()} file${files.length === 1 ? "" : "s"} ` +
-          `(${formatBytes(totalBytes)}) from "${root}"` +
-          (archiveCount
-            ? ` -- ${archiveCount} archive${archiveCount === 1 ? "" : "s"} will be expanded`
-            : "");
+            `(${formatBytes(totalBytes)}) from "${root}"` +
+            (archiveCount
+              ? ` -- ${archiveCount} archive${archiveCount === 1 ? "" : "s"} will be expanded`
+              : "")
+        );
         searchBtn.disabled = false;
       }
 
@@ -702,49 +751,82 @@
         setSelection(filesFromInput(folderInput.files));
       });
 
-      // Secondary picker for choosing archive files directly (the folder input
-      // above only allows selecting directories).
-      archiveInput.addEventListener("change", () => {
-        setSelection(filesFromInput(archiveInput.files));
-      });
-      pickArchives.addEventListener("click", (event) => {
+      // Drag & drop works anywhere on the page, not just over the dropzone. A
+      // full-screen overlay appears while files are dragged in, and dropping a
+      // folder, archive, or files reads them wherever they land. The depth
+      // counter tracks dragenter/dragleave across nested elements so the
+      // overlay does not flicker. Non-file drags (e.g. text into an input) are
+      // left alone so the browser handles them normally.
+      let dragDepth = 0;
+
+      function dragHasFiles(event) {
+        const dt = event.dataTransfer;
+        return !!dt && Array.from(dt.types || []).includes("Files");
+      }
+
+      window.addEventListener("dragenter", (event) => {
+        if (!dragHasFiles(event)) return;
         event.preventDefault();
-        archiveInput.click();
+        dragDepth++;
+        dropOverlay.classList.add("active");
+      });
+      window.addEventListener("dragover", (event) => {
+        if (!dragHasFiles(event)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+      });
+      window.addEventListener("dragleave", (event) => {
+        if (!dragHasFiles(event)) return;
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) dropOverlay.classList.remove("active");
+      });
+      window.addEventListener("drop", (event) => {
+        if (!dragHasFiles(event)) return;
+        event.preventDefault();
+        dragDepth = 0;
+        dropOverlay.classList.remove("active");
+        ingestDataTransfer(event.dataTransfer);
       });
 
-      // Drag & drop of a folder (traverses the directory tree).
-      ["dragenter", "dragover"].forEach((type) =>
-        dropzone.addEventListener(type, (event) => {
-          event.preventDefault();
-          dropzone.classList.add("dragover");
-        })
-      );
-      ["dragleave", "drop"].forEach((type) =>
-        dropzone.addEventListener(type, (event) => {
-          event.preventDefault();
-          dropzone.classList.remove("dragover");
-        })
-      );
-      dropzone.addEventListener("drop", async (event) => {
-        const items = event.dataTransfer && event.dataTransfer.items;
-        if (!items || !items.length) return;
+      // Read dropped items into the selection. Folders are traversed via the
+      // entry API; browsers without it fall back to the flat file list. All
+      // DataTransfer reads happen synchronously up front because it is cleared
+      // once the drop handler returns.
+      async function ingestDataTransfer(dataTransfer) {
+        if (!dataTransfer) return;
         const entries = [];
-        for (const item of items) {
-          const entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
-          if (entry) entries.push(entry);
-        }
-        selectionEl.textContent = "Reading folder...";
-        try {
-          const files = [];
-          for (const entry of entries) {
-            await walkEntry(entry, files);
+        const items = dataTransfer.items;
+        if (items && items.length) {
+          for (const item of items) {
+            const entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
+            if (entry) entries.push(entry);
           }
-          setSelection(files);
-        } catch (error) {
-          selectionEl.textContent = "";
-          showConfigError("Could not read the dropped folder: " + error.message);
         }
-      });
+        const flatFiles = entries.length
+          ? null
+          : Array.from(dataTransfer.files || []);
+
+        if (entries.length) {
+          setDropInfo("Reading folder...");
+          try {
+            const files = [];
+            for (const entry of entries) {
+              await walkEntry(entry, files);
+            }
+            setSelection(files);
+          } catch (error) {
+            setDropInfo("");
+            showConfigError(
+              "Could not read the dropped items: " + error.message
+            );
+          }
+          return;
+        }
+        if (flatFiles && flatFiles.length) {
+          setSelection(filesFromInput(flatFiles));
+        }
+      }
+
       dropzone.addEventListener("keydown", (event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
@@ -946,16 +1028,8 @@
         running = false;
         cancelBtn.style.display = "none";
         searchBtn.disabled = false;
-        progressBar.style.width = "100%";
-        const scannedLabel =
-          `${ctx.filesScanned.toLocaleString()} file` +
-          `${ctx.filesScanned === 1 ? "" : "s"}` +
-          (ctx.archivesExpanded
-            ? ` (expanded ${ctx.archivesExpanded.toLocaleString()} archive${ctx.archivesExpanded === 1 ? "" : "s"})`
-            : "");
-        progressText.textContent = ctx.cancelled
-          ? `Cancelled after searching ${scannedLabel}.`
-          : `Done. Searched ${scannedLabel}.`;
+        // Scan finished: hide the progress bar and its status line entirely.
+        progressEl.style.display = "none";
 
         renderSummary(ctx);
         renderScanNote(ctx, unsupportedArchives);
