@@ -11,7 +11,7 @@ them all with `workers/deployall`.
 
 ## Apps
 
-- [dataspeedhashfinder](https://dataspeed-parameter-proxy.appliedapps.workers.dev/) — `workers/dataspeed-parameter-proxy`
+- [dataspeedhashfinder](https://hashfinder.appliedapps.workers.dev/) — `workers/hashfinder`
 - [deploydashboard](https://deploydashboard.appliedapps.workers.dev/) — `workers/deploydashboard`
 - [githubdashboard](https://github-dashboard.appliedapps.workers.dev/) — `workers/github-dashboard`
 - [logsearch](https://log-search.appliedapps.workers.dev/) — `workers/log-search`

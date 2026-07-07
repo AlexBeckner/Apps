@@ -1,4 +1,4 @@
-# Dataspeed Parameter Proxy
+# Hashfinder
 
 Cloudflare Worker backend for dataspeedhashfinder.
 

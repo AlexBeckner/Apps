@@ -1,11 +1,11 @@
-name = "dataspeed-parameter-proxy"
+name = "hashfinder"
 main = "src/index.js"
 compatibility_date = "2024-09-23"
 keep_vars = true
 
 [vars]
 # Same-origin Worker-hosted app. Override to "*" in local `.dev.vars` if needed.
-ALLOWED_ORIGIN = "https://dataspeed-parameter-proxy.appliedapps.workers.dev"
+ALLOWED_ORIGIN = "https://hashfinder.appliedapps.workers.dev"
 
 [assets]
 directory = "./public"
