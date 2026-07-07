@@ -45,4 +45,4 @@ jobs:
           # therefore include PR read, not just contents:read.
           GITHUB_TOKEN: ${{ secrets.CORE_STACK_TOKEN }}
           FULL: ${{ github.event.inputs.full }}
-        run: node workers/github-dashboard/scripts/ingest-prs.mjs
+        run: node workers/githubdashboard/scripts/ingest-prs.mjs

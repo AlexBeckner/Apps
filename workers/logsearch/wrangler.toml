@@ -1,4 +1,4 @@
-name = "log-search"
+name = "logsearch"
 main = "src/index.js"
 compatibility_date = "2024-09-23"
 keep_vars = true
@@ -8,7 +8,7 @@ keep_vars = true
 # browser -- no file is ever uploaded to the Worker.
 
 # Secrets (set with `wrangler secret put <NAME>`), not stored here:
-#   ACCESS_PASSWORD  company-auth gate (see ../github-dashboard/src/company-auth.js)
+#   ACCESS_PASSWORD  company-auth gate (see ../githubdashboard/src/company-auth.js)
 #   AUTH_SECRET      >=32 char random string used to sign the session cookie
 
 [assets]

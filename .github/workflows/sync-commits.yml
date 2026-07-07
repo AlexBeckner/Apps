@@ -98,7 +98,7 @@ jobs:
           # (clear error, no unauthenticated network call) instead of the opaque
           # "could not read Username for github.com" that a lazy fetch produces.
           GIT_NO_LAZY_FETCH: "1"
-        run: node workers/github-dashboard/scripts/ingest-commits.mjs
+        run: node workers/githubdashboard/scripts/ingest-commits.mjs
 
       # Snapshot branch heads from the SAME clone that just built the DAG, so the
       # "branches containing this commit" walk and the branch heads it matches
@@ -120,7 +120,7 @@ jobs:
           git -C repo.git for-each-ref --sort=-committerdate refs/heads \
             --format='%(objectname)%09%(committerdate:unix)%09%(refname:short)' > branches.tsv
           echo "Branch tips: $(wc -l < branches.tsv)"
-          node workers/github-dashboard/scripts/ingest-branches.mjs branches.tsv
+          node workers/githubdashboard/scripts/ingest-branches.mjs branches.tsv
 
       - name: Ingest tags into D1
         env:
@@ -128,4 +128,4 @@ jobs:
           CF_ACCOUNT_ID: "501de9c56b6ed3604e3ca0d047ed8084"
           D1_DATABASE_ID: "d2b507b0-d616-41fe-a2cd-9f6e7c72011d"
           REPO_DIR: repo.git
-        run: node workers/github-dashboard/scripts/ingest-tags.mjs
+        run: node workers/githubdashboard/scripts/ingest-tags.mjs

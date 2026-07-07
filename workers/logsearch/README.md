@@ -15,7 +15,7 @@ uploaded either.
 The Worker itself only does two things:
 
 - Gate access with the shared company password (`companyAuthResponse`, reused
-  from `../github-dashboard/src/company-auth.js`).
+  from `../githubdashboard/src/company-auth.js`).
 - Serve the static app in `./public` (`GET /`, `GET /config.js`, and a
   `GET /health` check).
 
@@ -83,7 +83,7 @@ under the results summary rather than aborting the whole scan.
    ```
 
 4. The GitHub Pages launcher (repo-root `index.html` and `logsearch/`) already
-   points at `https://log-search.appliedapps.workers.dev/`. Update those if the
+   points at `https://logsearch.appliedapps.workers.dev/`. Update those if the
    deployed Worker URL differs.
 
 ## Local Development

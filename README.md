@@ -13,8 +13,8 @@ them all with `workers/deployall`.
 
 - [dataspeedhashfinder](https://hashfinder.appliedapps.workers.dev/) — `workers/hashfinder`
 - [deploydashboard](https://deploydashboard.appliedapps.workers.dev/) — `workers/deploydashboard`
-- [githubdashboard](https://github-dashboard.appliedapps.workers.dev/) — `workers/github-dashboard`
-- [logsearch](https://log-search.appliedapps.workers.dev/) — `workers/log-search`
+- [githubdashboard](https://githubdashboard.appliedapps.workers.dev/) — `workers/githubdashboard`
+- [logsearch](https://logsearch.appliedapps.workers.dev/) — `workers/logsearch`
 
 ## Company Access
 

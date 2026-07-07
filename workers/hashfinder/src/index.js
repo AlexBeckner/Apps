@@ -1,4 +1,4 @@
-import { companyAuthResponse } from "../../github-dashboard/src/company-auth.js";
+import { companyAuthResponse } from "../../githubdashboard/src/company-auth.js";
 
 const OWNER = "AppliedNeuron";
 const REPO = "core-stack";

@@ -1,5 +1,5 @@
 {
-  "name": "github-dashboard",
+  "name": "githubdashboard",
   "private": true,
   "type": "module",
   "scripts": {

@@ -60,4 +60,4 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CF_ACCOUNT_ID: "501de9c56b6ed3604e3ca0d047ed8084"
           D1_DATABASE_ID: "d2b507b0-d616-41fe-a2cd-9f6e7c72011d"
-        run: node workers/github-dashboard/scripts/ingest-branches.mjs branches.tsv
+        run: node workers/githubdashboard/scripts/ingest-branches.mjs branches.tsv

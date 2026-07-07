@@ -1,11 +1,11 @@
-name = "github-dashboard"
+name = "githubdashboard"
 main = "src/index.js"
 compatibility_date = "2026-06-29"
 keep_vars = true
 
 [vars]
 # Same-origin Worker-hosted app. Override to "*" in local `.dev.vars` if needed.
-ALLOWED_ORIGIN = "https://github-dashboard.appliedapps.workers.dev"
+ALLOWED_ORIGIN = "https://githubdashboard.appliedapps.workers.dev"
 # Repo whose commits/PRs the dashboard lazily reads at request time (PR bodies,
 # commit messages, live per-branch commit lists). Needs the GITHUB_TOKEN secret
 # with read access to it.

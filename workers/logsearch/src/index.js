@@ -1,4 +1,4 @@
-import { companyAuthResponse } from "../../github-dashboard/src/company-auth.js";
+import { companyAuthResponse } from "../../githubdashboard/src/company-auth.js";
 
 // The app is fully client-side: it reads a log folder in the browser and never
 // uploads anything. This Worker's only job is to enforce the shared company

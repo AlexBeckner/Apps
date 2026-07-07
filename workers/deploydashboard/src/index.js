@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { companyAuthResponse } from "../../github-dashboard/src/company-auth.js";
+import { companyAuthResponse } from "../../githubdashboard/src/company-auth.js";
 
 const BUILDKITE_API_BASE = "https://api.buildkite.com/v2";
 const DEFAULT_ORG_SLUG = "mosaic";

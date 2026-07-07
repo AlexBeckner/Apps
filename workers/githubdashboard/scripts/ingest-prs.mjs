@@ -120,7 +120,7 @@ async function fetchPrPage(page) {
         Authorization: `Bearer ${GITHUB_TOKEN}`,
         Accept: "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "github-dashboard-pr-ingest",
+        "User-Agent": "githubdashboard-pr-ingest",
       },
     });
     if (res.ok) return res.json();

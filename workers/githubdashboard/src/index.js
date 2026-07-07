@@ -568,7 +568,7 @@ async function githubRefCommitCount(env, owner, repo, ref) {
     headers: {
       Accept: "application/vnd.github+json",
       Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      "User-Agent": "github-dashboard-worker",
+      "User-Agent": "githubdashboard-worker",
       "X-GitHub-Api-Version": "2022-11-28",
     },
   });
@@ -1126,7 +1126,7 @@ async function dispatchSync(env, trigger) {
           headers: {
             Accept: "application/vnd.github+json",
             Authorization: `Bearer ${token}`,
-            "User-Agent": "github-dashboard-worker",
+            "User-Agent": "githubdashboard-worker",
             "X-GitHub-Api-Version": "2022-11-28",
             "Content-Type": "application/json",
           },
@@ -1180,7 +1180,7 @@ async function githubJson(env, path, query = {}, budget = null) {
     headers: {
       Accept: "application/vnd.github+json",
       Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      "User-Agent": "github-dashboard-worker",
+      "User-Agent": "githubdashboard-worker",
       "X-GitHub-Api-Version": "2022-11-28",
     },
   });
@@ -1206,7 +1206,7 @@ async function githubGraphQL(env, query, variables = {}, budget = null) {
     headers: {
       Accept: "application/vnd.github+json",
       Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      "User-Agent": "github-dashboard-worker",
+      "User-Agent": "githubdashboard-worker",
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ query, variables }),

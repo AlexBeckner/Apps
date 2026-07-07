@@ -1,4 +1,4 @@
-# github-dashboard Worker
+# githubdashboard Worker
 
 Cloudflare Worker backend for `githubdashboard`.
 
@@ -149,7 +149,7 @@ Shared Actions secrets (in the repo that hosts the workflows, `ACTIONS_REPO`):
 - `.github/workflows/sync-branches.yml` - `git fetch --depth=1 --filter=tree:0
   --prune` of `refs/heads/*` (branch-tip commits only, no trees/blobs), then
   `git for-each-ref` emits `<sha>\t<committerdate-unix>\t<name>`.
-- `workers/github-dashboard/scripts/ingest-branches.mjs` - upserts that snapshot
+- `workers/githubdashboard/scripts/ingest-branches.mjs` - upserts that snapshot
   into `branches` (with `last_commit_at` from the commit date), then mark-and-
   sweeps deletions via `last_seen_at` (any branch not in the snapshot is set
   `deleted_at`). git returns the complete authoritative list every run, so
@@ -163,13 +163,13 @@ Shared Actions secrets (in the repo that hosts the workflows, `ACTIONS_REPO`):
   commits + trees, no file blobs). Blobless (not treeless) is required so
   `git log --all` never lazily fetches a tree mid-walk (that fetch would fail
   because credentials aren't persisted on the cached repo).
-- `workers/github-dashboard/scripts/ingest-commits.mjs` - streams `git log --all`
+- `workers/githubdashboard/scripts/ingest-commits.mjs` - streams `git log --all`
   and upserts every commit into `commits` (**metadata + subject only**, no message
   body, to keep D1 lean). It writes `default_commit_count` and
   `commit_total_count` to `meta` and advances a `commit_git_synced_at` watermark,
   so each run only enumerates commits since the last (`FULL=1` or the workflow's
   **full** input re-ingests everything).
-- `workers/github-dashboard/scripts/ingest-tags.mjs` - runs
+- `workers/githubdashboard/scripts/ingest-tags.mjs` - runs
   `git for-each-ref refs/tags` on the same clone and upserts every tag into `tags`
   (dereferencing annotated tags to their commit), then prunes tags no longer
   present. For annotated tags it also records the **tagger** (name + email) and
@@ -183,7 +183,7 @@ Shared Actions secrets (in the repo that hosts the workflows, `ACTIONS_REPO`):
 - `.github/workflows/sync-prs.yml` - the first run should use the **full** input
   to walk every page; scheduled hourly runs are incremental (bounded by a
   `pr_git_synced_at` watermark + a small overlap window).
-- `workers/github-dashboard/scripts/ingest-prs.mjs` - paginates
+- `workers/githubdashboard/scripts/ingest-prs.mjs` - paginates
   `/repos/{owner}/{repo}/pulls?state=all&sort=updated&direction=desc` and upserts
   metadata into `prs` (`ON CONFLICT(number) DO UPDATE`, since PRs mutate). It
   stores **no body** (lazily fetched on first view, like commits) and advances the
