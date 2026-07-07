@@ -455,6 +455,12 @@
         outline: none;
       }
 
+      /* Isolating each virtualized block keeps style/layout work local to the
+         blocks that are actually rendered. */
+      .v-block {
+        contain: content;
+      }
+
       .v-line {
         display: flex;
         gap: 12px;
@@ -602,6 +608,8 @@
       const STORE_LIMIT = 50000; // max matches kept in memory
       const RENDER_LIMIT = 2000; // max rows painted into the DOM at once
       const BINARY_SNIFF_BYTES = 8000;
+      const VIEWER_BLOCK_LINES = 500; // lines per virtualized viewer block
+      const VIEWER_LINE_EST = 19; // px height estimate for unrendered lines
 
       const el = (id) => document.getElementById(id);
       const dropzone = el("dropzone");
@@ -657,9 +665,10 @@
       let running = false;
       let cancelRequested = false;
       let displayRoot = ""; // shared root folder/archive trimmed from shown paths
-      let viewerMarks = []; // <mark> nodes in the open file viewer
-      let viewerIdx = -1; // index of the currently focused match
+      let viewerData = null; // virtualized model of the file open in the viewer
+      let viewerIdx = -1; // index of the focused match in viewerData.matchLines
       let viewerToken = 0; // guards against races when opening files quickly
+      let viewerObserver = null; // populates/releases viewer blocks on scroll
 
       function setSelection(files) {
         selected = files;
@@ -804,7 +813,7 @@
       viewerPrev.addEventListener("click", () => setViewerMatch(viewerIdx - 1));
       viewerNext.addEventListener("click", () => setViewerMatch(viewerIdx + 1));
       viewerLast.addEventListener("click", () =>
-        setViewerMatch(viewerMarks.length - 1)
+        setViewerMatch(viewerMatchCount() - 1)
       );
       viewerClose.addEventListener("click", closeViewer);
       // Click on the backdrop (not the dialog box) closes the viewer.
@@ -821,12 +830,12 @@
         } else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
           event.preventDefault();
           setViewerMatch(viewerIdx - 1);
-        } else if (event.key === "Home" && viewerMarks.length) {
+        } else if (event.key === "Home" && viewerMatchCount()) {
           event.preventDefault();
           setViewerMatch(0);
-        } else if (event.key === "End" && viewerMarks.length) {
+        } else if (event.key === "End" && viewerMatchCount()) {
           event.preventDefault();
-          setViewerMatch(viewerMarks.length - 1);
+          setViewerMatch(viewerMatchCount() - 1);
         }
       });
 
@@ -1085,15 +1094,19 @@
                 return;
               }
             }
+            // The leftover buffer never contains "\n", so the first search can
+            // skip it. Keeps files with very long lines linear-time.
+            const searchFrom = buffer.length;
             buffer += text;
-            let nl;
-            while ((nl = buffer.indexOf("\n")) !== -1) {
+            let nl = buffer.indexOf("\n", searchFrom);
+            while (nl !== -1) {
               let line = buffer.slice(0, nl);
               buffer = buffer.slice(nl + 1);
               if (line.endsWith("\r")) line = line.slice(0, -1);
               lineNo++;
               ctx.totalLines++;
               testLine(line, lineNo, path, ctx, combined, perTerm);
+              nl = buffer.indexOf("\n");
             }
           },
           finish() {
@@ -1355,42 +1368,30 @@
       }
 
       // Re-read one file (from disk or its archive) and collect every matching
-      // line, mirroring how the streaming scanner counts lines and truncates
-      // very long ones. Capped per file to keep memory bounded.
+      // line, streaming so the whole file is never held in memory. Capped per
+      // file to keep memory bounded; reading stops as soon as the cap is hit.
       async function rescanFileMatches(path) {
         const source = findSource(path);
         if (!source) return null;
 
-        let result;
-        try {
-          result =
-            source.kind === "file"
-              ? await readPlainFile(source.file)
-              : await readArchiveEntry(
-                  source.file,
-                  source.archivePath,
-                  source.innerPath
-                );
-        } catch (error) {
-          result = null;
-        }
-        if (!result || result.text == null) return null;
-
+        const token = fileScanToken;
         const combined = lastRun.matchers.combined;
-        const lines = result.text.split("\n");
         const matches = [];
         let capped = false;
-        for (let i = 0; i < lines.length; i++) {
-          let line = lines[i];
-          if (line.endsWith("\r")) line = line.slice(0, -1);
-          if (!combined.test(line)) continue;
-          if (matches.length >= STORE_LIMIT) {
-            capped = true;
-            break;
-          }
-          const text = line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
-          matches.push({ path, lineNo: i + 1, text });
-        }
+        const ok = await streamSourceLines(source, {
+          shouldStop: () => capped || token !== fileScanToken,
+          onLine(line, lineNo) {
+            if (capped || !combined.test(line)) return;
+            if (matches.length >= STORE_LIMIT) {
+              capped = true;
+              return;
+            }
+            const text =
+              line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
+            matches.push({ path, lineNo, text });
+          },
+        });
+        if (!ok && !capped) return null;
         return { matches, capped };
       }
 
@@ -1701,52 +1702,156 @@
         return null;
       }
 
-      async function readPlainFile(file) {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-        return { text };
+      // Split streamed text into lines with the same semantics as
+      // String.split("\n"): every "\n" ends a line, a trailing newline yields a
+      // final empty line, and a lone "\r" before the newline is stripped.
+      function lineEmitter(onLine) {
+        let buffer = "";
+        let lineNo = 0;
+        return {
+          push(text) {
+            // The leftover buffer never contains "\n", so the search can skip
+            // it. Keeps very long lines (rare, but huge) linear-time.
+            const searchFrom = buffer.length;
+            buffer += text;
+            let nl = buffer.indexOf("\n", searchFrom);
+            while (nl !== -1) {
+              let line = buffer.slice(0, nl);
+              buffer = buffer.slice(nl + 1);
+              if (line.endsWith("\r")) line = line.slice(0, -1);
+              onLine(line, ++lineNo);
+              nl = buffer.indexOf("\n");
+            }
+          },
+          finish() {
+            let line = buffer;
+            buffer = "";
+            if (line.endsWith("\r")) line = line.slice(0, -1);
+            onLine(line, ++lineNo);
+          },
+        };
       }
 
-      // Re-extract a single entry from its archive, capturing only the bytes of
-      // the target file and stopping the extraction once we have them.
-      async function readArchiveEntry(file, archivePath, targetPath) {
-        const chunks = [];
+      // Stream a findSource() result line-by-line without ever buffering the
+      // whole file. Used by the viewer and the heatmap re-read. Returns true
+      // when the source was fully streamed, false if it was cancelled via
+      // shouldStop() or could not be found/read.
+      async function streamSourceLines(source, handlers) {
+        const emitter = lineEmitter(handlers.onLine);
+        const decoder = new TextDecoder("utf-8", { fatal: false });
+        const stopped = () => !!(handlers.shouldStop && handlers.shouldStop());
+
+        if (source.kind === "file") {
+          let reader;
+          try {
+            reader = source.file.stream().getReader();
+          } catch (error) {
+            return false;
+          }
+          let read = 0;
+          try {
+            while (true) {
+              if (stopped()) {
+                try {
+                  await reader.cancel();
+                } catch (e) {}
+                return false;
+              }
+              const { value, done } = await reader.read();
+              if (done) break;
+              read += value.byteLength;
+              const text = decoder.decode(value, { stream: true });
+              if (text) emitter.push(text);
+              if (handlers.onBytes) handlers.onBytes(read, source.file.size);
+            }
+          } catch (error) {
+            return false;
+          } finally {
+            try {
+              reader.releaseLock();
+            } catch (e) {}
+          }
+          const tail = decoder.decode();
+          if (tail) emitter.push(tail);
+          emitter.finish();
+          return true;
+        }
+
+        // Archive entry: extractEntry jumps straight to the entry for ZIP and
+        // walks (with early exit) for TAR/GZ. Bytes arrive already decompressed.
         let found = false;
         let doneTarget = false;
-        let size = 0;
+        let read = 0;
+        let total = 0;
         const sink = {
-          open(name) {
-            if (doneTarget || name !== targetPath) return null;
+          open(name, sizeHint) {
+            if (doneTarget || found || name !== source.innerPath) return null;
             found = true;
+            total = sizeHint || 0;
             return { name };
           },
           chunk(_handle, bytes) {
-            chunks.push(bytes.slice());
-            size += bytes.length;
+            if (stopped()) return false;
+            read += bytes.length;
+            const text = decoder.decode(bytes, { stream: true });
+            if (text) emitter.push(text);
+            if (handlers.onBytes) handlers.onBytes(read, total);
             return true;
           },
           close() {
-            if (found) doneTarget = true;
+            doneTarget = true;
           },
           skip() {},
           error() {},
         };
         try {
-          await LogArchives.extract(file, archivePath, sink, {
-            isCancelled: () => doneTarget,
-          });
+          await LogArchives.extractEntry(
+            source.file,
+            source.archivePath,
+            source.innerPath,
+            sink,
+            { isCancelled: () => doneTarget || stopped() }
+          );
         } catch (error) {
-          return null;
+          return false;
         }
-        if (!found) return null;
-        const buffer = new Uint8Array(size);
-        let offset = 0;
-        for (const part of chunks) {
-          buffer.set(part, offset);
-          offset += part.length;
+        if (!found || stopped()) return false;
+        const tail = decoder.decode();
+        if (tail) emitter.push(tail);
+        emitter.finish();
+        return true;
+      }
+
+      // First index in the sorted array whose value is >= target.
+      function lowerBound(arr, target) {
+        let lo = 0;
+        let hi = arr.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (arr[mid] < target) lo = mid + 1;
+          else hi = mid;
         }
-        const text = new TextDecoder("utf-8", { fatal: false }).decode(buffer);
-        return { text };
+        return lo;
+      }
+
+      // Count the marks highlightText() would produce for this line, mirroring
+      // its overlap handling and its runaway-line guard so the match index and
+      // the rendered marks always agree.
+      function countLineMatches(text, highlightRe) {
+        highlightRe.lastIndex = 0;
+        let count = 0;
+        let last = 0;
+        let match;
+        let guard = 0;
+        while ((match = highlightRe.exec(text)) !== null) {
+          if (match.index >= last) {
+            count++;
+            last = match.index + match[0].length;
+          }
+          if (match.index === highlightRe.lastIndex) highlightRe.lastIndex++;
+          if (++guard > 5000) break;
+        }
+        return count;
       }
 
       function viewerMessage(message) {
@@ -1760,118 +1865,324 @@
         viewerBody.appendChild(line);
       }
 
+      // The viewer is virtualized so huge files open instantly and scroll
+      // smoothly. The file streams in as blocks of VIEWER_BLOCK_LINES lines
+      // (one string + a line-offset table per block, no DOM), and only blocks
+      // near the viewport get rendered; blocks scrolled far away are released
+      // again. Match positions are indexed during the streamed read, so the
+      // counter and First/Prev/Next/Last cover the entire file even though
+      // most of it has no DOM nodes.
+
+      function viewerMatchCount() {
+        return viewerData ? viewerData.matchLines.length : 0;
+      }
+
+      function newViewerData(hitLine, highlight) {
+        return {
+          blocks: [], // { first, count, text, starts, div, populated }
+          pending: [], // lines waiting to be sealed into the next block
+          appendQueue: [], // sealed block divs not yet added to the DOM
+          matchLines: [], // line number of every match, in order
+          lineCount: 0,
+          hitLine,
+          highlight,
+          loaded: false,
+          jumped: false, // the initial jump to the clicked line happened
+          domStarted: false,
+          progressPct: null,
+          lastUi: 0,
+        };
+      }
+
+      function sealViewerBlock(data) {
+        const lines = data.pending;
+        if (!lines.length) return;
+        data.pending = [];
+        const count = lines.length;
+        const starts = new Uint32Array(count);
+        let offset = 0;
+        for (let i = 0; i < count; i++) {
+          starts[i] = offset;
+          offset += lines[i].length + 1;
+        }
+        const div = document.createElement("div");
+        div.className = "v-block";
+        div.style.height = `${count * VIEWER_LINE_EST}px`;
+        div._vbIndex = data.blocks.length;
+        data.blocks.push({
+          first: data.blocks.length * VIEWER_BLOCK_LINES + 1,
+          count,
+          text: lines.join("\n"),
+          starts,
+          div,
+          populated: false,
+        });
+        data.appendQueue.push(div);
+      }
+
+      function flushViewerDom(data) {
+        if (!data.appendQueue.length) return;
+        if (!data.domStarted) {
+          data.domStarted = true;
+          viewerBody.innerHTML = ""; // clear the "Loading..." message
+        }
+        const frag = document.createDocumentFragment();
+        for (const div of data.appendQueue) frag.appendChild(div);
+        viewerBody.appendChild(frag);
+        if (viewerObserver) {
+          for (const div of data.appendQueue) viewerObserver.observe(div);
+        }
+        data.appendQueue = [];
+      }
+
+      function viewerBlockLine(block, i) {
+        return i + 1 < block.count
+          ? block.text.slice(block.starts[i], block.starts[i + 1] - 1)
+          : block.text.slice(block.starts[i]);
+      }
+
+      function populateViewerBlock(block) {
+        if (block.populated || !viewerData) return;
+        const data = viewerData;
+        const parts = [];
+        for (let i = 0; i < block.count; i++) {
+          const ln = block.first + i;
+          const cls = ln === data.hitLine ? "v-line v-hit" : "v-line";
+          parts.push(
+            `<div class="${cls}" data-ln="${ln}">` +
+              `<span class="v-ln">${ln}</span>` +
+              `<span class="v-tx">` +
+              highlightText(viewerBlockLine(block, i), data.highlight) +
+              `</span></div>`
+          );
+        }
+        block.div.innerHTML = parts.join("");
+        block.div.style.height = "auto";
+        block.populated = true;
+
+        // Restore the focused-match style if it lives in this block.
+        if (viewerIdx >= 0) {
+          const ln = data.matchLines[viewerIdx];
+          if (ln >= block.first && ln < block.first + block.count) {
+            const lineDiv = block.div.querySelector(`.v-line[data-ln="${ln}"]`);
+            const marks = lineDiv ? lineDiv.querySelectorAll("mark") : [];
+            const within = viewerIdx - lowerBound(data.matchLines, ln);
+            const mark = marks[Math.min(within, marks.length - 1)];
+            if (mark) mark.classList.add("v-cur");
+          }
+        }
+      }
+
+      function depopulateViewerBlock(block) {
+        if (!block.populated) return;
+        // Freeze the measured height so releasing the DOM doesn't shift the
+        // scroll position; the block re-renders identically when revisited.
+        block.div.style.height = `${block.div.offsetHeight}px`;
+        block.div.innerHTML = "";
+        block.populated = false;
+      }
+
+      function onViewerBlocks(entries) {
+        if (!viewerData) return;
+        for (const entry of entries) {
+          const block = viewerData.blocks[entry.target._vbIndex];
+          if (!block || block.div !== entry.target) continue;
+          if (entry.isIntersecting) populateViewerBlock(block);
+          else depopulateViewerBlock(block);
+        }
+      }
+
+      // Render the block containing this line (plus its neighbours, so a
+      // centered scroll has content around it) and return the line's element.
+      function ensureViewerLine(ln) {
+        if (!viewerData || ln < 1) return null;
+        const idx = Math.floor((ln - 1) / VIEWER_BLOCK_LINES);
+        if (idx >= viewerData.blocks.length) return null;
+        const from = Math.max(0, idx - 1);
+        const to = Math.min(viewerData.blocks.length - 1, idx + 1);
+        for (let b = from; b <= to; b++) {
+          populateViewerBlock(viewerData.blocks[b]);
+        }
+        return viewerData.blocks[idx].div.querySelector(
+          `.v-line[data-ln="${ln}"]`
+        );
+      }
+
+      function scrollViewerTo(element, smooth) {
+        let behavior = "auto";
+        if (smooth) {
+          const rect = element.getBoundingClientRect();
+          const host = viewerBody.getBoundingClientRect();
+          // Smooth-scroll only short hops; long jumps land instantly so lazily
+          // rendered blocks can't shift the target mid-animation.
+          if (
+            Math.abs(rect.top - (host.top + host.height / 2)) <
+            host.height * 3
+          ) {
+            behavior = "smooth";
+          }
+        }
+        element.scrollIntoView({ block: "center", behavior });
+      }
+
+      function setViewerMatch(index, smooth = true) {
+        const total = viewerMatchCount();
+        if (!total) {
+          updateViewerInfo();
+          return;
+        }
+        viewerData.jumped = true; // manual navigation cancels the auto-jump
+        const next = Math.max(0, Math.min(index, total - 1));
+        const prev = viewerBody.querySelector("mark.v-cur");
+        if (prev) prev.classList.remove("v-cur");
+        viewerIdx = next;
+
+        const ln = viewerData.matchLines[next];
+        const lineDiv = ensureViewerLine(ln);
+        if (lineDiv) {
+          const marks = lineDiv.querySelectorAll("mark");
+          const within = next - lowerBound(viewerData.matchLines, ln);
+          const mark = marks[Math.min(within, marks.length - 1)];
+          if (mark) {
+            mark.classList.add("v-cur");
+            scrollViewerTo(mark, smooth);
+          } else {
+            scrollViewerTo(lineDiv, smooth);
+          }
+        }
+        updateViewerInfo();
+      }
+
+      // Jump to the first match at/after the clicked line as soon as that part
+      // of the file has streamed in, without waiting for the full load.
+      function tryViewerAutoJump(data) {
+        if (data.jumped) return;
+        const sealedLines = data.loaded
+          ? data.lineCount
+          : data.blocks.length * VIEWER_BLOCK_LINES;
+        const i = lowerBound(data.matchLines, data.hitLine);
+        if (i < data.matchLines.length && data.matchLines[i] <= sealedLines) {
+          data.jumped = true;
+          setViewerMatch(i, false);
+          return;
+        }
+        if (!data.loaded) return;
+        data.jumped = true;
+        if (data.matchLines.length) {
+          setViewerMatch(0, false);
+        } else {
+          const lineDiv = ensureViewerLine(data.hitLine);
+          if (lineDiv) lineDiv.scrollIntoView({ block: "center" });
+          updateViewerInfo();
+        }
+      }
+
       async function openViewer(path, lineNo) {
         if (!lastRun) return;
         const token = ++viewerToken;
         viewer.hidden = false;
         document.body.style.overflow = "hidden";
         viewerTitle.innerHTML = formatPath(path);
-        viewerMarks = [];
         viewerIdx = -1;
-        updateViewerInfo();
+
+        if (viewerObserver) viewerObserver.disconnect();
+        viewerObserver = new IntersectionObserver(onViewerBlocks, {
+          root: viewerBody,
+          rootMargin: "1500px 0px",
+        });
+
+        const data = newViewerData(lineNo, lastRun.matchers.highlight);
+        viewerData = data;
         viewerMessage("Loading...");
+        updateViewerInfo();
+        viewerBody.focus();
 
         const source = findSource(path);
         if (!source) {
+          viewerData = null;
           viewerMessage(
             "Could not locate this file to open. Re-select the folder or " +
               "archive and search again."
           );
+          updateViewerInfo();
           return;
         }
 
-        let result;
+        let ok = false;
         try {
-          result =
-            source.kind === "file"
-              ? await readPlainFile(source.file)
-              : await readArchiveEntry(
-                  source.file,
-                  source.archivePath,
-                  source.innerPath
-                );
+          ok = await streamSourceLines(source, {
+            shouldStop: () => token !== viewerToken,
+            onBytes(read, totalHint) {
+              data.progressPct = totalHint
+                ? Math.min(100, Math.round((read / totalHint) * 100))
+                : null;
+              const now = performance.now();
+              if (now - data.lastUi > 100) {
+                data.lastUi = now;
+                flushViewerDom(data);
+                tryViewerAutoJump(data);
+                updateViewerInfo();
+              }
+            },
+            onLine(line, ln) {
+              data.lineCount = ln;
+              const hits = countLineMatches(line, data.highlight);
+              for (let i = 0; i < hits; i++) data.matchLines.push(ln);
+              data.pending.push(line);
+              if (data.pending.length === VIEWER_BLOCK_LINES) {
+                sealViewerBlock(data);
+              }
+            },
+          });
         } catch (error) {
-          result = null;
+          ok = false;
         }
 
         // Bail if the viewer was closed or another file opened while loading.
-        if (viewer.hidden || token !== viewerToken) return;
-        if (!result || result.text == null) {
+        if (token !== viewerToken) return;
+        if (!ok && !data.lineCount) {
+          viewerData = null;
           viewerMessage("Could not read this file.");
-          return;
-        }
-
-        renderViewerContent(result.text, lineNo);
-        viewerMarks = Array.from(viewerBody.querySelectorAll("mark"));
-
-        const hit = viewerBody.querySelector(`.v-line[data-ln="${lineNo}"]`);
-        let start = viewerMarks.findIndex((mark) => {
-          const row = mark.closest(".v-line");
-          return row && Number(row.dataset.ln) >= lineNo;
-        });
-        if (start < 0 && viewerMarks.length) start = 0;
-        if (start >= 0) {
-          setViewerMatch(start, false);
-        } else {
-          if (hit) hit.scrollIntoView({ block: "center" });
-          updateViewerInfo();
-        }
-        viewerBody.focus();
-      }
-
-      function renderViewerContent(text, hitLine) {
-        const highlight = lastRun.matchers.highlight;
-        const lines = text.split("\n");
-        const parts = [];
-        for (let i = 0; i < lines.length; i++) {
-          let line = lines[i];
-          if (line.endsWith("\r")) line = line.slice(0, -1);
-          const ln = i + 1;
-          const cls = ln === hitLine ? "v-line v-hit" : "v-line";
-          parts.push(
-            `<div class="${cls}" data-ln="${ln}">` +
-              `<span class="v-ln">${ln}</span>` +
-              `<span class="v-tx">${highlightText(line, highlight)}</span>` +
-              `</div>`
-          );
-        }
-        viewerBody.innerHTML = parts.join("");
-      }
-
-      function setViewerMatch(index, smooth = true) {
-        if (!viewerMarks.length) {
           updateViewerInfo();
           return;
         }
-        const next = Math.max(0, Math.min(index, viewerMarks.length - 1));
-        if (viewerIdx >= 0 && viewerMarks[viewerIdx]) {
-          viewerMarks[viewerIdx].classList.remove("v-cur");
-        }
-        viewerIdx = next;
-        const mark = viewerMarks[viewerIdx];
-        mark.classList.add("v-cur");
-        mark.scrollIntoView({
-          block: "center",
-          behavior: smooth ? "smooth" : "auto",
-        });
+
+        sealViewerBlock(data);
+        data.loaded = true;
+        flushViewerDom(data);
+        tryViewerAutoJump(data);
         updateViewerInfo();
       }
 
       function updateViewerInfo() {
-        const has = viewerMarks.length > 0;
-        viewerMinfo.textContent = has
-          ? `Match ${viewerIdx + 1} / ${viewerMarks.length.toLocaleString()}`
-          : "No matches";
+        const total = viewerMatchCount();
+        if (viewerData && !viewerData.loaded) {
+          const pct = viewerData.progressPct;
+          viewerMinfo.textContent =
+            (viewerIdx >= 0 ? `Match ${viewerIdx + 1} / ` : "") +
+            `${total.toLocaleString()} match${total === 1 ? "" : "es"}` +
+            ` -- loading${pct != null ? ` ${pct}%` : ""}...`;
+        } else {
+          viewerMinfo.textContent = total
+            ? `Match ${viewerIdx + 1} / ${total.toLocaleString()}`
+            : "No matches";
+        }
+        const has = total > 0;
         viewerFirst.disabled = !has || viewerIdx <= 0;
         viewerPrev.disabled = !has || viewerIdx <= 0;
-        viewerNext.disabled = !has || viewerIdx >= viewerMarks.length - 1;
-        viewerLast.disabled = !has || viewerIdx >= viewerMarks.length - 1;
+        viewerNext.disabled = !has || viewerIdx >= total - 1;
+        viewerLast.disabled = !has || viewerIdx >= total - 1;
       }
 
       function closeViewer() {
+        viewerToken++; // stops any in-flight streamed load
         viewer.hidden = true;
+        viewerData = null;
+        if (viewerObserver) {
+          viewerObserver.disconnect();
+          viewerObserver = null;
+        }
         viewerBody.innerHTML = "";
-        viewerMarks = [];
         viewerIdx = -1;
         document.body.style.overflow = "";
       }

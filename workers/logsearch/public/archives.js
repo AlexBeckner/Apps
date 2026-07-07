@@ -528,11 +528,47 @@
     }
   }
 
+  // Extract a single named entry. ZIP supports random access, so we jump
+  // straight to the one entry instead of probing every local header the way a
+  // full extract() walk would. TAR variants have no index and stay
+  // sequential; the caller's sink/isCancelled stops the walk once the entry
+  // has been consumed.
+  async function extractEntry(file, path, innerPath, sink, opts) {
+    const options = opts || {};
+    if (archiveKind(path) !== "zip") return extract(file, path, sink, options);
+
+    let entries;
+    try {
+      entries = await readZipEntries(file);
+    } catch (e) {
+      sink.error(path, e);
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isDir || joinPath(path, entry.name) !== innerPath) continue;
+      let opened;
+      try {
+        opened = await openZipEntry(file, entry);
+      } catch (e) {
+        sink.skip(innerPath, e.message || "unreadable");
+        return;
+      }
+      if (opened.unsupported) {
+        sink.skip(innerPath, opened.unsupported);
+        return;
+      }
+      await pumpStream(opened.stream, innerPath, entry.uncompSize, sink, options);
+      return;
+    }
+    // Entry not found: the sink's open() is simply never called.
+  }
+
   root.LogArchives = {
     archiveKind,
     support,
     canExpand,
     extract,
+    extractEntry,
     // exposed for tests:
     readZipEntries,
     openZipEntry,
