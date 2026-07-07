@@ -17,8 +17,8 @@ name: Sync commits + tags to dashboard D1
 # contents (blobs, which we never read) are omitted.
 
 on:
-  schedule:
-    - cron: "25 * * * *" # hourly at :25 — aligned with sync-branches and sync-prs so all three run together
+  # Manual-only (no cron) so a private repo doesn't burn Actions minutes hourly.
+  # Runs on demand via the dashboard's "Sync now" button or the Actions UI.
   workflow_dispatch:
     inputs:
       full:

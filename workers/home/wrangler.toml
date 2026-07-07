@@ -1,0 +1,9 @@
+name = "home"
+compatibility_date = "2026-06-29"
+
+# Static-assets-only Worker: no server script, just the launcher page. Deploys to
+# home.appliedapps.workers.dev and serves ./public/index.html at "/" (favicon.png
+# is served alongside it). Replaces the old GitHub Pages site so the repo can go
+# private without taking the launcher offline.
+[assets]
+directory = "./public"

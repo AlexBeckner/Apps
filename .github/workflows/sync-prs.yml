@@ -8,8 +8,8 @@ name: Sync pull requests to dashboard D1
 # fetches them on first view) to keep D1 under its 500 MB free-plan cap.
 
 on:
-  schedule:
-    - cron: "25 * * * *" # hourly at :25 — aligned with sync-branches and sync-commits so all three run together
+  # Manual-only (no cron) so a private repo doesn't burn Actions minutes hourly.
+  # Runs on demand via the dashboard's "Sync now" button or the Actions UI.
   workflow_dispatch:
     inputs:
       full:

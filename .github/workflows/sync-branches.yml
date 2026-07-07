@@ -5,14 +5,11 @@ name: Sync branches to dashboard D1
 # with its commit date, which is far cheaper and more complete for a repo with
 # tens of thousands of branches. The snapshot is pushed into the dashboard's D1.
 
-# Cadence vs. cost: each run does a fresh shallow fetch of every branch tip, so
-# on a private repo it consumes Actions minutes. */30 is a reasonable default
-# (every branch is fully refreshed each run, unlike the Worker's partial sweep).
-# Lower to */15 for fresher data, or add actions/cache on repo.git for cheaper
-# incremental fetches.
+# Manual-only: no cron schedule so a private repo doesn't burn Actions minutes
+# on an hourly cadence. Runs on demand -- via the dashboard's "Sync now" button
+# (which dispatches this workflow) or the Actions UI. Each run does a fresh
+# shallow fetch of every branch tip and typically finishes in under a minute.
 on:
-  schedule:
-    - cron: "25 * * * *" # hourly at :25 — aligned with sync-commits and sync-prs so all three run together
   workflow_dispatch: {}
 
 concurrency:

@@ -11,10 +11,10 @@ ALLOWED_ORIGIN = "https://github-dashboard.appliedapps.workers.dev"
 # with read access to it.
 GITHUB_REPO = "AppliedNeuron/core-stack"
 # All syncing is owned by git-based GitHub Actions in this repo (sync-branches;
-# sync-commits [+ tags]; sync-prs), each running hourly. The Worker no longer
-# syncs anything itself (no cron). "Sync now" dispatches all three workflows via
-# the GitHub API using the ACTIONS_DISPATCH_TOKEN secret -- a PAT with
-# actions:read + write on ACTIONS_REPO. ACTIONS_REF defaults to "main".
+# sync-commits [+ tags]; sync-prs), each run on demand (manual dispatch, no
+# cron). The Worker no longer syncs anything itself. "Sync now" dispatches all
+# three workflows via the GitHub API using the ACTIONS_DISPATCH_TOKEN secret --
+# a PAT with actions:read + write on ACTIONS_REPO. ACTIONS_REF defaults to "main".
 ACTIONS_REPO = "AlexBeckner/Apps"
 
 # Secrets (set with `wrangler secret put <NAME>`), not stored here:

@@ -4,15 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>deploydashboard</title>
-    <!-- Dynamic favicon. ``href`` is replaced at runtime by ``renderFavicon``
-         once the first snapshot loads; the inline transparent placeholder
-         avoids a 404 + flicker on the very first paint. -->
-    <link
-      id="favicon"
-      rel="icon"
-      type="image/png"
-      href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgAAIAAAUAAarVyFEAAAAASUVORK5CYII="
-    />
+    <link rel="icon" type="image/png" href="/favicon.png" />
     <script src="./config.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -1575,84 +1567,6 @@
         }
       }
 
-      // Favicon: passed #004b00, failed #ff674d, running #cb7409, else black.
-      const FAVICON_COLORS = {
-        passed: "#004b00",
-        running: "#cb7409",
-        failed: "#ff674d",
-        neutral: "#000000",
-      };
-
-      // Buildkite states that mean "actively executing right now". A rig in
-      // any of these wins favicon priority: we want the tab dot to scream
-      // "deploy in flight" even if some other rig finished more recently.
-      const FAVICON_RUNNING_STATES = new Set([
-        "creating",
-        "scheduled",
-        "running",
-        "canceling",
-      ]);
-
-      // States we treat as "the last deploy failed". ``infra_failure`` is
-      // surfaced by Buildkite separately from ``failed`` so include both.
-      // ``canceled`` counts as a failure for the favicon — a canceled deploy
-      // didn't reach the rig, which is closer to "broken" than to "good".
-      const FAVICON_FAILED_STATES = new Set([
-        "failed",
-        "failing",
-        "canceled",
-        "infra_failure",
-      ]);
-
-      function deriveFaviconState(snapshot) {
-        const rigs = snapshot && snapshot.rigs;
-        if (!rigs || rigs.length === 0) return "neutral";
-
-        // 1. Anything actively running anywhere -> running state.
-        for (const rig of rigs) {
-          const latest = rig.history && rig.history[0];
-          if (latest && FAVICON_RUNNING_STATES.has(latest.state)) {
-            return "running";
-          }
-        }
-
-        // 2. Otherwise, classify the most recent deploy across all rigs.
-        // Backend already sorts ``rigs`` by ``last_deploy_at`` desc and each
-        // rig's ``history[0]`` is its most recent deploy, so ``rigs[0]
-        // .history[0]`` is the freshest event we know about.
-        const latestOverall = rigs[0].history && rigs[0].history[0];
-        if (!latestOverall) return "neutral";
-        if (FAVICON_FAILED_STATES.has(latestOverall.state)) return "failed";
-        // ``passed``, ``awaiting_deploy``, ``blocked``, ``skipped``, etc.
-        // all read as "not actively broken" until we see an unambiguous
-        // failure below.
-        return "passed";
-      }
-
-      function renderFavicon(faviconState) {
-        const color = FAVICON_COLORS[faviconState] || FAVICON_COLORS.neutral;
-        const link = $("favicon");
-        if (!link) return;
-        // Skip the redraw if the color hasn't changed; saves a canvas
-        // round-trip on every poll when nothing has moved.
-        if (link.dataset.faviconColor === color) return;
-
-        const size = 32;
-        const canvas = document.createElement("canvas");
-        canvas.width = size;
-        canvas.height = size;
-        const ctx = canvas.getContext("2d");
-        // 1px breathing room from the edge so the circle reads as a dot
-        // rather than filling the entire 16x16 tab tile.
-        const radius = size / 2 - 1;
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.arc(size / 2, size / 2, radius, 0, Math.PI * 2);
-        ctx.fill();
-        link.href = canvas.toDataURL("image/png");
-        link.dataset.faviconColor = color;
-      }
-
       function isRateLimited() {
         return (
           state.rateLimitedUntil != null
@@ -1743,7 +1657,6 @@
           applyRateLimit(snapshot);
           renderErrors(snapshot);
           renderTable();
-          renderFavicon(deriveFaviconState(snapshot));
           // The snapshot poll re-renders the main table + rig-history rows,
           // but the expanded build-attempts (steps) panel and the standalone
           // history panel each read from their own cache that only loads on
