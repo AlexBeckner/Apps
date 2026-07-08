@@ -562,7 +562,6 @@
 
       <div class="controls">
         <div>
-          <label for="terms">Search terms (comma-separated)</label>
           <input
             id="terms"
             type="text"
@@ -570,6 +569,7 @@
             placeholder="ERROR, FATAL, Exception"
             autocomplete="off"
             spellcheck="false"
+            aria-label="Search terms"
           >
         </div>
         <div class="toggles">
@@ -727,15 +727,9 @@
         }
         const totalBytes = files.reduce((sum, f) => sum + f.file.size, 0);
         const root = files[0].path.split("/")[0] || "(folder)";
-        const archiveCount = files.filter(
-          (f) => window.LogArchives && LogArchives.archiveKind(f.path)
-        ).length;
         setDropInfo(
           `${files.length.toLocaleString()} file${files.length === 1 ? "" : "s"} ` +
-            `(${formatBytes(totalBytes)}) from "${root}"` +
-            (archiveCount
-              ? ` -- ${archiveCount} archive${archiveCount === 1 ? "" : "s"} will be expanded`
-              : "")
+            `(${formatBytes(totalBytes)}) from "${root}"`
         );
         searchBtn.disabled = false;
       }
@@ -1369,15 +1363,6 @@
             `Showing the top ${shown.length} files by hit count.`;
           heatmapEl.appendChild(note);
         }
-        if (ctx.totalMatches > ctx.stored) {
-          const capNote = document.createElement("p");
-          capNote.className = "heat-note";
-          capNote.textContent =
-            `Over ${ctx.stored.toLocaleString()} matches found, so the results ` +
-            `list below starts with the first ${ctx.stored.toLocaleString()}. ` +
-            `Click any file to load all of its matching lines.`;
-          heatmapEl.appendChild(capNote);
-        }
         heatmapEl.style.display = "block";
       }
 
@@ -1567,13 +1552,10 @@
         const { usingFileSet, matches: source } = currentSource();
         const passes = currentPredicate(usingFileSet);
 
-        // Single pass: collect up to the render cap, but count every match so
-        // the note can report the true total (which may exceed the cap).
+        // Single pass: collect up to the render cap.
         const rows = [];
-        let totalMatching = 0;
         for (const m of source) {
           if (!passes(m)) continue;
-          totalMatching++;
           if (rows.length < RENDER_LIMIT) rows.push(m);
         }
 
@@ -1619,10 +1601,6 @@
             `Filtered to file "${stripRoot(activeFile)}" (click it again to clear).`
           );
         }
-        parts.push(
-          `Showing ${rows.length.toLocaleString()} of ` +
-            `${totalMatching.toLocaleString()} matching line${totalMatching === 1 ? "" : "s"}.`
-        );
 
         if (usingFileSet) {
           // This file's lines were re-read from disk in full.
@@ -1631,8 +1609,6 @@
               `Only the first ${STORE_LIMIT.toLocaleString()} matches in this file ` +
                 `were loaded; filter or download the CSV to narrow them.`
             );
-          } else if (totalMatching > rows.length) {
-            parts.push("Refine the filter or download the CSV to see them all.");
           }
         } else if (activeFile && capped) {
           // A file is selected but we fell back to the in-memory store (re-read
@@ -1641,15 +1617,6 @@
             "Showing only the matches kept in memory for this file; a re-read " +
               "was unavailable, so some may be missing."
           );
-        } else if (!activeFile && capped) {
-          // Term / free-text filters run over the first STORE_LIMIT matches only.
-          parts.push(
-            `Searched the first ${lastRun.stored.toLocaleString()} of ` +
-              `${lastRun.totalMatches.toLocaleString()} total matches -- click a ` +
-              `file above to load all of its lines, or narrow your terms.`
-          );
-        } else if (totalMatching > rows.length) {
-          parts.push("Refine the filter or download the CSV to see them all.");
         }
         resultsNote.textContent = parts.join(" ");
       }
@@ -1685,16 +1652,26 @@
         );
       }
 
-      // The single top-level folder or archive shared by every matched file is
-      // noise on each row, so we hide it and show only the nested path.
+      // The directory prefix shared by every matched file is noise on each row,
+      // so we hide it and show only the part below it. Stripping the whole common
+      // prefix (never a file's own basename) lets a plain folder and an archive of
+      // that same folder read identically: the archive's filename and the single
+      // root folder inside it both fall away, just like a selected folder's name.
       function commonRoot(paths) {
         if (!paths.length) return "";
-        const first = paths[0].split("/")[0];
-        if (!first) return "";
+        const prefix = paths[0].split("/");
+        // Never strip a file's own basename, so cap the prefix one segment short
+        // of the shallowest path.
+        let common = prefix.length - 1;
         for (const p of paths) {
-          if (p.split("/")[0] !== first) return "";
+          const segs = p.split("/");
+          common = Math.min(common, segs.length - 1);
+          let i = 0;
+          while (i < common && segs[i] === prefix[i]) i++;
+          common = i;
+          if (common <= 0) return "";
         }
-        return paths.some((p) => p.startsWith(first + "/")) ? first : "";
+        return prefix.slice(0, common).join("/");
       }
 
       function stripRoot(path) {
