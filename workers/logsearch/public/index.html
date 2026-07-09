@@ -21,8 +21,8 @@
       }
 
       main {
-        max-width: 1100px;
-        margin: 0 auto;
+        max-width: none;
+        margin: 0;
       }
 
       h1 {
@@ -292,25 +292,49 @@
         background: #111;
       }
 
-      col.c-file {
-        width: 34%;
+      thead th:first-child {
+        padding-left: 20px;
       }
 
       col.c-line {
-        width: 66px;
+        width: 84px;
       }
 
-      td.file {
+      td.file-head {
+        background: #151515;
+        border-top: 1px solid #2f2f2f;
+        color: #cfe0ff;
+        padding-top: 7px;
+        padding-bottom: 7px;
+      }
+
+      td.file-head .fh-inner {
+        align-items: baseline;
+        display: flex;
+        gap: 12px;
+        justify-content: space-between;
+      }
+
+      td.file-head .fh-path {
+        min-width: 0;
         overflow-wrap: anywhere;
       }
 
-      td.file .base {
+      td.file-head .base {
         font-weight: 700;
+      }
+
+      td.file-head .fcount {
+        color: #8a8a8a;
+        flex-shrink: 0;
+        font-weight: 400;
+        white-space: nowrap;
       }
 
       td.line {
         color: #888;
         font-variant-numeric: tabular-nums;
+        padding-left: 20px;
       }
 
       td.text {
@@ -357,7 +381,7 @@
         cursor: pointer;
         display: grid;
         gap: 10px;
-        grid-template-columns: minmax(0, 1fr) 130px auto;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
         padding: 3px 6px;
       }
 
@@ -373,6 +397,7 @@
       .heat-row .hp {
         direction: rtl;
         overflow: hidden;
+        text-align: left;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
@@ -422,12 +447,40 @@
         margin-top: 8px;
       }
 
+      .search-all-btn {
+        margin-left: 8px;
+        padding: 2px 10px;
+        vertical-align: baseline;
+      }
+
+      .pager {
+        align-items: center;
+        display: flex;
+        gap: 12px;
+        justify-content: center;
+        margin-top: 12px;
+      }
+
+      .pager .page-info {
+        color: #aaa;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+
       tbody tr.res-row {
         cursor: pointer;
       }
 
       tbody tr.res-row:hover td {
         background: #161616;
+      }
+
+      tbody tr.file-row {
+        cursor: pointer;
+      }
+
+      tbody tr.file-row:hover td.file-head {
+        background: #1b2634;
       }
 
       .viewer {
@@ -451,7 +504,7 @@
         flex-direction: column;
         margin: auto;
         max-height: 100%;
-        max-width: 1100px;
+        max-width: none;
         overflow: hidden;
         width: 100%;
       }
@@ -493,26 +546,43 @@
           "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
         font-size: 12.5px;
         line-height: 1.5;
+        flex: 1;
+        min-height: 0;
         overflow: auto;
-        padding: 6px 0;
+        padding: 0;
+        position: relative;
       }
 
       .viewer-body:focus {
         outline: none;
       }
 
-      /* Isolating each virtualized block keeps style/layout work local to the
-         blocks that are actually rendered. */
-      .v-block {
-        contain: content;
+      /* A 1px-wide spacer sizes the (possibly scaled) scrollbar; the window
+         holds only the rows near the viewport and is repositioned per frame. */
+      .v-spacer {
+        width: 1px;
       }
 
+      .v-window {
+        left: 0;
+        min-width: 100%;
+        position: absolute;
+        top: 0;
+        width: max-content;
+      }
+
+      /* Fixed-height, non-wrapping rows: line N is always at (N-1) * rowH, so
+         positioning any line is exact regardless of file size. Long lines scroll
+         horizontally with the body rather than wrapping. */
       .v-line {
         display: flex;
         gap: 12px;
-        overflow-wrap: anywhere;
+        height: var(--vrh, 18.75px);
+        line-height: var(--vrh, 18.75px);
+        min-width: 100%;
+        overflow: hidden;
         padding: 0 12px;
-        white-space: pre-wrap;
+        white-space: pre;
       }
 
       .v-line:hover {
@@ -525,7 +595,7 @@
 
       .v-ln {
         color: #666;
-        flex-shrink: 0;
+        flex: 0 0 60px;
         font-variant-numeric: tabular-nums;
         text-align: right;
         user-select: none;
@@ -533,8 +603,8 @@
       }
 
       .v-tx {
-        flex: 1;
-        min-width: 0;
+        flex: 0 0 auto;
+        white-space: pre;
       }
 
       mark.v-cur {
@@ -615,17 +685,20 @@
 
       <p class="note" id="results-note"></p>
 
+      <div class="pager" id="pager-top" style="display: none;"></div>
+
       <table id="results-table" style="display: none;">
         <colgroup>
-          <col class="c-file">
           <col class="c-line">
           <col>
         </colgroup>
         <thead>
-          <tr><th>File</th><th>Line</th><th>Match</th></tr>
+          <tr><th>Line</th><th>Match</th></tr>
         </thead>
         <tbody id="results-body"></tbody>
       </table>
+
+      <div class="pager" id="pager-bottom" style="display: none;"></div>
     </main>
 
     <div class="viewer" id="viewer" hidden>
@@ -647,11 +720,25 @@
 
     <script src="archives.js"></script>
     <script>
-      const STORE_LIMIT = 50000; // max matches kept in memory
-      const RENDER_LIMIT = 2000; // max rows painted into the DOM at once
+      // Retain matches until their text is estimated to use this much memory,
+      // rather than a fixed count -- so a run with a few hundred thousand short
+      // matches stays fully in memory (instant filtering) while a pathological
+      // run with millions of matches still can't exhaust the tab. Each match
+      // costs roughly its text length plus a small per-object overhead.
+      const STORE_BUDGET = 400 * 1024 * 1024; // ~400 MB of retained match text
+      const STORE_MATCH_OVERHEAD = 64; // approx per-match object cost, in bytes
+      const matchCost = (text) => text.length + STORE_MATCH_OVERHEAD;
+      const PAGE_SIZE = 1000; // matches shown per results page
       const BINARY_SNIFF_BYTES = 8000;
       const VIEWER_BLOCK_LINES = 500; // lines per virtualized viewer block
-      const VIEWER_LINE_EST = 19; // px height estimate for unrendered lines
+      // Browsers cap how tall an element can be (about 2^24 device pixels). On a
+      // HiDPI display that is only ~8.4M CSS px -- far short of what a file with
+      // hundreds of thousands of lines needs. Keep the scroll content under this
+      // cap and map the scroll position across the full line range so every line
+      // (and every match) stays reachable, no matter how large the file is.
+      const VIEWER_MAX_CONTENT_PX = Math.floor(
+        16000000 / (window.devicePixelRatio || 1)
+      );
 
       const el = (id) => document.getElementById(id);
       const dropzone = el("dropzone");
@@ -677,6 +764,8 @@
       const scanNote = el("scan-note");
       const resultsTable = el("results-table");
       const resultsBody = el("results-body");
+      const pagerTop = el("pager-top");
+      const pagerBottom = el("pager-bottom");
       const viewer = el("viewer");
       const viewerTitle = el("viewer-title");
       const viewerMinfo = el("viewer-minfo");
@@ -694,6 +783,14 @@
         window.LogArchives && window.LogArchives.support().any
       );
 
+      // Chromium's File System Access API can open the folder picker directly
+      // in a well-known location (Downloads, below). Safari and Firefox don't
+      // implement it, so this is a progressive enhancement over the plain
+      // <input webkitdirectory> picker, whose start directory the browser
+      // controls and a page cannot set.
+      const directoryPickerSupported =
+        typeof window.showDirectoryPicker === "function";
+
       // Selected files as { file, path }. Kept in memory so re-searching with
       // new terms just re-reads them (no need to hold every line in memory).
       let selected = [];
@@ -702,14 +799,20 @@
       let activeFile = null; // heatmap file filter, or null for all
       let activeFileMatches = null; // all matches for activeFile, re-read on demand
       let activeFileCapped = false; // that re-read hit the per-file cap
+      let currentPage = 0; // zero-based page shown in the results list
       let fileScanToken = 0; // guards against races when switching files fast
+      let globalScan = null; // cached disk re-scan of matches for the active filter
+      let globalScanToken = 0; // cancels a superseded global re-scan
+      let globalScanLoading = false; // a global re-scan is currently in flight
       let running = false;
       let cancelRequested = false;
       let displayRoot = ""; // shared root folder/archive trimmed from shown paths
       let viewerData = null; // virtualized model of the file open in the viewer
       let viewerIdx = -1; // index of the focused match in viewerData.matchLines
       let viewerToken = 0; // guards against races when opening files quickly
-      let viewerObserver = null; // populates/releases viewer blocks on scroll
+      let viewerSpacer = null; // sizes the scrollbar to the (scaled) file height
+      let viewerWindow = null; // holds only the rows near the viewport
+      let viewerRaf = 0; // rAF handle coalescing scroll-driven re-renders
 
       // The drop box shows a single status line; empty text collapses it and
       // brings back the plus sign.
@@ -741,8 +844,67 @@
         }));
       }
 
+      // Recursively walk a FileSystemDirectoryHandle into the same
+      // { file, path } shape the rest of the app uses. Paths are prefixed with
+      // the chosen folder's own name so they read like webkitRelativePath.
+      async function filesFromDirectoryHandle(dirHandle) {
+        const out = [];
+        const walk = async (handle, prefix) => {
+          for await (const entry of handle.values()) {
+            const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+            if (entry.kind === "file") {
+              out.push({ file: await entry.getFile(), path });
+            } else if (entry.kind === "directory") {
+              await walk(entry, path);
+            }
+          }
+        };
+        await walk(dirHandle, dirHandle.name);
+        return out;
+      }
+
+      // Open the folder picker. In Chromium this uses the File System Access
+      // API so the dialog opens in Downloads; elsewhere it falls back to the
+      // native <input webkitdirectory> picker (browser-chosen location).
+      async function pickFolder() {
+        if (!directoryPickerSupported) {
+          folderInput.click();
+          return;
+        }
+        let dirHandle;
+        try {
+          // No `id` is passed, so the picker opens in Downloads on every use
+          // instead of reopening wherever the user last browsed.
+          dirHandle = await window.showDirectoryPicker({ startIn: "downloads" });
+        } catch (error) {
+          // AbortError just means the picker was dismissed; on anything else
+          // fall back to the native picker so folder selection still works.
+          if (error && error.name === "AbortError") return;
+          folderInput.click();
+          return;
+        }
+        setDropInfo("Reading folder...");
+        try {
+          setSelection(await filesFromDirectoryHandle(dirHandle));
+        } catch (error) {
+          setDropInfo("");
+          showConfigError(
+            "Could not read the selected folder: " + error.message
+          );
+        }
+      }
+
       folderInput.addEventListener("change", () => {
         setSelection(filesFromInput(folderInput.files));
+      });
+
+      // The dropzone is a <label> wrapping the file input, so a click normally
+      // opens the native picker. When the File System Access API is available,
+      // intercept that click and open the Downloads-rooted picker instead.
+      dropzone.addEventListener("click", (event) => {
+        if (!directoryPickerSupported) return;
+        event.preventDefault();
+        pickFolder();
       });
 
       // Drag & drop works anywhere on the page, not just over the dropzone. A
@@ -824,7 +986,7 @@
       dropzone.addEventListener("keydown", (event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
-          folderInput.click();
+          pickFolder();
         }
       });
 
@@ -872,8 +1034,22 @@
       termsInput.addEventListener("keydown", (event) => {
         if (event.key === "Enter" && !searchBtn.disabled && !running) runSearch();
       });
-      filterInput.addEventListener("input", debounce(renderResults, 150));
+      filterInput.addEventListener(
+        "input",
+        debounce(() => {
+          currentPage = 0;
+          invalidateGlobalScan();
+          renderResults();
+        }, 150)
+      );
       downloadBtn.addEventListener("click", downloadCsv);
+      // The truncation note can carry a "Search all files" button that recovers
+      // matches dropped past the in-memory store cap.
+      resultsNote.addEventListener("click", (event) => {
+        if (event.target.closest("#search-all")) runGlobalRescan();
+      });
+      pagerTop.addEventListener("click", onPagerClick);
+      pagerBottom.addEventListener("click", onPagerClick);
 
       // Clicking a results row opens that file in the viewer, jumped to the
       // clicked line. Ignore the click if the user is selecting text.
@@ -913,6 +1089,11 @@
           event.preventDefault();
           setViewerMatch(viewerMatchCount() - 1);
         }
+      });
+
+      viewerBody.addEventListener("scroll", onViewerScroll);
+      window.addEventListener("resize", () => {
+        if (viewerData) scheduleViewerRender();
       });
 
       function parseTerms() {
@@ -978,11 +1159,15 @@
         activeFile = null;
         activeFileMatches = null;
         activeFileCapped = false;
+        currentPage = 0;
         fileScanToken++;
+        globalScan = null;
+        invalidateGlobalScan();
 
         const ctx = {
           matches: [],
           stored: 0,
+          storedBytes: 0, // estimated memory used by retained match text
           totalMatches: 0,
           totalLines: 0,
           filesScanned: 0,
@@ -993,6 +1178,7 @@
           archivesExpanded: 0,
           termCounts: Object.fromEntries(terms.map((t) => [t, 0])),
           fileCounts: Object.create(null),
+          fileTerms: Object.create(null), // path -> Set of terms that matched in it
           fileCount: 0,
           matchers,
           startedAt: performance.now(),
@@ -1234,19 +1420,27 @@
       function testLine(line, lineNo, path, ctx, combined, perTerm) {
         if (!combined.test(line)) return;
         // Counts are the *true* totals across the whole scan so the heatmap,
-        // term chips, and summary show the real picture. The results list can
-        // only hold STORE_LIMIT lines in memory, but a click on any file re-reads
-        // just that file to recover every one of its matches on demand.
+        // term chips, and summary show the real picture. The results list keeps
+        // match text only up to STORE_BUDGET of memory; if that fills, a filter
+        // (or a heatmap file click) re-reads from disk to recover the rest.
         ctx.totalMatches++;
         ctx.fileCounts[path] = (ctx.fileCounts[path] || 0) + 1;
         for (const t of perTerm) {
-          if (t.re.test(line)) ctx.termCounts[t.term]++;
+          if (t.re.test(line)) {
+            ctx.termCounts[t.term]++;
+            // Remember which terms a file contains so a term-scoped re-scan can
+            // skip files that can't possibly hold that term's matches.
+            (ctx.fileTerms[path] || (ctx.fileTerms[path] = new Set())).add(
+              t.term
+            );
+          }
         }
-        if (ctx.stored < STORE_LIMIT) {
+        if (ctx.storedBytes < STORE_BUDGET) {
           // Guard against pathologically long lines blowing up memory/DOM.
           const text = line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
           ctx.matches.push({ path, lineNo, text });
           ctx.stored++;
+          ctx.storedBytes += matchCost(text);
         }
       }
 
@@ -1378,15 +1572,17 @@
         }
       }
 
-      // Clicking a heatmap file filters the results to it. If the scan dropped
-      // matches past STORE_LIMIT, this file's rows may be missing from the
-      // in-memory store, so re-read just this one file to recover all of them.
+      // Clicking a heatmap file filters the results to it. If the scan filled
+      // the memory budget, this file's rows may be missing from the in-memory
+      // store, so re-read just this one file to recover all of them.
       async function selectHeatFile(path) {
         const turningOff = activeFile === path;
         activeFile = turningOff ? null : path;
         activeFileMatches = null;
         activeFileCapped = false;
+        currentPage = 0;
         fileScanToken++;
+        invalidateGlobalScan();
         syncHeatRows();
 
         if (!activeFile) {
@@ -1436,17 +1632,19 @@
         const token = fileScanToken;
         const combined = lastRun.matchers.combined;
         const matches = [];
+        let bytes = 0;
         let capped = false;
         const ok = await streamSourceLines(source, {
           shouldStop: () => capped || token !== fileScanToken,
           onLine(line, lineNo) {
             if (capped || !combined.test(line)) return;
-            if (matches.length >= STORE_LIMIT) {
+            if (bytes >= STORE_BUDGET) {
               capped = true;
               return;
             }
             const text =
               line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
+            bytes += matchCost(text);
             matches.push({ path, lineNo, text });
           },
         });
@@ -1480,6 +1678,8 @@
         all.textContent = `All (${ctx.totalMatches.toLocaleString()})`;
         all.addEventListener("click", () => {
           activeTerm = null;
+          currentPage = 0;
+          invalidateGlobalScan();
           syncTermChips();
           renderResults();
         });
@@ -1492,6 +1692,8 @@
           chip.textContent = `${term} (${ctx.termCounts[term].toLocaleString()})`;
           chip.addEventListener("click", () => {
             activeTerm = activeTerm === term ? null : term;
+            currentPage = 0;
+            invalidateGlobalScan();
             syncTermChips();
             renderResults();
           });
@@ -1517,14 +1719,125 @@
         }
       }
 
+      // True when the scan found more matches than the in-memory store could
+      // hold, so the results list is only a prefix of every match.
+      function storeCapped() {
+        return !!lastRun && lastRun.totalMatches > lastRun.stored;
+      }
+
+      // Identifies a global re-scan by the filter it was run for, so a cached
+      // result is reused only while the term/text filter is unchanged.
+      function globalScanKey() {
+        return (activeTerm || "") + "\u0000" + filterInput.value.trim();
+      }
+
+      // A term chip or free-text filter can only see the matches kept in the
+      // capped store. When the scan overflowed it, the active filter needs a
+      // fresh disk re-scan to be complete. (A selected heatmap file already gets
+      // its own full re-read, so it never needs this.)
+      function needsGlobalRescan() {
+        return (
+          !activeFile &&
+          storeCapped() &&
+          !!(activeTerm || filterInput.value.trim())
+        );
+      }
+
+      function invalidateGlobalScan() {
+        globalScanToken++;
+        globalScanLoading = false;
+      }
+
+      function searchAllButtonHtml() {
+        const q = activeTerm || filterInput.value.trim();
+        const label = q
+          ? `Search all files for "${escapeHtml(q)}"`
+          : "Search all files";
+        return `<button type="button" id="search-all" class="search-all-btn">${label}</button>`;
+      }
+
+      // Re-read every matched file from disk (streaming) and collect the lines
+      // that pass the active term/text filter, so a capped store no longer hides
+      // matches. When a term chip is active the read is scoped to just the files
+      // known to contain that term; the read is cancelled if the filter changes.
+      async function runGlobalRescan() {
+        if (!lastRun || !needsGlobalRescan()) return;
+        const key = globalScanKey();
+        if (globalScan && globalScan.key === key) {
+          renderResults();
+          return;
+        }
+        const token = ++globalScanToken;
+        globalScanLoading = true;
+
+        const combined = lastRun.matchers.combined;
+        const termRe = activeTermRegex();
+        const filterText = filterInput.value.trim().toLowerCase();
+        const paths =
+          activeTerm && lastRun.fileTerms
+            ? Object.keys(lastRun.fileCounts).filter(
+                (p) =>
+                  lastRun.fileTerms[p] && lastRun.fileTerms[p].has(activeTerm)
+              )
+            : Object.keys(lastRun.fileCounts);
+
+        const matches = [];
+        let bytes = 0;
+        let capped = false;
+        resultsNote.textContent = `Searching all files... 0 / ${paths.length}`;
+        for (let i = 0; i < paths.length; i++) {
+          if (token !== globalScanToken) return; // superseded by a newer filter
+          if (capped) break;
+          const path = paths[i];
+          const source = findSource(path);
+          if (source) {
+            await streamSourceLines(source, {
+              shouldStop: () => capped || token !== globalScanToken,
+              onLine(line, lineNo) {
+                if (capped || !combined.test(line)) return;
+                if (termRe && !termRe.test(line)) return;
+                if (
+                  filterText &&
+                  !line.toLowerCase().includes(filterText) &&
+                  !path.toLowerCase().includes(filterText)
+                ) {
+                  return;
+                }
+                if (bytes >= STORE_BUDGET) {
+                  capped = true;
+                  return;
+                }
+                const text =
+                  line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
+                bytes += matchCost(text);
+                matches.push({ path, lineNo, text });
+              },
+            });
+          }
+          if (token !== globalScanToken) return;
+          resultsNote.textContent =
+            `Searching all files... ${i + 1} / ${paths.length} scanned, ` +
+            `${matches.length.toLocaleString()} found`;
+        }
+        if (token !== globalScanToken) return;
+        globalScan = { key, matches, capped };
+        globalScanLoading = false;
+        currentPage = 0;
+        renderResults();
+        scrollToResults();
+      }
+
       // The active match set: a heatmap file's fully re-read matches when one is
-      // selected, otherwise the global (capped) store.
+      // selected, a completed global re-scan when the capped store was searched
+      // for the current filter, otherwise the global (capped) store.
       function currentSource() {
-        const usingFileSet = !!(activeFile && activeFileMatches);
-        return {
-          usingFileSet,
-          matches: usingFileSet ? activeFileMatches : lastRun.matches,
-        };
+        if (activeFile && activeFileMatches) {
+          return { mode: "file", matches: activeFileMatches };
+        }
+        if (!activeFile && globalScan && globalScan.key === globalScanKey()) {
+          return { mode: "scan", matches: globalScan.matches };
+        }
+        return { mode: "store", matches: lastRun.matches };
       }
 
       // Predicate for the term chip + free-text filters over the active set.
@@ -1549,76 +1862,204 @@
 
       function renderResults() {
         if (!lastRun) return;
-        const { usingFileSet, matches: source } = currentSource();
+        const { mode, matches: source } = currentSource();
+        const usingFileSet = mode === "file";
         const passes = currentPredicate(usingFileSet);
 
-        // Single pass: collect up to the render cap.
-        const rows = [];
+        // Collect every match that passes the current filters, then show one
+        // page of PAGE_SIZE matches at a time. This keeps the whole result set
+        // reachable while never putting more than a page of rows in the DOM.
+        const filtered = [];
         for (const m of source) {
-          if (!passes(m)) continue;
-          if (rows.length < RENDER_LIMIT) rows.push(m);
+          if (passes(m)) filtered.push(m);
+        }
+
+        const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+        currentPage = Math.min(Math.max(0, currentPage), pageCount - 1);
+        const start = currentPage * PAGE_SIZE;
+        const end = Math.min(start + PAGE_SIZE, filtered.length);
+        const pageMatches = filtered.slice(start, end);
+
+        // Group this page's matches by file (in the order files are first
+        // seen) so the list shows one header row per file with its lines
+        // beneath.
+        const groups = new Map(); // path -> matches[]
+        for (const m of pageMatches) {
+          let group = groups.get(m.path);
+          if (!group) {
+            group = [];
+            groups.set(m.path, group);
+          }
+          group.push(m);
         }
 
         resultsBody.innerHTML = "";
         const frag = document.createDocumentFragment();
         const highlight = lastRun.matchers.highlight;
-        for (const m of rows) {
-          const tr = document.createElement("tr");
-          tr.className = "res-row";
-          tr.dataset.path = m.path;
-          tr.dataset.line = m.lineNo;
-          tr.title = "Click to open this file with matches highlighted";
+        for (const [path, group] of groups) {
+          // A clickable header row per file (opens the file at its first match),
+          // followed by a row for each matching line in the file.
+          const headTr = document.createElement("tr");
+          headTr.className = "file-row";
+          headTr.dataset.path = path;
+          headTr.dataset.line = group[0].lineNo;
+          headTr.title = "Click to open this file with matches highlighted";
 
-          const fileTd = document.createElement("td");
-          fileTd.className = "file";
-          fileTd.innerHTML = formatPath(m.path);
+          const headTd = document.createElement("td");
+          headTd.className = "file-head";
+          headTd.colSpan = 2;
+          const count = group.length;
+          headTd.innerHTML =
+            `<div class="fh-inner">` +
+            `<span class="fh-path">${formatPath(path)}</span>` +
+            `<span class="fcount">${count.toLocaleString()} ` +
+            `match${count === 1 ? "" : "es"}</span>` +
+            `</div>`;
+          headTr.appendChild(headTd);
+          frag.appendChild(headTr);
 
-          const lineTd = document.createElement("td");
-          lineTd.className = "line";
-          lineTd.textContent = m.lineNo;
+          for (const m of group) {
+            const tr = document.createElement("tr");
+            tr.className = "res-row";
+            tr.dataset.path = m.path;
+            tr.dataset.line = m.lineNo;
+            tr.title = "Click to open this file with matches highlighted";
 
-          const textTd = document.createElement("td");
-          textTd.className = "text";
-          textTd.innerHTML = highlightText(m.text, highlight);
+            const lineTd = document.createElement("td");
+            lineTd.className = "line";
+            lineTd.textContent = m.lineNo;
 
-          tr.append(fileTd, lineTd, textTd);
-          frag.appendChild(tr);
+            const textTd = document.createElement("td");
+            textTd.className = "text";
+            textTd.innerHTML = highlightText(m.text, highlight);
+
+            tr.append(lineTd, textTd);
+            frag.appendChild(tr);
+          }
         }
         resultsBody.appendChild(frag);
 
-        resultsTable.style.display = rows.length ? "table" : "none";
+        resultsTable.style.display = pageMatches.length ? "table" : "none";
         resultsHead.style.display = lastRun.matches.length ? "flex" : "none";
+        renderPagination(filtered.length, pageCount, start, end);
 
         if (!lastRun.totalMatches) {
           resultsNote.textContent = "No matches found.";
           return;
         }
 
-        const capped = lastRun.totalMatches > lastRun.stored;
+        // Note parts may include a "Search all files" button, so they are HTML.
         const parts = [];
         if (activeFile) {
           parts.push(
-            `Filtered to file "${stripRoot(activeFile)}" (click it again to clear).`
+            `Filtered to file "${escapeHtml(stripRoot(activeFile))}" (click it again to clear).`
           );
         }
 
-        if (usingFileSet) {
+        if (mode === "file") {
           // This file's lines were re-read from disk in full.
           if (activeFileCapped) {
             parts.push(
-              `Only the first ${STORE_LIMIT.toLocaleString()} matches in this file ` +
-                `were loaded; filter or download the CSV to narrow them.`
+              `This file has too many matches to hold in memory at once; ` +
+                `filter or download the CSV to narrow them.`
             );
           }
-        } else if (activeFile && capped) {
-          // A file is selected but we fell back to the in-memory store (re-read
-          // was unavailable), so some of its lines may be missing.
+        } else if (mode === "scan") {
+          // The capped store was re-scanned from disk for this filter, so the
+          // list below is now complete (up to the store cap).
           parts.push(
-            "Showing only the matches kept in memory for this file; a re-read " +
-              "was unavailable, so some may be missing."
+            `Searched all files: ${filtered.length.toLocaleString()} ` +
+              `match${filtered.length === 1 ? "" : "es"} for this filter.`
+          );
+          if (globalScan && globalScan.capped) {
+            parts.push(
+              `Stopped after filling the memory budget; ` +
+                `narrow the filter to see them all.`
+            );
+          }
+        } else if (activeFile) {
+          // A file is selected but we fell back to the in-memory store (its
+          // re-read was unavailable), so some of its lines may be missing.
+          if (storeCapped()) {
+            parts.push(
+              "Showing only the matches kept in memory for this file; a re-read " +
+                "was unavailable, so some may be missing."
+            );
+          }
+        } else if (needsGlobalRescan()) {
+          // The active filter has only searched the capped in-memory store, so
+          // matches dropped past the cap are missing. Offer a full disk re-scan.
+          if (globalScanLoading) {
+            parts.push("Searching all files...");
+          } else {
+            if (activeTerm) {
+              const known = lastRun.termCounts[activeTerm] || 0;
+              parts.push(
+                `Showing ${filtered.length.toLocaleString()} of ` +
+                  `${known.toLocaleString()} "${escapeHtml(activeTerm)}" ` +
+                  `match${known === 1 ? "" : "es"} kept in memory.`
+              );
+            } else {
+              parts.push(
+                `The results list holds only the first ` +
+                  `${lastRun.stored.toLocaleString()} of ` +
+                  `${lastRun.totalMatches.toLocaleString()} matches, so this ` +
+                  `filter searched just those.`
+              );
+            }
+            parts.push(searchAllButtonHtml());
+          }
+        } else if (!activeFile && storeCapped()) {
+          // No filter yet, but the store is capped -- tell the user the list is
+          // a prefix and how to reach the rest.
+          parts.push(
+            `Showing the first ${lastRun.stored.toLocaleString()} of ` +
+              `${lastRun.totalMatches.toLocaleString()} matches kept in memory. ` +
+              `Pick a term, type a filter, or click a file to search them all.`
           );
         }
-        resultsNote.textContent = parts.join(" ");
+        resultsNote.innerHTML = parts.join(" ");
+      }
+
+      // Draw the Prev / Next controls above and below the table. Hidden when
+      // everything fits on a single page.
+      function renderPagination(total, pageCount, start, end) {
+        if (total <= PAGE_SIZE) {
+          pagerTop.style.display = "none";
+          pagerBottom.style.display = "none";
+          pagerTop.innerHTML = "";
+          pagerBottom.innerHTML = "";
+          return;
+        }
+        const info =
+          `Page ${(currentPage + 1).toLocaleString()} of ` +
+          `${pageCount.toLocaleString()} \u00b7 matches ` +
+          `${(start + 1).toLocaleString()}\u2013${end.toLocaleString()} of ` +
+          `${total.toLocaleString()}`;
+        const prevDis = currentPage <= 0 ? " disabled" : "";
+        const nextDis = currentPage >= pageCount - 1 ? " disabled" : "";
+        const html =
+          `<button type="button" data-page="prev"${prevDis}>&larr; Prev</button>` +
+          `<span class="page-info">${info}</span>` +
+          `<button type="button" data-page="next"${nextDis}>Next &rarr;</button>`;
+        pagerTop.innerHTML = html;
+        pagerBottom.innerHTML = html;
+        pagerTop.style.display = "flex";
+        pagerBottom.style.display = "flex";
+      }
+
+      function onPagerClick(event) {
+        const btn = event.target.closest("button[data-page]");
+        if (!btn || btn.disabled) return;
+        gotoPage(currentPage + (btn.dataset.page === "next" ? 1 : -1));
+      }
+
+      function gotoPage(page) {
+        currentPage = page;
+        renderResults();
+        // Land at the top of the results so a new page starts from its first
+        // row rather than wherever the previous page was scrolled to.
+        resultsHead.scrollIntoView({ behavior: "smooth", block: "start" });
       }
 
       function highlightText(text, highlightRe) {
@@ -1684,9 +2125,9 @@
       function downloadCsv() {
         if (!lastRun) return;
         // Export exactly what the current filters show (file, term, free text),
-        // including a heatmap file's fully re-read matches.
-        const { usingFileSet, matches: source } = currentSource();
-        const passes = currentPredicate(usingFileSet);
+        // including a heatmap file's fully re-read matches or a global re-scan.
+        const { mode, matches: source } = currentSource();
+        const passes = currentPredicate(mode === "file");
         const rows = [["file", "line", "text"]];
         for (const m of source) {
           if (passes(m)) rows.push([m.path, String(m.lineNo), m.text]);
@@ -1775,6 +2216,9 @@
             }
           },
           finish() {
+            // A trailing "\n" leaves an empty buffer; emitting it would invent a
+            // phantom last line and disagree with the search's line numbering.
+            if (!buffer.length) return;
             let line = buffer;
             buffer = "";
             if (line.endsWith("\r")) line = line.slice(0, -1);
@@ -1918,11 +2362,13 @@
 
       // The viewer is virtualized so huge files open instantly and scroll
       // smoothly. The file streams in as blocks of VIEWER_BLOCK_LINES lines
-      // (one string + a line-offset table per block, no DOM), and only blocks
-      // near the viewport get rendered; blocks scrolled far away are released
-      // again. Match positions are indexed during the streamed read, so the
-      // counter and First/Prev/Next/Last cover the entire file even though
-      // most of it has no DOM nodes.
+      // (one string + a line-offset table per block, no DOM) for O(1) line
+      // lookup, and only the ~screenful of lines around the scroll position is
+      // ever in the DOM. Rows have a fixed height, so any line's position is
+      // computed directly; for files taller than the browser's element-height
+      // cap the scroll range is scaled onto the full file, keeping every line
+      // and match reachable. Match positions are indexed during the streamed
+      // read, so the counter and First/Prev/Next/Last cover the entire file.
 
       function viewerMatchCount() {
         return viewerData ? viewerData.matchLines.length : 0;
@@ -1930,18 +2376,20 @@
 
       function newViewerData(hitLine, highlight) {
         return {
-          blocks: [], // { first, count, text, starts, div, populated }
+          blocks: [], // { first, count, text, starts } for O(1) line lookup
           pending: [], // lines waiting to be sealed into the next block
-          appendQueue: [], // sealed block divs not yet added to the DOM
           matchLines: [], // line number of every match, in order
           lineCount: 0,
           hitLine,
           highlight,
           loaded: false,
           jumped: false, // the initial jump to the clicked line happened
-          domStarted: false,
           progressPct: null,
           lastUi: 0,
+          rowH: 18.75, // measured height of one rendered row, in px
+          anchorVirtualTop: null, // exact virtual offset to hold after a jump
+          programmaticScroll: false, // the next scroll event is one we caused
+          lastScrollTop: 0, // last vertical offset, to spot horizontal scrolls
         };
       }
 
@@ -1956,34 +2404,21 @@
           starts[i] = offset;
           offset += lines[i].length + 1;
         }
-        const div = document.createElement("div");
-        div.className = "v-block";
-        div.style.height = `${count * VIEWER_LINE_EST}px`;
-        div._vbIndex = data.blocks.length;
         data.blocks.push({
           first: data.blocks.length * VIEWER_BLOCK_LINES + 1,
           count,
           text: lines.join("\n"),
           starts,
-          div,
-          populated: false,
         });
-        data.appendQueue.push(div);
       }
 
-      function flushViewerDom(data) {
-        if (!data.appendQueue.length) return;
-        if (!data.domStarted) {
-          data.domStarted = true;
-          viewerBody.innerHTML = ""; // clear the "Loading..." message
-        }
-        const frag = document.createDocumentFragment();
-        for (const div of data.appendQueue) frag.appendChild(div);
-        viewerBody.appendChild(frag);
-        if (viewerObserver) {
-          for (const div of data.appendQueue) viewerObserver.observe(div);
-        }
-        data.appendQueue = [];
+      // Lines that can be rendered right now: every sealed block holds exactly
+      // VIEWER_BLOCK_LINES, so until the stream finishes we only trust the sealed
+      // count (the trailing, not-yet-sealed lines appear once their block seals).
+      function viewerLineCount(data) {
+        return data.loaded
+          ? data.lineCount
+          : data.blocks.length * VIEWER_BLOCK_LINES;
       }
 
       function viewerBlockLine(block, i) {
@@ -1992,88 +2427,192 @@
           : block.text.slice(block.starts[i]);
       }
 
-      function populateViewerBlock(block) {
-        if (block.populated || !viewerData) return;
+      // O(1) text lookup for any 1-based line via its sealed block.
+      function getLineText(data, ln) {
+        if (ln < 1) return "";
+        const bi = Math.floor((ln - 1) / VIEWER_BLOCK_LINES);
+        const block = data.blocks[bi];
+        if (!block) return "";
+        const i = (ln - 1) % VIEWER_BLOCK_LINES;
+        if (i >= block.count) return "";
+        return viewerBlockLine(block, i);
+      }
+
+      // Geometry of the virtualized scroll for the current file + viewport. When
+      // the true height (lineCount * rowH) exceeds the browser's element-height
+      // cap we scale: the scrollbar spans VIEWER_MAX_CONTENT_PX while the scroll
+      // position maps linearly onto the full virtual height, so distant lines
+      // stay reachable and jumps to them stay exact.
+      function viewerMetrics(data) {
+        const vh = viewerBody.clientHeight || 1;
+        const rowH = data.rowH || 18.75;
+        const lineCount = viewerLineCount(data);
+        const virtualHeight = Math.max(vh, lineCount * rowH);
+        const contentHeight = Math.min(virtualHeight, VIEWER_MAX_CONTENT_PX);
+        return {
+          vh,
+          rowH,
+          lineCount,
+          virtualHeight,
+          contentHeight,
+          maxScroll: Math.max(0, contentHeight - vh),
+          maxVirtual: Math.max(0, virtualHeight - vh),
+          scaled: virtualHeight > contentHeight + 0.5,
+        };
+      }
+
+      function scheduleViewerRender() {
+        if (viewerRaf) return;
+        viewerRaf = requestAnimationFrame(() => {
+          viewerRaf = 0;
+          renderViewer();
+        });
+      }
+
+      // A scroll comes from the user (drop any jump anchor and follow the bar) or
+      // from a jump we just performed (keep the exact anchor for one render). A
+      // horizontal-only scroll leaves the vertical anchor untouched.
+      function onViewerScroll() {
         const data = viewerData;
+        if (!data) return;
+        if (data.programmaticScroll) {
+          data.programmaticScroll = false;
+        } else if (viewerBody.scrollTop !== data.lastScrollTop) {
+          data.lastScrollTop = viewerBody.scrollTop;
+          data.anchorVirtualTop = null;
+        }
+        scheduleViewerRender();
+      }
+
+      // Draw only the lines around the current vertical position into a single
+      // absolutely-positioned window; the tall spacer alone carries the scroll
+      // range. Runs on every scroll frame and after each jump.
+      function renderViewer() {
+        const data = viewerData;
+        if (!data || !viewerWindow || !viewerSpacer) return;
+        const m = viewerMetrics(data);
+        viewerSpacer.style.height = m.contentHeight + "px";
+        if (m.lineCount <= 0) return;
+
+        let scrollTop = viewerBody.scrollTop;
+        if (scrollTop > m.maxScroll) scrollTop = m.maxScroll;
+
+        // Where the viewport top sits in the file's full (unscaled) height.
+        let virtualTop;
+        if (data.anchorVirtualTop != null) {
+          virtualTop = data.anchorVirtualTop;
+        } else if (m.scaled && m.maxScroll > 0) {
+          virtualTop = (scrollTop / m.maxScroll) * m.maxVirtual;
+        } else {
+          virtualTop = scrollTop;
+        }
+        virtualTop = Math.max(0, Math.min(virtualTop, m.maxVirtual));
+
+        const overscan = 8;
+        const windowLines = Math.ceil(m.vh / m.rowH) + overscan * 2;
+        let firstLine = Math.floor(virtualTop / m.rowH) - overscan; // 0-based
+        if (firstLine < 0) firstLine = 0;
+        let lastLine = firstLine + windowLines;
+        if (lastLine > m.lineCount - 1) lastLine = m.lineCount - 1;
+
+        const highlight = data.highlight;
         const parts = [];
-        for (let i = 0; i < block.count; i++) {
-          const ln = block.first + i;
+        for (let i = firstLine; i <= lastLine; i++) {
+          const ln = i + 1;
           const cls = ln === data.hitLine ? "v-line v-hit" : "v-line";
           parts.push(
             `<div class="${cls}" data-ln="${ln}">` +
               `<span class="v-ln">${ln}</span>` +
               `<span class="v-tx">` +
-              highlightText(viewerBlockLine(block, i), data.highlight) +
+              highlightText(getLineText(data, ln), highlight) +
               `</span></div>`
           );
         }
-        block.div.innerHTML = parts.join("");
-        block.div.style.height = "auto";
-        block.populated = true;
+        // Pin the window to the viewport top, then offset each row by its true
+        // position minus the virtual top so line `firstLine` lands at y = 0.
+        viewerWindow.style.top =
+          scrollTop + firstLine * m.rowH - virtualTop + "px";
+        viewerWindow.innerHTML = parts.join("");
 
-        // Restore the focused-match style if it lives in this block.
+        // Re-mark the focused match if its line is on screen (survives scrolling
+        // away and back, since every re-render rebuilds the window).
         if (viewerIdx >= 0) {
           const ln = data.matchLines[viewerIdx];
-          if (ln >= block.first && ln < block.first + block.count) {
-            const lineDiv = block.div.querySelector(`.v-line[data-ln="${ln}"]`);
-            const marks = lineDiv ? lineDiv.querySelectorAll("mark") : [];
-            const within = viewerIdx - lowerBound(data.matchLines, ln);
-            const mark = marks[Math.min(within, marks.length - 1)];
-            if (mark) mark.classList.add("v-cur");
+          if (ln >= firstLine + 1 && ln <= lastLine + 1) {
+            const row = viewerWindow.querySelector(`.v-line[data-ln="${ln}"]`);
+            if (row) {
+              const marks = row.querySelectorAll("mark");
+              const within = viewerIdx - lowerBound(data.matchLines, ln);
+              const mark = marks[Math.min(within, marks.length - 1)];
+              if (mark) mark.classList.add("v-cur");
+            }
           }
         }
       }
 
-      function depopulateViewerBlock(block) {
-        if (!block.populated) return;
-        // Freeze the measured height so releasing the DOM doesn't shift the
-        // scroll position; the block re-renders identically when revisited.
-        block.div.style.height = `${block.div.offsetHeight}px`;
-        block.div.innerHTML = "";
-        block.populated = false;
+      // Center a 1-based line in the viewport. Positions come from a fixed row
+      // height, so this is exact for any file size: move the scrollbar to the
+      // mapped position and draw the window from the precise virtual offset,
+      // which we pin as the anchor until the user scrolls vertically again.
+      function jumpToViewerLine(ln) {
+        const data = viewerData;
+        if (!data || !viewerSpacer) return;
+        const m = viewerMetrics(data);
+        let vt = (ln - 1) * m.rowH + m.rowH / 2 - m.vh / 2;
+        vt = Math.max(0, Math.min(vt, m.maxVirtual));
+        let scrollTop =
+          m.scaled && m.maxVirtual > 0
+            ? (vt / m.maxVirtual) * m.maxScroll
+            : vt;
+        scrollTop = Math.max(0, Math.min(scrollTop, m.maxScroll));
+
+        viewerSpacer.style.height = m.contentHeight + "px";
+        data.anchorVirtualTop = vt;
+        data.programmaticScroll = true;
+        const before = viewerBody.scrollTop;
+        viewerBody.scrollTop = scrollTop;
+        data.lastScrollTop = viewerBody.scrollTop;
+        // No scroll event fires when the position is unchanged, so don't leave
+        // the "programmatic" flag armed for the user's next scroll.
+        if (viewerBody.scrollTop === before) data.programmaticScroll = false;
+        renderViewer();
       }
 
-      function onViewerBlocks(entries) {
-        if (!viewerData) return;
-        for (const entry of entries) {
-          const block = viewerData.blocks[entry.target._vbIndex];
-          if (!block || block.div !== entry.target) continue;
-          if (entry.isIntersecting) populateViewerBlock(block);
-          else depopulateViewerBlock(block);
+      // Bring the focused match's mark into horizontal view (long, unwrapped
+      // lines can push it off-screen); the vertical position is already set.
+      function scrollViewerToCurrentMark() {
+        if (!viewerWindow) return;
+        const mark = viewerWindow.querySelector("mark.v-cur");
+        if (!mark) return;
+        const body = viewerBody.getBoundingClientRect();
+        const rect = mark.getBoundingClientRect();
+        const pad = 80;
+        if (rect.left < body.left + pad || rect.right > body.right - pad) {
+          const target =
+            viewerBody.scrollLeft +
+            (rect.left - body.left) -
+            viewerBody.clientWidth / 2;
+          viewerBody.scrollLeft = Math.max(0, target);
         }
       }
 
-      // Render the block containing this line (plus its neighbours, so a
-      // centered scroll has content around it) and return the line's element.
-      function ensureViewerLine(ln) {
-        if (!viewerData || ln < 1) return null;
-        const idx = Math.floor((ln - 1) / VIEWER_BLOCK_LINES);
-        if (idx >= viewerData.blocks.length) return null;
-        const from = Math.max(0, idx - 1);
-        const to = Math.min(viewerData.blocks.length - 1, idx + 1);
-        for (let b = from; b <= to; b++) {
-          populateViewerBlock(viewerData.blocks[b]);
-        }
-        return viewerData.blocks[idx].div.querySelector(
-          `.v-line[data-ln="${ln}"]`
-        );
-      }
-
-      function scrollViewerTo(element, smooth) {
-        let behavior = "auto";
-        if (smooth) {
-          const rect = element.getBoundingClientRect();
-          const host = viewerBody.getBoundingClientRect();
-          // Smooth-scroll only short hops; long jumps land instantly so lazily
-          // rendered blocks can't shift the target mid-animation.
-          if (
-            Math.abs(rect.top - (host.top + host.height / 2)) <
-            host.height * 3
-          ) {
-            behavior = "smooth";
-          }
-        }
-        element.scrollIntoView({ block: "center", behavior });
+      // Measure the height of one rendered row for the current font/zoom so the
+      // virtual geometry is pixel-accurate. Runs before --vrh is set, so the
+      // probe uses the viewer's natural single-line height.
+      function measureViewerRowHeight() {
+        const probe = document.createElement("div");
+        probe.className = "v-line";
+        // Force the natural line height (1.5, matching .viewer-body) so the
+        // measurement never depends on a --vrh left over from a previous open.
+        probe.style.cssText =
+          "position:absolute;visibility:hidden;left:-9999px;top:0;" +
+          "height:auto;line-height:1.5;";
+        probe.innerHTML =
+          '<span class="v-ln">1</span><span class="v-tx">Xg</span>';
+        viewerBody.appendChild(probe);
+        const h = probe.getBoundingClientRect().height;
+        viewerBody.removeChild(probe);
+        return h > 0 ? h : 18.75;
       }
 
       function setViewerMatch(index, smooth = true) {
@@ -2083,24 +2622,11 @@
           return;
         }
         viewerData.jumped = true; // manual navigation cancels the auto-jump
-        const next = Math.max(0, Math.min(index, total - 1));
-        const prev = viewerBody.querySelector("mark.v-cur");
-        if (prev) prev.classList.remove("v-cur");
-        viewerIdx = next;
-
-        const ln = viewerData.matchLines[next];
-        const lineDiv = ensureViewerLine(ln);
-        if (lineDiv) {
-          const marks = lineDiv.querySelectorAll("mark");
-          const within = next - lowerBound(viewerData.matchLines, ln);
-          const mark = marks[Math.min(within, marks.length - 1)];
-          if (mark) {
-            mark.classList.add("v-cur");
-            scrollViewerTo(mark, smooth);
-          } else {
-            scrollViewerTo(lineDiv, smooth);
-          }
-        }
+        viewerIdx = Math.max(0, Math.min(index, total - 1));
+        // Fixed-height positioning makes the jump exact regardless of file size;
+        // renderViewer applies the .v-cur mark for viewerIdx as it draws.
+        jumpToViewerLine(viewerData.matchLines[viewerIdx]);
+        scrollViewerToCurrentMark();
         updateViewerInfo();
       }
 
@@ -2108,12 +2634,9 @@
       // of the file has streamed in, without waiting for the full load.
       function tryViewerAutoJump(data) {
         if (data.jumped) return;
-        const sealedLines = data.loaded
-          ? data.lineCount
-          : data.blocks.length * VIEWER_BLOCK_LINES;
+        const sealedLines = viewerLineCount(data);
         const i = lowerBound(data.matchLines, data.hitLine);
         if (i < data.matchLines.length && data.matchLines[i] <= sealedLines) {
-          data.jumped = true;
           setViewerMatch(i, false);
           return;
         }
@@ -2122,8 +2645,7 @@
         if (data.matchLines.length) {
           setViewerMatch(0, false);
         } else {
-          const lineDiv = ensureViewerLine(data.hitLine);
-          if (lineDiv) lineDiv.scrollIntoView({ block: "center" });
+          jumpToViewerLine(data.hitLine);
           updateViewerInfo();
         }
       }
@@ -2136,15 +2658,25 @@
         viewerTitle.innerHTML = formatPath(path);
         viewerIdx = -1;
 
-        if (viewerObserver) viewerObserver.disconnect();
-        viewerObserver = new IntersectionObserver(onViewerBlocks, {
-          root: viewerBody,
-          rootMargin: "1500px 0px",
-        });
+        // Build the virtualized DOM: a tall spacer that owns the scrollbar plus a
+        // small window holding only the rows near the viewport. Measure the row
+        // height first, before --vrh pins it.
+        const rowH = measureViewerRowHeight();
+        viewerBody.style.setProperty("--vrh", rowH + "px");
+        viewerBody.scrollTop = 0;
+        viewerBody.scrollLeft = 0;
+        viewerBody.innerHTML = "";
+        viewerSpacer = document.createElement("div");
+        viewerSpacer.className = "v-spacer";
+        viewerWindow = document.createElement("div");
+        viewerWindow.className = "v-window";
+        viewerWindow.innerHTML =
+          '<div class="v-line"><span class="v-tx">Loading...</span></div>';
+        viewerBody.append(viewerSpacer, viewerWindow);
 
         const data = newViewerData(lineNo, lastRun.matchers.highlight);
+        data.rowH = rowH;
         viewerData = data;
-        viewerMessage("Loading...");
         updateViewerInfo();
         viewerBody.focus();
 
@@ -2170,8 +2702,8 @@
               const now = performance.now();
               if (now - data.lastUi > 100) {
                 data.lastUi = now;
-                flushViewerDom(data);
-                tryViewerAutoJump(data);
+                if (!data.jumped) tryViewerAutoJump(data);
+                scheduleViewerRender();
                 updateViewerInfo();
               }
             },
@@ -2200,8 +2732,15 @@
 
         sealViewerBlock(data);
         data.loaded = true;
-        flushViewerDom(data);
+        if (!data.lineCount) {
+          viewerMessage("(empty file)");
+          viewerSpacer = null;
+          viewerWindow = null;
+          updateViewerInfo();
+          return;
+        }
         tryViewerAutoJump(data);
+        scheduleViewerRender();
         updateViewerInfo();
       }
 
@@ -2229,11 +2768,13 @@
         viewerToken++; // stops any in-flight streamed load
         viewer.hidden = true;
         viewerData = null;
-        if (viewerObserver) {
-          viewerObserver.disconnect();
-          viewerObserver = null;
+        if (viewerRaf) {
+          cancelAnimationFrame(viewerRaf);
+          viewerRaf = 0;
         }
         viewerBody.innerHTML = "";
+        viewerSpacer = null;
+        viewerWindow = null;
         viewerIdx = -1;
         document.body.style.overflow = "";
       }
