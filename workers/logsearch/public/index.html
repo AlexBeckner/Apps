@@ -417,7 +417,10 @@
         cursor: pointer;
         display: grid;
         gap: 10px;
-        grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
+        /* [ path | value ]: the path takes all remaining space; the value
+           (count+percent, or size) is the last column and right-aligned, so
+           every value's right edge lines up regardless of its width. */
+        grid-template-columns: minmax(0, 1fr) auto;
         padding: 3px 6px;
       }
 
@@ -428,6 +431,13 @@
       .heat-row.active {
         background: #16202e;
         border-color: #7fb2ff;
+      }
+
+      /* Browse list: same [ path | value ] layout as the base rule, but file
+         sizes are short and uniform, so a fixed value column keeps the path's
+         truncation point aligned across rows too. */
+      .heat-row.browse {
+        grid-template-columns: minmax(0, 1fr) 72px;
       }
 
       .heat-row .hp {
@@ -445,19 +455,6 @@
 
       .heat-row .hp .base {
         font-weight: 700;
-      }
-
-      .heat-track {
-        background: #222;
-        border-radius: 3px;
-        height: 10px;
-        overflow: hidden;
-      }
-
-      .heat-fill {
-        border-radius: 3px;
-        height: 100%;
-        min-width: 3px;
       }
 
       .heat-count {
@@ -695,7 +692,6 @@
               <input
                 id="terms"
                 type="text"
-                value="ERROR, FATAL"
                 placeholder="ERROR, FATAL, Exception"
                 autocomplete="off"
                 spellcheck="false"
@@ -710,6 +706,8 @@
           </div>
 
           <div class="chips" id="quick-chips" aria-label="Quick add terms">
+            <span class="chip" data-add="ERROR">+ ERROR</span>
+            <span class="chip" data-add="FATAL">+ FATAL</span>
             <span class="chip" data-add="WARN">+ WARN</span>
             <span class="chip" data-add="WARNING">+ WARNING</span>
             <span class="chip" data-add="CRITICAL">+ CRITICAL</span>
@@ -886,6 +884,9 @@
         if (!files.length) {
           setDropInfo("");
           searchBtn.disabled = true;
+          clearSearchState();
+          heatmapEl.innerHTML = "";
+          heatmapEl.style.display = "none";
           return;
         }
         const totalBytes = files.reduce((sum, f) => sum + f.file.size, 0);
@@ -895,6 +896,10 @@
             `(${formatBytes(totalBytes)}) from "${root}"`
         );
         searchBtn.disabled = false;
+        // A new selection drops any previous results and shows the file list so
+        // files can be opened right away, before (or without) a search.
+        clearSearchState();
+        renderBrowseHeatmap();
       }
 
       function filesFromInput(fileList) {
@@ -1542,7 +1547,12 @@
         summaryEl.style.display = "flex";
       }
 
-      const HEAT_LIMIT = 100; // max file rows drawn in the heatmap
+      const HEAT_LIMIT = 100; // max file rows drawn in the search heatmap
+      // The browse list is the only way to open a file before searching, so it
+      // shows many more rows than the search heatmap (which can be narrowed with
+      // the results filter). Still capped to guard against a pathological drop
+      // of tens of thousands of files.
+      const BROWSE_LIMIT = 1000;
 
       function renderHeatmap(ctx) {
         heatmapEl.innerHTML = "";
@@ -1556,7 +1566,6 @@
         }
 
         const shown = entries.slice(0, HEAT_LIMIT);
-        const max = entries[0][1];
 
         const heading = document.createElement("h2");
         heading.textContent =
@@ -1569,10 +1578,6 @@
         list.className = "heat-list";
 
         for (const [path, count] of shown) {
-          // Log scale keeps low-count files visible next to a runaway file.
-          const intensity =
-            max > 1 ? Math.log(count + 1) / Math.log(max + 1) : 1;
-
           const row = document.createElement("div");
           row.className = "heat-row" + (activeFile === path ? " active" : "");
           row.dataset.file = path;
@@ -1586,14 +1591,6 @@
           inner.innerHTML = formatPath(path);
           hp.appendChild(inner);
 
-          const track = document.createElement("div");
-          track.className = "heat-track";
-          const fill = document.createElement("div");
-          fill.className = "heat-fill";
-          fill.style.width = `${Math.max(3, Math.round(intensity * 100))}%`;
-          fill.style.background = heatColor(intensity);
-          track.appendChild(fill);
-
           const countEl = document.createElement("div");
           countEl.className = "heat-count";
           const countN = document.createElement("span");
@@ -1604,7 +1601,7 @@
           countP.textContent = `(${formatPercent(count, ctx.totalMatches)})`;
           countEl.append(countN, countP);
 
-          row.append(hp, track, countEl);
+          row.append(hp, countEl);
           row.addEventListener("click", () => selectHeatFile(path));
           list.appendChild(row);
         }
@@ -1624,6 +1621,117 @@
         for (const row of heatmapEl.querySelectorAll(".heat-row")) {
           row.classList.toggle("active", (row.dataset.file || null) === activeFile);
         }
+      }
+
+      // Before any search is run, the heatmap doubles as a file browser so a
+      // file can be opened without searching first. It lists the selected files
+      // by size -- known instantly, without reading them -- and clicking a row
+      // opens that file in the viewer with no search overlay. (Counting lines
+      // would mean reading every file up front, which would defeat opening one
+      // quickly, so size stands in for "how big is this file".)
+      function renderBrowseHeatmap() {
+        heatmapEl.innerHTML = "";
+        if (!selected.length) {
+          heatmapEl.style.display = "none";
+          return;
+        }
+
+        // Only plain files can be opened directly; an archive's contents are
+        // not known until a search expands it.
+        const isArchive = (p) =>
+          !!(window.LogArchives && LogArchives.archiveKind(p));
+        const plain = selected.filter((s) => !isArchive(s.path));
+        const archiveCount = selected.length - plain.length;
+
+        // Show paths relative to the shared root, matching the search view.
+        displayRoot = commonRoot(selected.map((s) => s.path));
+
+        const entries = plain
+          .map((s) => [s.path, s.file.size])
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+
+        const heading = document.createElement("h2");
+        heading.textContent = entries.length
+          ? `${entries.length.toLocaleString()} ` +
+            `file${entries.length === 1 ? "" : "s"} (click to open)`
+          : "No directly openable files";
+        heatmapEl.appendChild(heading);
+
+        if (entries.length) {
+          const shown = entries.slice(0, BROWSE_LIMIT);
+
+          const list = document.createElement("div");
+          list.className = "heat-list";
+          for (const [path, size] of shown) {
+            const row = document.createElement("div");
+            row.className = "heat-row browse";
+            row.dataset.file = path;
+            row.title = `${path} -- ${formatBytes(size)}`;
+
+            const hp = document.createElement("div");
+            hp.className = "hp";
+            const inner = document.createElement("span");
+            inner.innerHTML = formatPath(path);
+            hp.appendChild(inner);
+
+            const countEl = document.createElement("div");
+            countEl.className = "heat-count";
+            countEl.textContent = formatBytes(size);
+
+            row.append(hp, countEl);
+            row.addEventListener("click", () => openViewer(path, 1, null));
+            list.appendChild(row);
+          }
+          heatmapEl.appendChild(list);
+
+          if (entries.length > shown.length) {
+            const note = document.createElement("p");
+            note.className = "heat-note";
+            note.textContent =
+              `Showing the ${shown.length.toLocaleString()} largest of ` +
+              `${entries.length.toLocaleString()} files.`;
+            heatmapEl.appendChild(note);
+          }
+        }
+
+        if (archiveCount) {
+          const note = document.createElement("p");
+          note.className = "heat-note";
+          note.textContent =
+            `${archiveCount.toLocaleString()} ` +
+            `archive${archiveCount === 1 ? "" : "s"} will be expanded when you ` +
+            `search.`;
+          heatmapEl.appendChild(note);
+        }
+
+        heatmapEl.style.display = "flex";
+      }
+
+      // Reset everything a previous search left on screen so a fresh selection
+      // starts clean (in browse mode). Leaves the heatmap alone -- the caller
+      // repaints it as either the browse list or search results.
+      function clearSearchState() {
+        lastRun = null;
+        activeTerm = null;
+        activeFile = null;
+        activeFileMatches = null;
+        activeFileCapped = false;
+        currentPage = 0;
+        fileScanToken++;
+        globalScan = null;
+        invalidateGlobalScan();
+        summaryEl.style.display = "none";
+        summaryEl.innerHTML = "";
+        termFilterEl.innerHTML = "";
+        resultsHead.style.display = "none";
+        resultsTable.style.display = "none";
+        resultsBody.innerHTML = "";
+        resultsNote.innerHTML = "";
+        scanNote.textContent = "";
+        pagerTop.style.display = "none";
+        pagerBottom.style.display = "none";
+        pagerTop.innerHTML = "";
+        pagerBottom.innerHTML = "";
       }
 
       function scrollToResults() {
@@ -1710,13 +1818,6 @@
         });
         if (!ok && !capped) return null;
         return { matches, capped };
-      }
-
-      // Blue (few hits) -> red (most hits) heat scale for the dark theme.
-      function heatColor(ratio) {
-        const r = Math.max(0, Math.min(1, ratio));
-        const hue = 210 - 210 * r;
-        return `hsl(${hue}, 85%, 52%)`;
       }
 
       // Each heatmap row shows its raw count and its share of all matches.
@@ -2082,10 +2183,10 @@
       }
 
       // Draw the Prev / Next controls in the results-head row (with the filter
-      // and Download CSV) and again below the table. Hidden when everything
-      // fits on a single page.
+      // and Download CSV) and again below the table. Always shown when there is
+      // at least one match; on a single page both buttons are just disabled.
       function renderPagination(total, pageCount, start, end) {
-        if (total <= PAGE_SIZE) {
+        if (total <= 0) {
           pagerTop.style.display = "none";
           pagerBottom.style.display = "none";
           pagerTop.innerHTML = "";
@@ -2124,6 +2225,9 @@
       }
 
       function highlightText(text, highlightRe) {
+        // Browse mode opens files without a search, so there is nothing to
+        // highlight -- just escape and return the raw line.
+        if (!highlightRe) return escapeHtml(text);
         highlightRe.lastIndex = 0;
         let result = "";
         let last = 0;
@@ -2394,6 +2498,7 @@
       // its overlap handling and its runaway-line guard so the match index and
       // the rendered marks always agree.
       function countLineMatches(text, highlightRe) {
+        if (!highlightRe) return 0;
         highlightRe.lastIndex = 0;
         let count = 0;
         let last = 0;
@@ -2711,8 +2816,13 @@
         }
       }
 
-      async function openViewer(path, lineNo) {
-        if (!lastRun) return;
+      // highlight defaults to the last search's matcher (results-row clicks);
+      // browse-mode clicks pass null so the file opens with no search overlay.
+      async function openViewer(path, lineNo, highlight) {
+        if (highlight === undefined) {
+          highlight =
+            lastRun && lastRun.matchers ? lastRun.matchers.highlight : null;
+        }
         const token = ++viewerToken;
         viewer.hidden = false;
         document.body.style.overflow = "hidden";
@@ -2735,7 +2845,7 @@
           '<div class="v-line"><span class="v-tx">Loading...</span></div>';
         viewerBody.append(viewerSpacer, viewerWindow);
 
-        const data = newViewerData(lineNo, lastRun.matchers.highlight);
+        const data = newViewerData(lineNo, highlight);
         data.rowH = rowH;
         viewerData = data;
         updateViewerInfo();
@@ -2806,9 +2916,23 @@
       }
 
       function updateViewerInfo() {
+        const data = viewerData;
         const total = viewerMatchCount();
-        if (viewerData && !viewerData.loaded) {
-          const pct = viewerData.progressPct;
+        // Browse mode (opened without a search): no matches to step through, so
+        // show the line count and keep the match-nav buttons disabled.
+        if (data && !data.highlight) {
+          const lines = data.lineCount || 0;
+          viewerMinfo.textContent = !data.loaded
+            ? `Loading${data.progressPct != null ? ` ${data.progressPct}%` : ""}...`
+            : `${lines.toLocaleString()} line${lines === 1 ? "" : "s"}`;
+          viewerFirst.disabled = true;
+          viewerPrev.disabled = true;
+          viewerNext.disabled = true;
+          viewerLast.disabled = true;
+          return;
+        }
+        if (data && !data.loaded) {
+          const pct = data.progressPct;
           viewerMinfo.textContent =
             (viewerIdx >= 0 ? `Match ${viewerIdx + 1} / ` : "") +
             `${total.toLocaleString()} match${total === 1 ? "" : "es"}` +
