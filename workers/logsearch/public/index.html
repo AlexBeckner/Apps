@@ -14,6 +14,12 @@
         background: #111;
         color: #eee;
         margin: 8px;
+        /* Full-height flex column so the main area can grow to fill the page
+           (used by the pre-search browse list, below). */
+        display: flex;
+        flex-direction: column;
+        min-height: calc(100vh - 16px);
+        min-height: calc(100dvh - 16px);
         font-family:
           -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
           sans-serif;
@@ -23,6 +29,10 @@
       main {
         max-width: none;
         margin: 0;
+        display: flex;
+        flex: 1 1 auto;
+        flex-direction: column;
+        min-height: 0;
       }
 
       h1 {
@@ -147,6 +157,22 @@
       .top-right {
         min-height: 0;
         position: relative;
+      }
+
+      /* Browse mode (no search run yet): let the file list grow to fill the
+         page instead of only matching the controls box height, so many more
+         files are visible at once. The grid stretches to fill the flex column;
+         the left controls box keeps its natural height (align-items: start)
+         while the right cell -- and the heatmap that fills it -- stretches to
+         the grown row. Toggled via the .browse-fill class from JS. */
+      .top-grid.browse-fill {
+        align-items: start;
+        flex: 1 1 auto;
+        min-height: 0;
+      }
+
+      .top-grid.browse-fill .top-right {
+        align-self: stretch;
       }
 
       .controls {
@@ -408,6 +434,14 @@
         gap: 3px;
         min-height: 0;
         overflow-y: auto;
+        /* Keep the list scrollable (wheel/trackpad/keyboard) but hide the
+           scrollbar chrome for a cleaner look. */
+        scrollbar-width: none; /* Firefox */
+        -ms-overflow-style: none; /* legacy Edge/IE */
+      }
+
+      .heat-list::-webkit-scrollbar {
+        display: none; /* Chromium, Safari */
       }
 
       .heat-row {
@@ -666,6 +700,12 @@
           flex: none;
           max-height: 50vh;
         }
+
+        /* Stacked layout caps the list at 50vh on its own, so don't let the
+           browse-mode grow rule stretch the grid and add empty space. */
+        .top-grid.browse-fill {
+          flex: 0 1 auto;
+        }
       }
     </style>
   </head>
@@ -674,7 +714,7 @@
       <div class="drop-overlay-inner"><span class="drop-overlay-plus">+</span></div>
     </div>
     <main>
-      <div class="top-grid">
+      <div class="top-grid" id="top-grid">
         <div class="top-left">
           <label
             class="dropzone"
@@ -814,6 +854,7 @@
       const configError = el("config-error");
       const summaryEl = el("summary");
       const heatmapEl = el("heatmap");
+      const topGrid = el("top-grid");
       const termFilterEl = el("term-filter");
       const resultsHead = el("results-head");
       const filterInput = el("filter");
@@ -887,6 +928,7 @@
           clearSearchState();
           heatmapEl.innerHTML = "";
           heatmapEl.style.display = "none";
+          setBrowseFill(false);
           return;
         }
         const totalBytes = files.reduce((sum, f) => sum + f.file.size, 0);
@@ -1195,7 +1237,11 @@
           return;
         }
         if (!terms.length) {
-          showConfigError("Enter at least one search term.");
+          // No search terms: don't treat it as an error. Just return to the
+          // expanded browse view (same clean state as a fresh selection), so
+          // clearing the terms and pressing Enter/Search shows the file list.
+          clearSearchState();
+          renderBrowseHeatmap();
           return;
         }
 
@@ -1215,6 +1261,7 @@
         summaryEl.style.display = "none";
         heatmapEl.style.display = "none";
         heatmapEl.innerHTML = "";
+        setBrowseFill(false);
         resultsHead.style.display = "none";
         resultsTable.style.display = "none";
         resultsNote.textContent = "";
@@ -1556,6 +1603,7 @@
 
       function renderHeatmap(ctx) {
         heatmapEl.innerHTML = "";
+        setBrowseFill(false);
         const entries = Object.keys(ctx.fileCounts)
           .map((path) => [path, ctx.fileCounts[path]])
           .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
@@ -1623,6 +1671,13 @@
         }
       }
 
+      // In browse mode (a selection with openable files but no search yet) the
+      // file list grows to fill the page; a search or empty selection turns it
+      // back off so results lay out normally below the controls.
+      function setBrowseFill(on) {
+        topGrid.classList.toggle("browse-fill", on);
+      }
+
       // Before any search is run, the heatmap doubles as a file browser so a
       // file can be opened without searching first. It lists the selected files
       // by size -- known instantly, without reading them -- and clicking a row
@@ -1633,6 +1688,7 @@
         heatmapEl.innerHTML = "";
         if (!selected.length) {
           heatmapEl.style.display = "none";
+          setBrowseFill(false);
           return;
         }
 
@@ -1705,6 +1761,9 @@
         }
 
         heatmapEl.style.display = "flex";
+        // Fill the page only when there is an actual file list to browse (an
+        // archive-only selection shows just a note, so leave it compact).
+        setBrowseFill(entries.length > 0);
       }
 
       // Reset everything a previous search left on screen so a fresh selection
