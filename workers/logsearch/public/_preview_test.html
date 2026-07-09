@@ -284,20 +284,13 @@
       .results-head {
         align-items: center;
         display: flex;
-        flex-wrap: wrap;
         gap: 10px;
+        justify-content: space-between;
         margin-top: 14px;
       }
 
       .results-head input {
-        flex: 0 1 320px;
         max-width: 320px;
-      }
-
-      /* Top pager sits on the results-head row, pushed to the right. */
-      .results-head .pager {
-        margin-left: auto;
-        margin-top: 0;
       }
 
       table {
@@ -745,16 +738,20 @@
       <div class="results-head" id="results-head" style="display: none;">
         <input id="filter" type="text" placeholder="Filter results by path or text..." autocomplete="off">
         <button id="download" type="button">Download CSV</button>
-        <div class="pager" id="pager-top" style="display: none;"></div>
       </div>
 
       <p class="note" id="results-note"></p>
+
+      <div class="pager" id="pager-top" style="display: none;"></div>
 
       <table id="results-table" style="display: none;">
         <colgroup>
           <col class="c-line">
           <col>
         </colgroup>
+        <thead>
+          <tr><th>Line</th><th>Match</th></tr>
+        </thead>
         <tbody id="results-body"></tbody>
       </table>
 
@@ -2081,9 +2078,8 @@
         resultsNote.innerHTML = parts.join(" ");
       }
 
-      // Draw the Prev / Next controls in the results-head row (with the filter
-      // and Download CSV) and again below the table. Hidden when everything
-      // fits on a single page.
+      // Draw the Prev / Next controls above and below the table. Hidden when
+      // everything fits on a single page.
       function renderPagination(total, pageCount, start, end) {
         if (total <= PAGE_SIZE) {
           pagerTop.style.display = "none";
@@ -2890,6 +2886,39 @@
           "Note: automatic archive expansion (.zip/.tar/.gz) needs a newer " +
           "browser; plain folders still work here.";
       }
+    </script>
+    <script>
+      (function () {
+        setDropInfo('47 files (1.9 GB) from "mce103_20260707_192907_logs"');
+        var fileCounts = Object.create(null);
+        var total = 0;
+        for (var i = 1; i <= 60; i++) {
+          var n = i < 10 ? "0" + i : "" + i;
+          var name = "mce103_20260707_192907_logs/service-" + n + "/app.log";
+          var c = Math.round(20000 / i) + ((i * 137) % 900) + 3;
+          fileCounts[name] = c;
+          total += c;
+        }
+        var termCounts = { ERROR: Math.round(total * 0.7), FATAL: 0 };
+        termCounts.FATAL = total - termCounts.ERROR;
+        displayRoot = "mce103_20260707_192907_logs";
+        var ctx = {
+          totalMatches: total,
+          filesScanned: 47,
+          filesSkipped: 2,
+          totalLines: 10757961,
+          elapsedMs: 3600,
+          fileCounts: fileCounts,
+          termCounts: termCounts,
+          stored: total,
+          matches: [],
+          matchers: { highlight: /ERROR|FATAL/gi, combined: /ERROR|FATAL/i },
+        };
+        lastRun = ctx;
+        renderSummary(ctx);
+        renderHeatmap(ctx);
+        renderTermFilter(ctx);
+      })();
     </script>
   </body>
 </html>
