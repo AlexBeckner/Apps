@@ -551,10 +551,10 @@
       }
 
       .viewer {
-        background: rgba(0, 0, 0, 0.6);
+        background: #0d0d0d;
         display: flex;
         inset: 0;
-        padding: 24px;
+        padding: 0;
         position: fixed;
         z-index: 50;
       }
@@ -563,13 +563,14 @@
         display: none;
       }
 
+      /* Full-page viewer: the box fills the whole viewport edge-to-edge (no
+         backdrop, border, or radius) so long log lines get the maximum width. */
       .viewer-box {
         background: #0d0d0d;
-        border: 1px solid #333;
-        border-radius: 8px;
         display: flex;
         flex-direction: column;
-        margin: auto;
+        height: 100%;
+        margin: 0;
         max-height: 100%;
         max-width: none;
         overflow: hidden;
@@ -608,6 +609,14 @@
         white-space: nowrap;
       }
 
+      /* Body + the custom match scrollbar sit side by side and share the space
+         left below the header. */
+      .viewer-main {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+      }
+
       .viewer-body {
         font-family:
           "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
@@ -615,13 +624,94 @@
         line-height: 1.5;
         flex: 1;
         min-height: 0;
+        min-width: 0;
         overflow: auto;
         padding: 0;
         position: relative;
       }
 
+      /* The native scrollbar is replaced by the custom match scrollbar on the
+         right. Vertical scrolling still works via wheel/trackpad/keyboard, and
+         wide lines scroll horizontally with shift+wheel/trackpad. */
+      .viewer-body {
+        scrollbar-width: none;
+      }
+
+      .viewer-body::-webkit-scrollbar {
+        height: 0;
+        width: 0;
+      }
+
       .viewer-body:focus {
         outline: none;
+      }
+
+      /* Custom scrollbar / match minimap. The canvas paints a tick for every
+         match at its position in the file; the thumb is the highlighted section
+         showing where the viewport currently sits; the cursor marks the focused
+         match. It is also the scroll control: click or drag to navigate. */
+      .viewer-scroll {
+        background: #0a0a0a;
+        border-left: 1px solid #1c1c1c;
+        cursor: pointer;
+        flex: 0 0 16px;
+        position: relative;
+        touch-action: none;
+        user-select: none;
+        width: 16px;
+      }
+
+      .viewer-scroll[hidden] {
+        display: none;
+      }
+
+      .viewer-scroll.no-scroll {
+        cursor: default;
+      }
+
+      .viewer-scroll-map {
+        display: block;
+        height: 100%;
+        inset: 0;
+        position: absolute;
+        width: 100%;
+      }
+
+      .viewer-scroll-thumb {
+        background: rgba(255, 255, 255, 0.14);
+        border: 1px solid rgba(255, 255, 255, 0.24);
+        border-radius: 3px;
+        left: 1px;
+        pointer-events: none;
+        position: absolute;
+        right: 1px;
+        top: 0;
+        will-change: transform;
+      }
+
+      .viewer-scroll:hover .viewer-scroll-thumb {
+        background: rgba(255, 255, 255, 0.22);
+      }
+
+      .viewer-scroll.dragging .viewer-scroll-thumb {
+        background: rgba(255, 255, 255, 0.3);
+      }
+
+      .viewer-scroll-cursor {
+        background: #ffd479;
+        box-shadow: 0 0 4px rgba(255, 212, 121, 0.9);
+        height: 2px;
+        left: 0;
+        pointer-events: none;
+        position: absolute;
+        right: 0;
+        top: 0;
+        will-change: transform;
+      }
+
+      .viewer-scroll-thumb[hidden],
+      .viewer-scroll-cursor[hidden] {
+        display: none;
       }
 
       /* A 1px-wide spacer sizes the (possibly scaled) scrollbar; the window
@@ -812,7 +902,14 @@
             <button id="viewer-close" type="button" title="Close (Esc)">Close</button>
           </div>
         </div>
-        <div class="viewer-body" id="viewer-body" tabindex="0"></div>
+        <div class="viewer-main">
+          <div class="viewer-body" id="viewer-body" tabindex="0"></div>
+          <div class="viewer-scroll" id="viewer-scroll" aria-hidden="true" hidden>
+            <canvas class="viewer-scroll-map" id="viewer-scroll-map"></canvas>
+            <div class="viewer-scroll-cursor" id="viewer-scroll-cursor" hidden></div>
+            <div class="viewer-scroll-thumb" id="viewer-scroll-thumb" hidden></div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -874,6 +971,10 @@
       const viewerLast = el("viewer-last");
       const viewerClose = el("viewer-close");
       const viewerBody = el("viewer-body");
+      const viewerScroll = el("viewer-scroll");
+      const viewerScrollMap = el("viewer-scroll-map");
+      const viewerScrollThumb = el("viewer-scroll-thumb");
+      const viewerScrollCursor = el("viewer-scroll-cursor");
 
       // Archive expansion (.zip/.tar/.tar.gz/.tgz/.gz) runs client-side via
       // archives.js. It needs the native DecompressionStream API; if that is
@@ -1200,8 +1301,65 @@
 
       viewerBody.addEventListener("scroll", onViewerScroll);
       window.addEventListener("resize", () => {
-        if (viewerData) scheduleViewerRender();
+        if (viewerData) {
+          drawViewerMatchMap();
+          scheduleViewerRender();
+        }
       });
+
+      // Custom scrollbar navigation. A press maps the pointer to a virtual
+      // offset; if it lands on the thumb we keep the grab offset so it drags
+      // smoothly, otherwise we jump so the pointer becomes the thumb's center.
+      let viewerScrollDragging = false;
+      let viewerScrollGrab = 0;
+
+      function viewerScrollOffsetFor(clientY, useGrab) {
+        const g = viewerScrollGeom();
+        if (!g.scrollable) return null;
+        const rect = viewerScroll.getBoundingClientRect();
+        const y = Math.max(0, Math.min(clientY - rect.top, g.h));
+        if (useGrab === undefined) {
+          const curTop =
+            g.m.maxVirtual > 0
+              ? (viewerVirtualTop(g.m) / g.m.maxVirtual) * g.movable
+              : 0;
+          viewerScrollGrab =
+            y >= curTop && y <= curTop + g.thumbH ? y - curTop : g.thumbH / 2;
+        }
+        const thumbTop = Math.max(0, Math.min(y - viewerScrollGrab, g.movable));
+        return g.movable > 0 ? (thumbTop / g.movable) * g.m.maxVirtual : 0;
+      }
+
+      viewerScroll.addEventListener("pointerdown", (event) => {
+        if (!viewerData || !viewerSpacer) return;
+        const vt = viewerScrollOffsetFor(event.clientY);
+        if (vt == null) return;
+        viewerScrollDragging = true;
+        viewerScroll.classList.add("dragging");
+        try {
+          viewerScroll.setPointerCapture(event.pointerId);
+        } catch (e) {}
+        event.preventDefault();
+        viewerScrollToVirtualTop(vt);
+      });
+
+      viewerScroll.addEventListener("pointermove", (event) => {
+        if (!viewerScrollDragging) return;
+        const vt = viewerScrollOffsetFor(event.clientY, true);
+        if (vt != null) viewerScrollToVirtualTop(vt);
+      });
+
+      function endViewerScrollDrag(event) {
+        if (!viewerScrollDragging) return;
+        viewerScrollDragging = false;
+        viewerScroll.classList.remove("dragging");
+        try {
+          viewerScroll.releasePointerCapture(event.pointerId);
+        } catch (e) {}
+      }
+
+      viewerScroll.addEventListener("pointerup", endViewerScrollDrag);
+      viewerScroll.addEventListener("pointercancel", endViewerScrollDrag);
 
       function parseTerms() {
         return termsInput.value
@@ -2773,6 +2931,152 @@
             }
           }
         }
+
+        // Keep the custom scrollbar's thumb (viewport) and cursor (focused
+        // match) in sync with the freshly computed position.
+        updateViewerScrollbar(m, virtualTop);
+      }
+
+      // Where the viewport top currently sits in the file's full (unscaled)
+      // height -- the same value renderViewer derives, factored out so the
+      // scrollbar can reuse it without a re-render.
+      function viewerVirtualTop(m) {
+        const data = viewerData;
+        if (!data) return 0;
+        let scrollTop = viewerBody.scrollTop;
+        if (scrollTop > m.maxScroll) scrollTop = m.maxScroll;
+        let virtualTop;
+        if (data.anchorVirtualTop != null) {
+          virtualTop = data.anchorVirtualTop;
+        } else if (m.scaled && m.maxScroll > 0) {
+          virtualTop = (scrollTop / m.maxScroll) * m.maxVirtual;
+        } else {
+          virtualTop = scrollTop;
+        }
+        return Math.max(0, Math.min(virtualTop, m.maxVirtual));
+      }
+
+      // Track height plus thumb geometry for the current file/viewport. The
+      // thumb spans the visible fraction of the file (with a floor so it stays
+      // grabbable) and travels the remaining `movable` pixels.
+      function viewerScrollGeom(m) {
+        m = m || viewerMetrics(viewerData);
+        const h = viewerScroll.clientHeight || 0;
+        const scrollable = m.virtualHeight > m.vh + 0.5;
+        const minThumb = 28;
+        const thumbH = scrollable
+          ? Math.max(minThumb, Math.min(h, (m.vh / m.virtualHeight) * h))
+          : h;
+        const movable = Math.max(0, h - thumbH);
+        return { m, h, thumbH, movable, scrollable };
+      }
+
+      // Vertical position on the track for a 1-based line, using the line's
+      // center so a match tick lines up with where that row renders.
+      function viewerTrackY(ln, m, h) {
+        if (m.virtualHeight <= 0) return 0;
+        const y = (((ln - 0.5) * m.rowH) / m.virtualHeight) * h;
+        return Math.max(0, Math.min(y, h));
+      }
+
+      // Reflect the current scroll position onto the custom scrollbar: size and
+      // place the thumb (the highlighted "where am I" section) and the focused-
+      // match cursor. Cheap enough to run every scroll frame.
+      function updateViewerScrollbar(m, virtualTop) {
+        const data = viewerData;
+        if (!data || !viewerSpacer) {
+          viewerScroll.hidden = true;
+          return;
+        }
+        viewerScroll.hidden = false;
+        m = m || viewerMetrics(data);
+        if (virtualTop == null) virtualTop = viewerVirtualTop(m);
+        const g = viewerScrollGeom(m);
+        if (g.h <= 0) return;
+
+        viewerScroll.classList.toggle("no-scroll", !g.scrollable);
+        if (g.scrollable) {
+          const thumbTop =
+            m.maxVirtual > 0 ? (virtualTop / m.maxVirtual) * g.movable : 0;
+          viewerScrollThumb.hidden = false;
+          viewerScrollThumb.style.height = g.thumbH + "px";
+          viewerScrollThumb.style.transform = `translateY(${thumbTop}px)`;
+        } else {
+          viewerScrollThumb.hidden = true;
+        }
+
+        const total = viewerMatchCount();
+        if (viewerIdx >= 0 && viewerIdx < total) {
+          const y = viewerTrackY(data.matchLines[viewerIdx], m, g.h);
+          viewerScrollCursor.hidden = false;
+          viewerScrollCursor.style.transform = `translateY(${y - 1}px)`;
+        } else {
+          viewerScrollCursor.hidden = true;
+        }
+      }
+
+      // Paint one tick per match onto the scrollbar canvas. Density is collapsed
+      // per device-pixel row first, so a file with hundreds of thousands of
+      // matches still draws in O(matches + trackPixels). Redrawn only when the
+      // match set or track size changes -- never per scroll frame.
+      function drawViewerMatchMap() {
+        const data = viewerData;
+        const w = viewerScroll.clientWidth;
+        const h = viewerScroll.clientHeight;
+        if (w <= 0 || h <= 0) return;
+        const dpr = window.devicePixelRatio || 1;
+        const cw = Math.max(1, Math.round(w * dpr));
+        const ch = Math.max(1, Math.round(h * dpr));
+        if (viewerScrollMap.width !== cw) viewerScrollMap.width = cw;
+        if (viewerScrollMap.height !== ch) viewerScrollMap.height = ch;
+        const ctx = viewerScrollMap.getContext("2d");
+        if (!ctx) return;
+        ctx.clearRect(0, 0, cw, ch);
+
+        if (!data || !data.highlight) return; // browse mode: no matches to map
+        const matches = data.matchLines;
+        const n = matches.length;
+        if (!n) return;
+        const m = viewerMetrics(data);
+        if (m.virtualHeight <= 0) return;
+
+        const rows = new Uint8Array(ch);
+        for (let i = 0; i < n; i++) {
+          let y = Math.floor(
+            (((matches[i] - 0.5) * m.rowH) / m.virtualHeight) * ch
+          );
+          if (y < 0) y = 0;
+          else if (y >= ch) y = ch - 1;
+          if (rows[y] < 255) rows[y]++;
+        }
+
+        const inset = Math.round(2 * dpr);
+        const tickW = Math.max(1, cw - inset * 2);
+        const tickH = Math.max(1, Math.round(dpr));
+        ctx.fillStyle = "rgba(255, 212, 121, 0.7)";
+        for (let y = 0; y < ch; y++) {
+          if (rows[y]) ctx.fillRect(inset, y, tickW, tickH);
+        }
+      }
+
+      // Scroll the viewer so the given virtual offset is the viewport top,
+      // driven by a click/drag on the custom scrollbar. Mirrors jumpToViewerLine
+      // but takes a raw offset instead of centering a line.
+      function viewerScrollToVirtualTop(vt) {
+        const data = viewerData;
+        if (!data || !viewerSpacer) return;
+        const m = viewerMetrics(data);
+        vt = Math.max(0, Math.min(vt, m.maxVirtual));
+        let scrollTop =
+          m.scaled && m.maxVirtual > 0 ? (vt / m.maxVirtual) * m.maxScroll : vt;
+        scrollTop = Math.max(0, Math.min(scrollTop, m.maxScroll));
+        data.anchorVirtualTop = vt;
+        data.programmaticScroll = true;
+        const before = viewerBody.scrollTop;
+        viewerBody.scrollTop = scrollTop;
+        data.lastScrollTop = viewerBody.scrollTop;
+        if (viewerBody.scrollTop === before) data.programmaticScroll = false;
+        renderViewer();
       }
 
       // Center a 1-based line in the viewport. Positions come from a fixed row
@@ -2907,6 +3211,16 @@
         const data = newViewerData(lineNo, highlight);
         data.rowH = rowH;
         viewerData = data;
+
+        // Reset the custom scrollbar for the new file (empty match map, no thumb
+        // or cursor until the first render/stream).
+        viewerScrollDragging = false;
+        viewerScroll.classList.remove("dragging");
+        viewerScroll.hidden = false;
+        viewerScrollThumb.hidden = true;
+        viewerScrollCursor.hidden = true;
+        drawViewerMatchMap();
+
         updateViewerInfo();
         viewerBody.focus();
 
@@ -2934,6 +3248,7 @@
                 data.lastUi = now;
                 if (!data.jumped) tryViewerAutoJump(data);
                 scheduleViewerRender();
+                drawViewerMatchMap();
                 updateViewerInfo();
               }
             },
@@ -2966,11 +3281,14 @@
           viewerMessage("(empty file)");
           viewerSpacer = null;
           viewerWindow = null;
+          updateViewerScrollbar();
+          drawViewerMatchMap();
           updateViewerInfo();
           return;
         }
         tryViewerAutoJump(data);
         scheduleViewerRender();
+        drawViewerMatchMap();
         updateViewerInfo();
       }
 
@@ -3020,6 +3338,12 @@
         viewerSpacer = null;
         viewerWindow = null;
         viewerIdx = -1;
+        viewerScrollDragging = false;
+        viewerScroll.classList.remove("dragging");
+        viewerScroll.hidden = true;
+        viewerScrollThumb.hidden = true;
+        viewerScrollCursor.hidden = true;
+        drawViewerMatchMap();
         document.body.style.overflow = "";
       }
 
