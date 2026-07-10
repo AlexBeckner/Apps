@@ -183,6 +183,11 @@
         margin-top: 12px;
       }
 
+      .terms-help {
+        font-size: 0.78rem;
+        grid-column: 1 / -1;
+      }
+
       label {
         display: block;
         font-weight: 600;
@@ -910,6 +915,10 @@
         white-space: pre;
       }
 
+      .viewer-body mark {
+        cursor: pointer;
+      }
+
       /* Fit-to-width (wrap) mode: lines flow to the body width and grow taller
          instead of scrolling horizontally. The virtualization still tracks one
          logical line per row-height slot; renderViewer measures the top line's
@@ -996,10 +1005,11 @@
               <input
                 id="terms"
                 type="text"
-                placeholder="ERROR, FATAL, Exception"
-                autocomplete="off"
-                spellcheck="false"
+                placeholder="ERROR, FATAL, "
+                autocomplete="on"
+                spellcheck="true"
                 aria-label="Search terms"
+                aria-describedby="terms-help"
               >
             </div>
             <div class="toggles">
@@ -1012,7 +1022,6 @@
           <div class="chips" id="quick-chips" aria-label="Quick add terms">
             <span class="chip" data-add="ERROR">+ ERROR</span>
             <span class="chip" data-add="FATAL">+ FATAL</span>
-            <span class="chip" data-add="WARN">+ WARN</span>
             <span class="chip" data-add="WARNING">+ WARNING</span>
             <span class="chip" data-add="CRITICAL">+ CRITICAL</span>
             <span class="chip" data-add="Exception">+ Exception</span>
@@ -1467,14 +1476,19 @@
       el("quick-chips").addEventListener("click", (event) => {
         const term = event.target && event.target.getAttribute("data-add");
         if (!term) return;
-        const current = termsInput.value
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
+        let current;
+        try {
+          current = parseTerms();
+        } catch (error) {
+          showConfigError(error.message);
+          termsInput.focus();
+          return;
+        }
         if (!current.some((t) => t.toLowerCase() === term.toLowerCase())) {
           current.push(term);
-          termsInput.value = current.join(", ");
+          termsInput.value = current.map(serializeTerm).join(", ");
         }
+        showConfigError("");
       });
 
       searchBtn.addEventListener("click", runSearch);
@@ -1616,6 +1630,7 @@
         }
       });
 
+      viewerBody.addEventListener("click", onViewerMatchClick);
       viewerBody.addEventListener("scroll", onViewerScroll);
       // Chromium exposes a trackpad pinch as a cancelable Ctrl+wheel event;
       // Safari exposes gesture events. Handle both so the image zooms in place
@@ -1693,11 +1708,81 @@
       viewerScroll.addEventListener("pointerup", endViewerScrollDrag);
       viewerScroll.addEventListener("pointercancel", endViewerScrollDrag);
 
-      function parseTerms() {
-        return termsInput.value
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
+      // Commas separate terms except inside double quotes. Quoted terms support
+      // backslash escapes (\" and \\) and CSV-style doubled quotes.
+      function parseTerms(value = termsInput.value) {
+        const terms = [];
+        let term = "";
+        let inQuotes = false;
+        let afterQuote = false;
+        let quotedTerm = false;
+
+        function pushTerm() {
+          const normalized = quotedTerm ? term : term.trim();
+          if (normalized) terms.push(normalized);
+          term = "";
+          afterQuote = false;
+          quotedTerm = false;
+        }
+
+        for (let i = 0; i < value.length; i++) {
+          const char = value[i];
+
+          if (inQuotes) {
+            if (
+              char === "\\" &&
+              (value[i + 1] === '"' || value[i + 1] === "\\")
+            ) {
+              term += value[++i];
+            } else if (char === '"') {
+              if (value[i + 1] === '"') {
+                term += '"';
+                i++;
+              } else {
+                inQuotes = false;
+                afterQuote = true;
+              }
+            } else {
+              term += char;
+            }
+          } else if (afterQuote) {
+            if (char === ",") {
+              pushTerm();
+            } else if (!/\s/.test(char)) {
+              throw new Error(
+                `Unexpected "${char}" after a quoted search term. Add a comma before the next term.`
+              );
+            }
+          } else if (char === ",") {
+            pushTerm();
+          } else if (char === '"' && !term.trim()) {
+            term = "";
+            inQuotes = true;
+            quotedTerm = true;
+          } else {
+            term += char;
+          }
+        }
+
+        if (inQuotes) {
+          throw new Error(
+            'Unclosed quote in search terms. Add a closing quote or escape a literal quote as \\".'
+          );
+        }
+        pushTerm();
+        return terms;
+      }
+
+      function serializeTerm(term) {
+        if (
+          !term.includes(",") &&
+          !term.includes('"') &&
+          term.trim() === term
+        ) {
+          return term;
+        }
+        const escaped = term.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+        return `"${escaped}"`;
       }
 
       function buildMatchers(terms) {
@@ -1720,8 +1805,14 @@
 
       async function runSearch() {
         if (running) return;
-        const terms = parseTerms();
         showConfigError("");
+        let terms;
+        try {
+          terms = parseTerms();
+        } catch (error) {
+          showConfigError(error.message);
+          return;
+        }
         if (!selected.length) {
           showConfigError("Choose a log folder first.");
           return;
@@ -2108,8 +2199,7 @@
         const heading = document.createElement("h2");
         heading.textContent =
           `${entries.length.toLocaleString()} ` +
-          `file${entries.length === 1 ? "" : "s"} with matches ` +
-          `(click to filter)`;
+          `file${entries.length === 1 ? "" : "s"} with matches `;
         heatmapEl.appendChild(heading);
 
         const list = document.createElement("div");
@@ -2199,7 +2289,7 @@
         const heading = document.createElement("h2");
         heading.textContent = entries.length
           ? `${entries.length.toLocaleString()} ` +
-            `file${entries.length === 1 ? "" : "s"} (click to open)`
+            `file${entries.length === 1 ? "" : "s"}`
           : "No directly openable files";
         heatmapEl.appendChild(heading);
 
@@ -2659,12 +2749,6 @@
         }
 
         // Note parts may include a "Search all files" button, so they are HTML.
-        const parts = [];
-        if (activeFile) {
-          parts.push(
-            `Filtered to file "${escapeHtml(stripRoot(activeFile))}" (click it again to clear).`
-          );
-        }
 
         if (mode === "file") {
           // This file's lines were re-read from disk in full.
@@ -3577,6 +3661,34 @@
         const within = viewerIdx - lowerBound(data.matchLines, ln);
         const mark = marks[Math.min(within, marks.length - 1)];
         if (mark) mark.classList.add("v-cur");
+      }
+
+      // A line can contain several highlighted matches, represented by repeated
+      // line numbers in matchLines. Combine the clicked mark's position within
+      // its row with the first index for that line to focus the exact occurrence
+      // without moving the already-visible viewport.
+      function onViewerMatchClick(event) {
+        const data = viewerData;
+        if (!data || viewerMode !== "text") return;
+        const mark = event.target.closest("mark");
+        if (!mark) return;
+        const selection = window.getSelection && window.getSelection();
+        if (selection && !selection.isCollapsed) return;
+        const row = mark.closest(".v-line[data-ln]");
+        if (!row) return;
+        const ln = Number(row.dataset.ln);
+        const marks = row.querySelectorAll("mark");
+        const within = Array.prototype.indexOf.call(marks, mark);
+        const index = lowerBound(data.matchLines, ln) + within;
+        if (within < 0 || data.matchLines[index] !== ln) return;
+
+        data.jumped = true;
+        viewerIdx = index;
+        const current = viewerWindow.querySelector("mark.v-cur");
+        if (current && current !== mark) current.classList.remove("v-cur");
+        mark.classList.add("v-cur");
+        updateViewerScrollbar();
+        updateViewerInfo();
       }
 
       // Where the viewport top currently sits in the file's full (unscaled)
