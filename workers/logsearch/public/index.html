@@ -587,7 +587,9 @@
       }
 
       .viewer-title {
+        flex: 1 1 auto;
         font-size: 13px;
+        min-width: 0;
         overflow-wrap: anywhere;
       }
 
@@ -599,7 +601,13 @@
         align-items: center;
         display: flex;
         flex-shrink: 0;
-        gap: 8px;
+        flex-wrap: wrap;
+        gap: 6px;
+        justify-content: flex-end;
+      }
+
+      .viewer-nav button {
+        padding: 6px 10px;
       }
 
       .viewer-nav .minfo {
@@ -607,6 +615,34 @@
         font-size: 12px;
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
+      }
+
+      /* Zoom cluster reads as one segmented control. */
+      .viewer-zoom {
+        align-items: stretch;
+        display: inline-flex;
+      }
+
+      .viewer-zoom button {
+        border-radius: 0;
+        min-width: 34px;
+        text-align: center;
+      }
+
+      .viewer-zoom button + button {
+        border-left: 0;
+      }
+
+      #viewer-zoom-reset {
+        font-variant-numeric: tabular-nums;
+        min-width: 48px;
+      }
+
+      .vsep {
+        align-self: stretch;
+        background: #2a2a2a;
+        margin: 2px 2px;
+        width: 1px;
       }
 
       /* Body + the custom match scrollbar sit side by side and share the space
@@ -733,12 +769,12 @@
          horizontally with the body rather than wrapping. */
       .v-line {
         display: flex;
-        gap: 12px;
+        gap: 8px;
         height: var(--vrh, 18.75px);
         line-height: var(--vrh, 18.75px);
         min-width: 100%;
         overflow: hidden;
-        padding: 0 12px;
+        padding: 0 10px;
         white-space: pre;
       }
 
@@ -750,18 +786,48 @@
         background: #16202e;
       }
 
+      /* Line-number gutter is sized to the file's digit count (set per file), so
+         short files don't waste a wide fixed column. */
       .v-ln {
         color: #666;
-        flex: 0 0 60px;
+        flex: 0 0 calc(var(--v-ln-digits, 4) * 1ch + 2px);
         font-variant-numeric: tabular-nums;
         text-align: right;
         user-select: none;
-        width: 60px;
+        width: calc(var(--v-ln-digits, 4) * 1ch + 2px);
       }
 
       .v-tx {
         flex: 0 0 auto;
         white-space: pre;
+      }
+
+      /* Fit-to-width (wrap) mode: lines flow to the body width and grow taller
+         instead of scrolling horizontally. The virtualization still tracks one
+         logical line per row-height slot; renderViewer measures the top line's
+         real (wrapped) height to keep scrolling smooth and gap-free. */
+      .viewer-body.wrap {
+        overflow-x: hidden;
+      }
+
+      .viewer-body.wrap .v-window {
+        min-width: 0;
+        width: 100%;
+      }
+
+      .viewer-body.wrap .v-line {
+        align-items: flex-start;
+        height: auto;
+        min-height: var(--vrh, 18.75px);
+        overflow: visible;
+        white-space: pre-wrap;
+      }
+
+      .viewer-body.wrap .v-tx {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
       }
 
       mark.v-cur {
@@ -899,6 +965,14 @@
             <button id="viewer-prev" type="button" title="Previous match (Up / Left arrow)">&uarr; Prev</button>
             <button id="viewer-next" type="button" title="Next match (Down / Right arrow)">&darr; Next</button>
             <button id="viewer-last" type="button" title="Last match (End)">Last &#8677;</button>
+            <span class="vsep" aria-hidden="true"></span>
+            <span class="viewer-zoom">
+              <button id="viewer-zoom-out" type="button" title="Zoom out (-)">&#8722;</button>
+              <button id="viewer-zoom-reset" type="button" title="Reset zoom (0)">100%</button>
+              <button id="viewer-zoom-in" type="button" title="Zoom in (+)">+</button>
+            </span>
+            <button id="viewer-wrap" type="button" title="Toggle line wrap (W)" aria-pressed="false">Wrap: Off</button>
+            <span class="vsep" aria-hidden="true"></span>
             <button id="viewer-close" type="button" title="Close (Esc)">Close</button>
           </div>
         </div>
@@ -934,6 +1008,12 @@
       const VIEWER_MAX_CONTENT_PX = Math.floor(
         16000000 / (window.devicePixelRatio || 1)
       );
+      // Viewer zoom: font size (px) drives the measured row height, so zooming
+      // just re-measures and re-anchors. Clamped to a sane, readable range.
+      const VIEWER_FONT_DEFAULT = 12.5;
+      const VIEWER_FONT_MIN = 6.5;
+      const VIEWER_FONT_MAX = 44;
+      const VIEWER_ZOOM_STEP = 1.15;
 
       const el = (id) => document.getElementById(id);
       const dropzone = el("dropzone");
@@ -969,6 +1049,10 @@
       const viewerPrev = el("viewer-prev");
       const viewerNext = el("viewer-next");
       const viewerLast = el("viewer-last");
+      const viewerZoomOut = el("viewer-zoom-out");
+      const viewerZoomIn = el("viewer-zoom-in");
+      const viewerZoomReset = el("viewer-zoom-reset");
+      const viewerWrapBtn = el("viewer-wrap");
       const viewerClose = el("viewer-close");
       const viewerBody = el("viewer-body");
       const viewerScroll = el("viewer-scroll");
@@ -1013,6 +1097,8 @@
       let viewerSpacer = null; // sizes the scrollbar to the (scaled) file height
       let viewerWindow = null; // holds only the rows near the viewport
       let viewerRaf = 0; // rAF handle coalescing scroll-driven re-renders
+      let viewerFontPx = VIEWER_FONT_DEFAULT; // current zoom (persists across files)
+      let viewerWrap = false; // false = extended (default), true = fit-to-width
 
       // The drop box shows a single status line; empty text collapses it and
       // brings back the plus sign.
@@ -1275,6 +1361,16 @@
       viewerLast.addEventListener("click", () =>
         setViewerMatch(viewerMatchCount() - 1)
       );
+      viewerZoomOut.addEventListener("click", () =>
+        setViewerFont(viewerFontPx / VIEWER_ZOOM_STEP)
+      );
+      viewerZoomIn.addEventListener("click", () =>
+        setViewerFont(viewerFontPx * VIEWER_ZOOM_STEP)
+      );
+      viewerZoomReset.addEventListener("click", () =>
+        setViewerFont(VIEWER_FONT_DEFAULT)
+      );
+      viewerWrapBtn.addEventListener("click", () => setViewerWrap(!viewerWrap));
       viewerClose.addEventListener("click", closeViewer);
       // Click on the backdrop (not the dialog box) closes the viewer.
       viewer.addEventListener("mousedown", (event) => {
@@ -1296,6 +1392,18 @@
         } else if (event.key === "End" && viewerMatchCount()) {
           event.preventDefault();
           setViewerMatch(viewerMatchCount() - 1);
+        } else if (event.key === "+" || event.key === "=") {
+          event.preventDefault();
+          setViewerFont(viewerFontPx * VIEWER_ZOOM_STEP);
+        } else if (event.key === "-" || event.key === "_") {
+          event.preventDefault();
+          setViewerFont(viewerFontPx / VIEWER_ZOOM_STEP);
+        } else if (event.key === "0") {
+          event.preventDefault();
+          setViewerFont(VIEWER_FONT_DEFAULT);
+        } else if (event.key === "w" || event.key === "W") {
+          event.preventDefault();
+          setViewerWrap(!viewerWrap);
         }
       });
 
@@ -2773,6 +2881,8 @@
           anchorVirtualTop: null, // exact virtual offset to hold after a jump
           programmaticScroll: false, // the next scroll event is one we caused
           lastScrollTop: 0, // last vertical offset, to spot horizontal scrolls
+          _lnDigits: 0, // last applied line-number gutter digit count
+          wrapRealH: null, // exact wrapped height when the whole file is rendered
         };
       }
 
@@ -2830,7 +2940,23 @@
         const vh = viewerBody.clientHeight || 1;
         const rowH = data.rowH || 18.75;
         const lineCount = viewerLineCount(data);
-        const virtualHeight = Math.max(vh, lineCount * rowH);
+        // Extended mode: every line is exactly rowH tall, so the scroll height is
+        // the line count times the row height (capped/scaled for huge files).
+        //
+        // Wrap mode: lines can be taller than rowH, which the fixed-height model
+        // can't represent. For tiny files that render in full we measure the real
+        // height exactly (data.wrapRealH). For larger files we keep the per-line
+        // model but add one screen (minus a row) of scroll-past-end so the final
+        // line can still be brought to the top -- which makes every line, and the
+        // full height of any line up to a viewport tall, reachable.
+        let virtualHeight;
+        if (viewerWrap && data.wrapRealH != null) {
+          virtualHeight = Math.max(vh, data.wrapRealH);
+        } else if (viewerWrap && lineCount * rowH > vh) {
+          virtualHeight = lineCount * rowH + Math.max(0, vh - rowH);
+        } else {
+          virtualHeight = Math.max(vh, lineCount * rowH);
+        }
         const contentHeight = Math.min(virtualHeight, VIEWER_MAX_CONTENT_PX);
         return {
           vh,
@@ -2873,9 +2999,48 @@
       function renderViewer() {
         const data = viewerData;
         if (!data || !viewerWindow || !viewerSpacer) return;
-        const m = viewerMetrics(data);
+        let m = viewerMetrics(data);
+        if (m.lineCount <= 0) {
+          viewerSpacer.style.height = m.contentHeight + "px";
+          return;
+        }
+
+        // Match the line-number gutter width to the file's digit count.
+        const digits = String(Math.max(1, m.lineCount)).length;
+        if (digits !== data._lnDigits) {
+          data._lnDigits = digits;
+          viewerBody.style.setProperty("--v-ln-digits", String(digits));
+        }
+
+        const highlight = data.highlight;
+        const overscan = 8;
+        const windowCap = Math.ceil(m.vh / m.rowH) + overscan * 2;
+
+        // Wrap mode, small enough to render whole: lay out every line so the
+        // browser resolves the true wrapped heights, then scroll natively over
+        // them. This is exact -- no fixed-height model to approximate.
+        if (viewerWrap && m.lineCount <= windowCap) {
+          viewerWindow.innerHTML = buildViewerRows(data, 1, m.lineCount, highlight);
+          viewerWindow.style.top = "0px";
+          const realH = viewerWindow.offsetHeight;
+          data.wrapRealH = realH > m.vh + 0.5 ? realH : null;
+          // Re-measure with the real height so spacer + scrollbar agree.
+          m = viewerMetrics(data);
+          viewerSpacer.style.height = m.contentHeight + "px";
+          let scrollTop = viewerBody.scrollTop;
+          if (scrollTop > m.maxScroll) {
+            scrollTop = m.maxScroll;
+            data.programmaticScroll = true;
+            viewerBody.scrollTop = scrollTop;
+            data.lastScrollTop = viewerBody.scrollTop;
+          }
+          markViewerCurrent(data, 1, m.lineCount);
+          updateViewerScrollbar(m, scrollTop);
+          return;
+        }
+
+        data.wrapRealH = null;
         viewerSpacer.style.height = m.contentHeight + "px";
-        if (m.lineCount <= 0) return;
 
         let scrollTop = viewerBody.scrollTop;
         if (scrollTop > m.maxScroll) scrollTop = m.maxScroll;
@@ -2891,17 +3056,56 @@
         }
         virtualTop = Math.max(0, Math.min(virtualTop, m.maxVirtual));
 
-        const overscan = 8;
-        const windowLines = Math.ceil(m.vh / m.rowH) + overscan * 2;
-        let firstLine = Math.floor(virtualTop / m.rowH) - overscan; // 0-based
+        const topLineIdx = Math.min(
+          m.lineCount - 1,
+          Math.floor(virtualTop / m.rowH)
+        ); // 0-based top line
+        let firstLine;
+        let lastLine;
+        if (viewerWrap) {
+          // Render from the exact top line so its measured height can anchor the
+          // window. Wrapped lines are >= rowH tall, so this count always fills
+          // the viewport (extra rows below are simply clipped).
+          firstLine = topLineIdx;
+          lastLine = firstLine + Math.ceil(m.vh / m.rowH) + overscan;
+        } else {
+          firstLine = topLineIdx - overscan;
+          if (firstLine < 0) firstLine = 0;
+          lastLine = firstLine + Math.ceil(m.vh / m.rowH) + overscan * 2;
+        }
         if (firstLine < 0) firstLine = 0;
-        let lastLine = firstLine + windowLines;
         if (lastLine > m.lineCount - 1) lastLine = m.lineCount - 1;
 
-        const highlight = data.highlight;
+        viewerWindow.innerHTML = buildViewerRows(
+          data,
+          firstLine + 1,
+          lastLine + 1,
+          highlight
+        );
+
+        // Position the window so the top line sits correctly beneath the viewport
+        // top. Extended mode: every line is exactly rowH, so the offset is
+        // analytic. Wrap mode: the top line's height varies, so offset by its
+        // measured height times the fractional scroll into it -- this keeps
+        // scrolling smooth and prevents skipping tall wrapped lines.
+        if (viewerWrap) {
+          const frac = Math.max(0, Math.min(1, virtualTop / m.rowH - topLineIdx));
+          const firstEl = viewerWindow.firstElementChild;
+          const realH = firstEl ? firstEl.offsetHeight : m.rowH;
+          viewerWindow.style.top = scrollTop - frac * realH + "px";
+        } else {
+          viewerWindow.style.top =
+            scrollTop + firstLine * m.rowH - virtualTop + "px";
+        }
+
+        markViewerCurrent(data, firstLine + 1, lastLine + 1);
+        updateViewerScrollbar(m, virtualTop);
+      }
+
+      // Build the row HTML for 1-based lines [firstLn, lastLn] inclusive.
+      function buildViewerRows(data, firstLn, lastLn, highlight) {
         const parts = [];
-        for (let i = firstLine; i <= lastLine; i++) {
-          const ln = i + 1;
+        for (let ln = firstLn; ln <= lastLn; ln++) {
           const cls = ln === data.hitLine ? "v-line v-hit" : "v-line";
           parts.push(
             `<div class="${cls}" data-ln="${ln}">` +
@@ -2911,30 +3115,22 @@
               `</span></div>`
           );
         }
-        // Pin the window to the viewport top, then offset each row by its true
-        // position minus the virtual top so line `firstLine` lands at y = 0.
-        viewerWindow.style.top =
-          scrollTop + firstLine * m.rowH - virtualTop + "px";
-        viewerWindow.innerHTML = parts.join("");
+        return parts.join("");
+      }
 
-        // Re-mark the focused match if its line is on screen (survives scrolling
-        // away and back, since every re-render rebuilds the window).
-        if (viewerIdx >= 0) {
-          const ln = data.matchLines[viewerIdx];
-          if (ln >= firstLine + 1 && ln <= lastLine + 1) {
-            const row = viewerWindow.querySelector(`.v-line[data-ln="${ln}"]`);
-            if (row) {
-              const marks = row.querySelectorAll("mark");
-              const within = viewerIdx - lowerBound(data.matchLines, ln);
-              const mark = marks[Math.min(within, marks.length - 1)];
-              if (mark) mark.classList.add("v-cur");
-            }
-          }
-        }
-
-        // Keep the custom scrollbar's thumb (viewport) and cursor (focused
-        // match) in sync with the freshly computed position.
-        updateViewerScrollbar(m, virtualTop);
+      // Re-mark the focused match if its line is within the rendered range
+      // [minLn, maxLn] (survives scrolling away and back, since every re-render
+      // rebuilds the window).
+      function markViewerCurrent(data, minLn, maxLn) {
+        if (viewerIdx < 0) return;
+        const ln = data.matchLines[viewerIdx];
+        if (ln < minLn || ln > maxLn) return;
+        const row = viewerWindow.querySelector(`.v-line[data-ln="${ln}"]`);
+        if (!row) return;
+        const marks = row.querySelectorAll("mark");
+        const within = viewerIdx - lowerBound(data.matchLines, ln);
+        const mark = marks[Math.min(within, marks.length - 1)];
+        if (mark) mark.classList.add("v-cur");
       }
 
       // Where the viewport top currently sits in the file's full (unscaled)
@@ -3079,15 +3275,49 @@
         renderViewer();
       }
 
-      // Center a 1-based line in the viewport. Positions come from a fixed row
-      // height, so this is exact for any file size: move the scrollbar to the
-      // mapped position and draw the window from the precise virtual offset,
-      // which we pin as the anchor until the user scrolls vertically again.
-      function jumpToViewerLine(ln) {
+      // Place a 1-based line in the viewport, centered by default or pinned to
+      // the top (used when re-anchoring after zoom/wrap changes). Positions come
+      // from a fixed row height, so this is exact for any file size: move the
+      // scrollbar to the mapped position and draw the window from the precise
+      // virtual offset, which we pin as the anchor until the user scrolls again.
+      function jumpToViewerLine(ln, align) {
         const data = viewerData;
         if (!data || !viewerSpacer) return;
+        // Fully-rendered wrap mode uses real (measured) positions, so scroll to
+        // the actual row element instead of the fixed-height model. Render first
+        // so the element and wrapRealH reflect the current font/width.
+        if (viewerWrap) renderViewer();
         const m = viewerMetrics(data);
-        let vt = (ln - 1) * m.rowH + m.rowH / 2 - m.vh / 2;
+        if (viewerWrap && data.wrapRealH != null && viewerWindow) {
+          const row = viewerWindow.querySelector(`.v-line[data-ln="${ln}"]`);
+          if (row) {
+            const lead = align === "top" ? 0 : Math.min(2 * m.rowH, m.vh * 0.3);
+            const scrollTop = Math.max(
+              0,
+              Math.min(row.offsetTop - lead, m.maxScroll)
+            );
+            data.anchorVirtualTop = null;
+            data.programmaticScroll = true;
+            const was = viewerBody.scrollTop;
+            viewerBody.scrollTop = scrollTop;
+            data.lastScrollTop = viewerBody.scrollTop;
+            if (viewerBody.scrollTop === was) data.programmaticScroll = false;
+            renderViewer();
+            return;
+          }
+        }
+
+        let vt;
+        if (align === "top") {
+          vt = (ln - 1) * m.rowH;
+        } else if (viewerWrap) {
+          // Wrapped lines above the target vary in height, so centering by the
+          // fixed-height model can push the target off-screen. Anchor it near
+          // the top with a couple lines of lead, which stays reliably visible.
+          vt = (ln - 1) * m.rowH - 2 * m.rowH;
+        } else {
+          vt = (ln - 1) * m.rowH + m.rowH / 2 - m.vh / 2;
+        }
         vt = Math.max(0, Math.min(vt, m.maxVirtual));
         let scrollTop =
           m.scaled && m.maxVirtual > 0
@@ -3107,9 +3337,93 @@
         renderViewer();
       }
 
+      // The 1-based logical line currently at the viewport top -- used to keep
+      // the view stable across zoom and wrap changes.
+      function currentViewerTopLine() {
+        const data = viewerData;
+        if (!data) return 1;
+        const m = viewerMetrics(data);
+        // Fully-rendered wrap mode has real element positions, so find the first
+        // row whose bottom is still below the viewport top.
+        if (viewerWrap && data.wrapRealH != null && viewerWindow) {
+          const s = viewerBody.scrollTop;
+          const rows = viewerWindow.children;
+          for (let i = 0; i < rows.length; i++) {
+            const r = rows[i];
+            if (r.offsetTop + r.offsetHeight > s + 1) {
+              const ln = Number(r.getAttribute("data-ln"));
+              if (ln) return ln;
+            }
+          }
+          return m.lineCount;
+        }
+        return Math.floor(viewerVirtualTop(m) / m.rowH) + 1;
+      }
+
+      // Re-anchor after a layout change: keep the focused match centered if there
+      // is one, otherwise hold the line that was at the viewport top.
+      function reanchorViewer(topLine) {
+        const data = viewerData;
+        if (!data || !viewerSpacer) return;
+        data.anchorVirtualTop = null;
+        if (viewerIdx >= 0 && viewerIdx < data.matchLines.length) {
+          jumpToViewerLine(data.matchLines[viewerIdx], "center");
+        } else {
+          jumpToViewerLine(topLine, "top");
+        }
+      }
+
+      function updateViewerZoomLabel() {
+        const pct = Math.round((viewerFontPx / VIEWER_FONT_DEFAULT) * 100);
+        viewerZoomReset.textContent = pct + "%";
+        viewerZoomIn.disabled = viewerFontPx >= VIEWER_FONT_MAX - 0.01;
+        viewerZoomOut.disabled = viewerFontPx <= VIEWER_FONT_MIN + 0.01;
+      }
+
+      // Zoom = change the viewer font size, which drives the measured row height.
+      // Re-measure, update the geometry, and re-anchor so the view stays put.
+      function setViewerFont(px) {
+        px = Math.max(VIEWER_FONT_MIN, Math.min(VIEWER_FONT_MAX, px));
+        px = Math.round(px * 10) / 10;
+        const data = viewerData;
+        // Capture the top line before the font (and thus layout) changes.
+        const topLine = data && viewerSpacer ? currentViewerTopLine() : 1;
+        viewerFontPx = px;
+        viewerBody.style.fontSize = px + "px";
+        if (data && viewerSpacer) {
+          const rowH = measureViewerRowHeight();
+          viewerBody.style.setProperty("--vrh", rowH + "px");
+          data.rowH = rowH;
+          reanchorViewer(topLine);
+          scheduleViewerRender();
+          drawViewerMatchMap();
+        }
+        updateViewerZoomLabel();
+      }
+
+      // Toggle fit-to-width wrapping. Row height is unchanged (one visual row is
+      // still one line tall), so no re-measure is needed -- just relayout and
+      // re-anchor. renderViewer handles the variable wrapped heights.
+      function setViewerWrap(on) {
+        const data = viewerData;
+        // Capture the top line before the layout mode changes.
+        const topLine = data && viewerSpacer ? currentViewerTopLine() : 1;
+        viewerWrap = !!on;
+        viewerWrapBtn.textContent = viewerWrap ? "Wrap: On" : "Wrap: Off";
+        viewerWrapBtn.setAttribute("aria-pressed", viewerWrap ? "true" : "false");
+        viewerBody.classList.toggle("wrap", viewerWrap);
+        if (data && viewerSpacer) {
+          viewerBody.scrollLeft = 0;
+          reanchorViewer(topLine);
+          scheduleViewerRender();
+        }
+      }
+
       // Bring the focused match's mark into horizontal view (long, unwrapped
       // lines can push it off-screen); the vertical position is already set.
+      // In wrap mode there is no horizontal overflow, so this is a no-op.
       function scrollViewerToCurrentMark() {
+        if (viewerWrap) return;
         if (!viewerWindow) return;
         const mark = viewerWindow.querySelector("mark.v-cur");
         if (!mark) return;
@@ -3132,10 +3446,12 @@
         const probe = document.createElement("div");
         probe.className = "v-line";
         // Force the natural line height (1.5, matching .viewer-body) so the
-        // measurement never depends on a --vrh left over from a previous open.
+        // measurement never depends on a --vrh left over from a previous open,
+        // and neutralize the wrap-mode min-height/white-space so the probe is
+        // always a single unwrapped row at the current font size.
         probe.style.cssText =
           "position:absolute;visibility:hidden;left:-9999px;top:0;" +
-          "height:auto;line-height:1.5;";
+          "height:auto;min-height:0;line-height:1.5;white-space:pre;";
         probe.innerHTML =
           '<span class="v-ln">1</span><span class="v-tx">Xg</span>';
         viewerBody.appendChild(probe);
@@ -3193,8 +3509,11 @@
         viewerIdx = -1;
 
         // Build the virtualized DOM: a tall spacer that owns the scrollbar plus a
-        // small window holding only the rows near the viewport. Measure the row
-        // height first, before --vrh pins it.
+        // small window holding only the rows near the viewport. Apply the
+        // persisted zoom + wrap preferences first so the measured row height
+        // reflects the current font.
+        viewerBody.style.fontSize = viewerFontPx + "px";
+        viewerBody.classList.toggle("wrap", viewerWrap);
         const rowH = measureViewerRowHeight();
         viewerBody.style.setProperty("--vrh", rowH + "px");
         viewerBody.scrollTop = 0;
@@ -3220,6 +3539,11 @@
         viewerScrollThumb.hidden = true;
         viewerScrollCursor.hidden = true;
         drawViewerMatchMap();
+
+        // Sync the zoom/wrap controls with the persisted state.
+        updateViewerZoomLabel();
+        viewerWrapBtn.textContent = viewerWrap ? "Wrap: On" : "Wrap: Off";
+        viewerWrapBtn.setAttribute("aria-pressed", viewerWrap ? "true" : "false");
 
         updateViewerInfo();
         viewerBody.focus();
