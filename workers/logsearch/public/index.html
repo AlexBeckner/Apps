@@ -581,13 +581,14 @@
         align-items: center;
         border-bottom: 1px solid #222;
         display: flex;
+        flex-wrap: wrap;
         gap: 12px;
         justify-content: space-between;
         padding: 10px 12px;
       }
 
       .viewer-title {
-        flex: 1 1 auto;
+        flex: 1 1 200px;
         font-size: 13px;
         min-width: 0;
         overflow-wrap: anywhere;
@@ -595,6 +596,34 @@
 
       .viewer-title .base {
         font-weight: 700;
+      }
+
+      /* In-file find: retargets the viewer's highlight + match navigation to a
+         query typed here; clearing it restores the original search matches. */
+      .viewer-find {
+        align-items: center;
+        display: inline-flex;
+        flex: 0 1 260px;
+        gap: 8px;
+        min-width: 140px;
+      }
+
+      .viewer-find input {
+        flex: 1 1 auto;
+        min-width: 0;
+        padding: 5px 8px;
+      }
+
+      .viewer-find-count {
+        color: #aaa;
+        flex-shrink: 0;
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+
+      .viewer-find-count.empty {
+        color: #ff6b6b;
       }
 
       .viewer-nav {
@@ -959,6 +988,10 @@
       <div class="viewer-box" role="dialog" aria-modal="true" aria-label="File viewer">
         <div class="viewer-head">
           <div class="viewer-title" id="viewer-title"></div>
+          <div class="viewer-find">
+            <input id="viewer-find" type="text" placeholder="Find in file..." autocomplete="off" spellcheck="false" aria-label="Find in file">
+            <span class="viewer-find-count" id="viewer-find-count" aria-live="polite"></span>
+          </div>
           <div class="viewer-nav">
             <span class="minfo" id="viewer-minfo"></span>
             <button id="viewer-first" type="button" title="First match (Home)">&#8676; First</button>
@@ -1059,6 +1092,8 @@
       const viewerScrollMap = el("viewer-scroll-map");
       const viewerScrollThumb = el("viewer-scroll-thumb");
       const viewerScrollCursor = el("viewer-scroll-cursor");
+      const viewerFindInput = el("viewer-find");
+      const viewerFindCount = el("viewer-find-count");
 
       // Archive expansion (.zip/.tar/.tar.gz/.tgz/.gz) runs client-side via
       // archives.js. It needs the native DecompressionStream API; if that is
@@ -1099,6 +1134,7 @@
       let viewerRaf = 0; // rAF handle coalescing scroll-driven re-renders
       let viewerFontPx = VIEWER_FONT_DEFAULT; // current zoom (persists across files)
       let viewerWrap = false; // false = extended (default), true = fit-to-width
+      let viewerFindTimer = 0; // debounce handle for the in-file find box
 
       // The drop box shows a single status line; empty text collapses it and
       // brings back the plus sign.
@@ -1372,12 +1408,48 @@
       );
       viewerWrapBtn.addEventListener("click", () => setViewerWrap(!viewerWrap));
       viewerClose.addEventListener("click", closeViewer);
+
+      viewerFindInput.addEventListener("input", scheduleFind);
+      viewerFindInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          // Commit a still-pending edit first (landing on its nearest match);
+          // otherwise step to the next/previous match.
+          if (viewerFindTimer) {
+            clearTimeout(viewerFindTimer);
+            viewerFindTimer = 0;
+            applyFind();
+          } else {
+            viewerFindStep(event.shiftKey ? -1 : 1);
+          }
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          // First Escape clears the query (back to the search matches); a second
+          // Escape on the now-empty box closes the viewer.
+          if (viewerFindInput.value) {
+            clearFind();
+          } else {
+            closeViewer();
+          }
+        }
+      });
       // Click on the backdrop (not the dialog box) closes the viewer.
       viewer.addEventListener("mousedown", (event) => {
         if (event.target === viewer) closeViewer();
       });
       document.addEventListener("keydown", (event) => {
         if (viewer.hidden) return;
+        // Cmd/Ctrl+F focuses the in-file find box (overriding the browser's own
+        // find, which can't see the virtualized rows anyway).
+        if ((event.metaKey || event.ctrlKey) && (event.key === "f" || event.key === "F")) {
+          event.preventDefault();
+          viewerFindInput.focus();
+          viewerFindInput.select();
+          return;
+        }
+        // While typing in the find box, let it own its keys (text editing,
+        // Enter/Esc) rather than firing the viewer's single-key shortcuts.
+        if (event.target === viewerFindInput) return;
         if (event.key === "Escape") {
           closeViewer();
         } else if (event.key === "ArrowDown" || event.key === "ArrowRight") {
@@ -2866,10 +2938,18 @@
       }
 
       function newViewerData(hitLine, highlight) {
+        // matchLines is the "active" set the nav/minimap/highlight all key off.
+        // It starts as the base (original-search) set and is the same array as
+        // baseMatchLines until an in-file find retargets it (see applyFind).
+        const baseMatchLines = [];
         return {
           blocks: [], // { first, count, text, starts } for O(1) line lookup
           pending: [], // lines waiting to be sealed into the next block
-          matchLines: [], // line number of every match, in order
+          matchLines: baseMatchLines, // line number of every active match, in order
+          baseMatchLines, // the original search's matches, retained across finds
+          baseHighlight: highlight, // original search matcher (restored on clear)
+          findActive: false, // an in-file find query is currently applied
+          findScannedBlocks: 0, // sealed blocks already scanned into a find
           lineCount: 0,
           hitLine,
           highlight,
@@ -3495,6 +3575,148 @@
         }
       }
 
+      // ---- in-file find ------------------------------------------------------
+      //
+      // The viewer already highlights and steps through data.matchLines with the
+      // data.highlight regex. An in-file find reuses all of that: while a query
+      // is active it points data.highlight at the query and rebuilds matchLines
+      // from the loaded blocks, so the counter, First/Prev/Next/Last, arrows, and
+      // the minimap all just work. Clearing the query restores the original
+      // search's highlight and matches (kept in baseHighlight / baseMatchLines).
+
+      // Literal, case-insensitive substring find (what "find in file" means to
+      // most people); escaping means the query can never be an invalid regex.
+      function buildFindRegex(query) {
+        if (!query) return null;
+        try {
+          return new RegExp(escapeRegex(query), "gi");
+        } catch (error) {
+          return null;
+        }
+      }
+
+      // Append matches for newly sealed blocks [startBlock, end) to the active
+      // matchLines using the current (find) highlight. Sealed blocks never
+      // change, so scanning forward from findScannedBlocks is safe and cheap.
+      function rescanFindFrom(data, startBlock) {
+        const re = data.highlight;
+        if (!re) return;
+        const nb = data.blocks.length;
+        for (let bi = startBlock; bi < nb; bi++) {
+          const block = data.blocks[bi];
+          for (let i = 0; i < block.count; i++) {
+            const hits = countLineMatches(viewerBlockLine(block, i), re);
+            if (hits) {
+              const ln = block.first + i;
+              for (let k = 0; k < hits; k++) data.matchLines.push(ln);
+            }
+          }
+        }
+        data.findScannedBlocks = nb;
+      }
+
+      // Focus the first find match at/after the current viewport top so the jump
+      // feels local rather than yanking to the top of the file. A no-op once the
+      // user has a valid match focused, so it can also "catch" the first match
+      // as it streams in without stealing later manual navigation.
+      function focusInitialFind() {
+        const data = viewerData;
+        if (!data || !data.findActive) return;
+        const total = data.matchLines.length;
+        if (!total) {
+          viewerIdx = -1;
+          updateViewerInfo();
+          return;
+        }
+        if (viewerIdx >= 0 && viewerIdx < total) return;
+        let idx = lowerBound(data.matchLines, currentViewerTopLine());
+        if (idx >= total) idx = total - 1;
+        setViewerMatch(idx, false);
+      }
+
+      // Apply (or clear) the find query in the box: retarget the viewer to it, or
+      // fall back to the original search matches when the box is empty.
+      function applyFind() {
+        const data = viewerData;
+        if (!data) return;
+        const re = buildFindRegex(viewerFindInput.value);
+        if (re) {
+          data.findActive = true;
+          data.highlight = re;
+          data.matchLines = [];
+          data.findScannedBlocks = 0;
+          rescanFindFrom(data, 0);
+          data.jumped = true; // don't let the open-line auto-jump fight the find
+          viewerIdx = -1; // re-pick a focused match for the new query
+          scheduleViewerRender();
+          focusInitialFind();
+        } else {
+          data.findActive = false;
+          data.highlight = data.baseHighlight;
+          data.matchLines = data.baseMatchLines;
+          data.findScannedBlocks = 0;
+          // Re-seat the focused index onto the base matches nearest the current
+          // view so the counter and Prev/Next stay sensible -- without scrolling
+          // (the view stays where the find left it).
+          const total = data.matchLines.length;
+          if (!total) {
+            viewerIdx = -1;
+          } else {
+            let idx = lowerBound(data.matchLines, currentViewerTopLine());
+            if (idx >= total) idx = total - 1;
+            viewerIdx = idx;
+          }
+          scheduleViewerRender();
+          updateViewerInfo();
+        }
+        drawViewerMatchMap();
+        updateViewerFindStatus();
+      }
+
+      function scheduleFind() {
+        clearTimeout(viewerFindTimer);
+        viewerFindTimer = window.setTimeout(() => {
+          viewerFindTimer = 0;
+          applyFind();
+        }, 130);
+      }
+
+      function clearFind() {
+        clearTimeout(viewerFindTimer);
+        viewerFindTimer = 0;
+        viewerFindInput.value = "";
+        applyFind();
+      }
+
+      // Enter / Shift+Enter cycle through find matches (wrapping at the ends),
+      // matching how a browser's find box behaves.
+      function viewerFindStep(dir) {
+        const total = viewerMatchCount();
+        if (!total) return;
+        let idx = viewerIdx + dir;
+        if (idx < 0) idx = total - 1;
+        else if (idx >= total) idx = 0;
+        setViewerMatch(idx);
+      }
+
+      // The compact "n/total" (or "No results") badge beside the find box.
+      function updateViewerFindStatus() {
+        const data = viewerData;
+        if (!data || !data.findActive) {
+          viewerFindCount.textContent = "";
+          viewerFindCount.classList.remove("empty");
+          return;
+        }
+        const total = viewerMatchCount();
+        if (!total) {
+          viewerFindCount.textContent = "No results";
+          viewerFindCount.classList.add("empty");
+        } else {
+          viewerFindCount.textContent = `${viewerIdx + 1}/${total.toLocaleString()}`;
+          viewerFindCount.classList.remove("empty");
+        }
+      }
+
       // highlight defaults to the last search's matcher (results-row clicks);
       // browse-mode clicks pass null so the file opens with no search overlay.
       async function openViewer(path, lineNo, highlight) {
@@ -3507,6 +3729,11 @@
         document.body.style.overflow = "hidden";
         viewerTitle.innerHTML = formatPath(path);
         viewerIdx = -1;
+        // Each file opens in its natural state (original-search highlights or
+        // browse); any leftover find query from the previous file is cleared.
+        viewerFindInput.value = "";
+        viewerFindCount.textContent = "";
+        viewerFindCount.classList.remove("empty");
 
         // Build the virtualized DOM: a tall spacer that owns the scrollbar plus a
         // small window holding only the rows near the viewport. Apply the
@@ -3571,6 +3798,13 @@
               if (now - data.lastUi > 100) {
                 data.lastUi = now;
                 if (!data.jumped) tryViewerAutoJump(data);
+                // A find applied mid-load only saw the blocks sealed so far;
+                // fold in any newly sealed ones (and catch the first match if it
+                // only just streamed in) before we repaint.
+                if (data.findActive) {
+                  rescanFindFrom(data, data.findScannedBlocks);
+                  focusInitialFind();
+                }
                 scheduleViewerRender();
                 drawViewerMatchMap();
                 updateViewerInfo();
@@ -3578,8 +3812,10 @@
             },
             onLine(line, ln) {
               data.lineCount = ln;
-              const hits = countLineMatches(line, data.highlight);
-              for (let i = 0; i < hits; i++) data.matchLines.push(ln);
+              // Always track the original-search matches so an in-file find can
+              // be cleared back to them; the find uses its own scan (rescanFindFrom).
+              const hits = countLineMatches(line, data.baseHighlight);
+              for (let i = 0; i < hits; i++) data.baseMatchLines.push(ln);
               data.pending.push(line);
               if (data.pending.length === VIEWER_BLOCK_LINES) {
                 sealViewerBlock(data);
@@ -3601,6 +3837,10 @@
 
         sealViewerBlock(data);
         data.loaded = true;
+        if (data.findActive) {
+          rescanFindFrom(data, data.findScannedBlocks);
+          focusInitialFind();
+        }
         if (!data.lineCount) {
           viewerMessage("(empty file)");
           viewerSpacer = null;
@@ -3618,6 +3858,7 @@
 
       function updateViewerInfo() {
         const data = viewerData;
+        updateViewerFindStatus();
         const total = viewerMatchCount();
         // Browse mode (opened without a search): no matches to step through, so
         // show the line count and keep the match-nav buttons disabled.
@@ -3654,6 +3895,13 @@
         viewerToken++; // stops any in-flight streamed load
         viewer.hidden = true;
         viewerData = null;
+        viewerFindInput.value = "";
+        viewerFindCount.textContent = "";
+        viewerFindCount.classList.remove("empty");
+        if (viewerFindTimer) {
+          clearTimeout(viewerFindTimer);
+          viewerFindTimer = 0;
+        }
         if (viewerRaf) {
           cancelAnimationFrame(viewerRaf);
           viewerRaf = 0;
