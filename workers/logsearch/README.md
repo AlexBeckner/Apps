@@ -36,14 +36,18 @@ The Worker itself only does two things:
   "Download CSV" export of all matches.
 - A per-file heatmap (click a file to filter results) showing each file's match
   count alongside its share of all matches (e.g. `1,234 (12%)`).
-- Click any result row to open a file viewer that re-reads the file (from disk
-  or straight out of its archive), highlights every matching term, jumps to
-  the clicked line, and steps between matches with the arrow keys, First/Last
-  buttons, or Home/End (Esc to close). The viewer streams the file in and
-  renders only the lines near the viewport (virtualized blocks), so even
-  multi-hundred-MB files open quickly, scroll smoothly, and stay fully
-  navigable -- the match counter and First/Prev/Next/Last always cover the
-  whole file.
+- Click a selected file before searching to open it immediately. Text files use
+  the streaming viewer, images are fit to the available space with zoom
+  controls and trackpad pinch-to-zoom, and videos use the browser's native
+  playback controls. Media stays local via temporary object URLs and is never
+  uploaded.
+- Click any text result row to re-read the file (from disk or straight out of
+  its archive), highlight every matching term, jump to the clicked line, and
+  step between matches with the arrow keys, First/Last buttons, or Home/End
+  (Esc to close). The viewer streams the file in and renders only the lines
+  near the viewport (virtualized blocks), so even multi-hundred-MB files open
+  quickly, scroll smoothly, and stay fully navigable -- the match counter and
+  First/Prev/Next/Last always cover the whole file.
 - Displayed paths hide the shared root folder (or archive) so only the nested
   folders and file names are shown.
 

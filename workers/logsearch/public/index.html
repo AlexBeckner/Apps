@@ -711,6 +711,79 @@
         outline: none;
       }
 
+      /* Image and video files reuse the full-page viewer, but replace the text
+         viewport with a centered, contain-sized native media element. */
+      .viewer.media-mode .viewer-text-only {
+        display: none;
+      }
+
+      .viewer.video-mode .viewer-zoom {
+        display: none;
+      }
+
+      .viewer.media-mode .viewer-body {
+        align-items: center;
+        background: #080808;
+        display: flex;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+          sans-serif;
+        justify-content: center;
+        padding: 20px;
+      }
+
+      /* A zoomed image gets a max-content stage that grows with it, while the
+         minimum viewport-sized stage keeps smaller images centered. */
+      .viewer.image-mode .viewer-body {
+        display: block;
+        overflow: auto;
+        padding: 0;
+        scrollbar-width: auto;
+      }
+
+      .viewer.image-mode .viewer-body::-webkit-scrollbar {
+        height: 12px;
+        width: 12px;
+      }
+
+      .viewer-image-stage {
+        align-items: center;
+        display: flex;
+        height: max-content;
+        justify-content: center;
+        min-height: 100%;
+        min-width: 100%;
+        padding: 20px;
+        width: max-content;
+      }
+
+      .viewer-media {
+        display: block;
+        max-height: 100%;
+        max-width: 100%;
+        object-fit: contain;
+      }
+
+      .viewer.image-mode img.viewer-media {
+        flex: none;
+        max-height: none;
+        max-width: none;
+      }
+
+      video.viewer-media {
+        background: #000;
+      }
+
+      .viewer-media-message {
+        color: #aaa;
+        max-width: 560px;
+        text-align: center;
+      }
+
+      .viewer-media-message.error {
+        color: #ff8a8a;
+      }
+
       /* Custom scrollbar / match minimap. The canvas paints a tick for every
          match at its position in the file; the thumb is the highlighted section
          showing where the viewport currently sits; the cursor marks the focused
@@ -988,24 +1061,24 @@
       <div class="viewer-box" role="dialog" aria-modal="true" aria-label="File viewer">
         <div class="viewer-head">
           <div class="viewer-title" id="viewer-title"></div>
-          <div class="viewer-find">
+          <div class="viewer-find viewer-text-only">
             <input id="viewer-find" type="text" placeholder="Find in file..." autocomplete="off" spellcheck="false" aria-label="Find in file">
             <span class="viewer-find-count" id="viewer-find-count" aria-live="polite"></span>
           </div>
           <div class="viewer-nav">
             <span class="minfo" id="viewer-minfo"></span>
-            <button id="viewer-first" type="button" title="First match (Home)">&#8676; First</button>
-            <button id="viewer-prev" type="button" title="Previous match (Up / Left arrow)">&uarr; Prev</button>
-            <button id="viewer-next" type="button" title="Next match (Down / Right arrow)">&darr; Next</button>
-            <button id="viewer-last" type="button" title="Last match (End)">Last &#8677;</button>
-            <span class="vsep" aria-hidden="true"></span>
+            <button class="viewer-text-only" id="viewer-first" type="button" title="First match (Home)">&#8676; First</button>
+            <button class="viewer-text-only" id="viewer-prev" type="button" title="Previous match (Up / Left arrow)">&uarr; Prev</button>
+            <button class="viewer-text-only" id="viewer-next" type="button" title="Next match (Down / Right arrow)">&darr; Next</button>
+            <button class="viewer-text-only" id="viewer-last" type="button" title="Last match (End)">Last &#8677;</button>
+            <span class="vsep viewer-text-only" aria-hidden="true"></span>
             <span class="viewer-zoom">
               <button id="viewer-zoom-out" type="button" title="Zoom out (-)">&#8722;</button>
               <button id="viewer-zoom-reset" type="button" title="Reset zoom (0)">100%</button>
               <button id="viewer-zoom-in" type="button" title="Zoom in (+)">+</button>
             </span>
-            <button id="viewer-wrap" type="button" title="Toggle line wrap (W)" aria-pressed="false">Wrap: Off</button>
-            <span class="vsep" aria-hidden="true"></span>
+            <button class="viewer-text-only" id="viewer-wrap" type="button" title="Toggle line wrap (W)" aria-pressed="false">Wrap: Off</button>
+            <span class="vsep viewer-text-only" aria-hidden="true"></span>
             <button id="viewer-close" type="button" title="Close (Esc)">Close</button>
           </div>
         </div>
@@ -1047,6 +1120,40 @@
       const VIEWER_FONT_MIN = 6.5;
       const VIEWER_FONT_MAX = 44;
       const VIEWER_ZOOM_STEP = 1.15;
+      const VIEWER_IMAGE_ZOOM_MIN = 0.1;
+      const VIEWER_IMAGE_ZOOM_MAX = 8;
+      const VIEWER_IMAGE_ZOOM_STEP = 1.25;
+      // Local File objects usually carry a MIME type, but directory pickers and
+      // archive entries are inconsistent. These fallbacks cover media formats
+      // browsers commonly know how to display or play; unsupported codecs still
+      // fail cleanly inside the viewer.
+      const MEDIA_MIME_BY_EXTENSION = Object.freeze({
+        avif: "image/avif",
+        bmp: "image/bmp",
+        gif: "image/gif",
+        heic: "image/heic",
+        heif: "image/heif",
+        ico: "image/x-icon",
+        jfif: "image/jpeg",
+        jpeg: "image/jpeg",
+        jpg: "image/jpeg",
+        jxl: "image/jxl",
+        png: "image/png",
+        svg: "image/svg+xml",
+        tif: "image/tiff",
+        tiff: "image/tiff",
+        webp: "image/webp",
+        "3gp": "video/3gpp",
+        avi: "video/x-msvideo",
+        m4v: "video/x-m4v",
+        mkv: "video/x-matroska",
+        mov: "video/quicktime",
+        mp4: "video/mp4",
+        mpeg: "video/mpeg",
+        mpg: "video/mpeg",
+        ogv: "video/ogg",
+        webm: "video/webm",
+      });
 
       const el = (id) => document.getElementById(id);
       const dropzone = el("dropzone");
@@ -1135,6 +1242,13 @@
       let viewerFontPx = VIEWER_FONT_DEFAULT; // current zoom (persists across files)
       let viewerWrap = false; // false = extended (default), true = fit-to-width
       let viewerFindTimer = 0; // debounce handle for the in-file find box
+      let viewerMode = "text"; // text, image, or video
+      let viewerObjectUrl = null; // active local-media URL, revoked on close/open
+      let viewerImageElement = null;
+      let viewerImageBaseWidth = 0; // fit-to-viewport size at 100%
+      let viewerImageBaseHeight = 0;
+      let viewerImageZoom = 1;
+      let viewerGestureStartZoom = 1; // Safari's cumulative pinch scale anchor
 
       // The drop box shows a single status line; empty text collapses it and
       // brings back the plus sign.
@@ -1397,15 +1511,9 @@
       viewerLast.addEventListener("click", () =>
         setViewerMatch(viewerMatchCount() - 1)
       );
-      viewerZoomOut.addEventListener("click", () =>
-        setViewerFont(viewerFontPx / VIEWER_ZOOM_STEP)
-      );
-      viewerZoomIn.addEventListener("click", () =>
-        setViewerFont(viewerFontPx * VIEWER_ZOOM_STEP)
-      );
-      viewerZoomReset.addEventListener("click", () =>
-        setViewerFont(VIEWER_FONT_DEFAULT)
-      );
+      viewerZoomOut.addEventListener("click", () => changeViewerZoom(-1));
+      viewerZoomIn.addEventListener("click", () => changeViewerZoom(1));
+      viewerZoomReset.addEventListener("click", resetViewerZoom);
       viewerWrapBtn.addEventListener("click", () => setViewerWrap(!viewerWrap));
       viewerClose.addEventListener("click", closeViewer);
 
@@ -1439,6 +1547,29 @@
       });
       document.addEventListener("keydown", (event) => {
         if (viewer.hidden) return;
+        // Videos own their playback/navigation keys. Images also support the
+        // same +, -, and 0 zoom shortcuts as text files.
+        if (viewerMode !== "text") {
+          if (event.key === "Escape") {
+            closeViewer();
+          } else if (
+            viewerMode === "image" &&
+            (event.key === "+" || event.key === "=")
+          ) {
+            event.preventDefault();
+            changeViewerZoom(1);
+          } else if (
+            viewerMode === "image" &&
+            (event.key === "-" || event.key === "_")
+          ) {
+            event.preventDefault();
+            changeViewerZoom(-1);
+          } else if (viewerMode === "image" && event.key === "0") {
+            event.preventDefault();
+            resetViewerZoom();
+          }
+          return;
+        }
         // Cmd/Ctrl+F focuses the in-file find box (overriding the browser's own
         // find, which can't see the virtualized rows anyway).
         if ((event.metaKey || event.ctrlKey) && (event.key === "f" || event.key === "F")) {
@@ -1466,13 +1597,13 @@
           setViewerMatch(viewerMatchCount() - 1);
         } else if (event.key === "+" || event.key === "=") {
           event.preventDefault();
-          setViewerFont(viewerFontPx * VIEWER_ZOOM_STEP);
+          changeViewerZoom(1);
         } else if (event.key === "-" || event.key === "_") {
           event.preventDefault();
-          setViewerFont(viewerFontPx / VIEWER_ZOOM_STEP);
+          changeViewerZoom(-1);
         } else if (event.key === "0") {
           event.preventDefault();
-          setViewerFont(VIEWER_FONT_DEFAULT);
+          resetViewerZoom();
         } else if (event.key === "w" || event.key === "W") {
           event.preventDefault();
           setViewerWrap(!viewerWrap);
@@ -1480,10 +1611,25 @@
       });
 
       viewerBody.addEventListener("scroll", onViewerScroll);
+      // Chromium exposes a trackpad pinch as a cancelable Ctrl+wheel event;
+      // Safari exposes gesture events. Handle both so the image zooms in place
+      // instead of the browser scaling the whole page.
+      viewer.addEventListener("wheel", onViewerImageWheel, { passive: false });
+      viewer.addEventListener("gesturestart", onViewerImageGestureStart, {
+        passive: false,
+      });
+      viewer.addEventListener("gesturechange", onViewerImageGestureChange, {
+        passive: false,
+      });
+      viewer.addEventListener("gestureend", onViewerImageGestureEnd, {
+        passive: false,
+      });
       window.addEventListener("resize", () => {
         if (viewerData) {
           drawViewerMatchMap();
           scheduleViewerRender();
+        } else if (viewerMode === "image" && viewerImageElement) {
+          fitViewerImage(false);
         }
       });
 
@@ -2756,6 +2902,87 @@
         return null;
       }
 
+      function mediaInfoForSource(path, source) {
+        const declared =
+          source.kind === "file" && source.file && source.file.type
+            ? source.file.type.split(";")[0].trim().toLowerCase()
+            : "";
+        let mime =
+          declared.startsWith("image/") || declared.startsWith("video/")
+            ? declared
+            : "";
+        if (!mime) {
+          const name = path.split("/").pop() || "";
+          const dot = name.lastIndexOf(".");
+          const extension = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
+          mime = MEDIA_MIME_BY_EXTENSION[extension] || "";
+        }
+        if (mime.startsWith("image/")) return { kind: "image", mime };
+        if (mime.startsWith("video/")) return { kind: "video", mime };
+        return null;
+      }
+
+      function clearViewerObjectUrl() {
+        if (!viewerObjectUrl) return;
+        URL.revokeObjectURL(viewerObjectUrl);
+        viewerObjectUrl = null;
+      }
+
+      // Plain files can be handed to the browser without copying. An archived
+      // media entry must be assembled into a Blob first because native <img> and
+      // <video> elements need a random-access URL rather than a chunk callback.
+      async function mediaBlobForSource(source, media, token, onProgress) {
+        if (source.kind === "file") {
+          const declared = (source.file.type || "").toLowerCase();
+          return declared === media.mime
+            ? source.file
+            : source.file.slice(0, source.file.size, media.mime);
+        }
+
+        const chunks = [];
+        let found = false;
+        let failed = false;
+        let read = 0;
+        let total = 0;
+        const cancelled = () => token !== viewerToken;
+        const sink = {
+          open(name, sizeHint) {
+            if (found || name !== source.innerPath) return null;
+            found = true;
+            total = Number(sizeHint) || 0;
+            return {};
+          },
+          chunk(_handle, bytes) {
+            if (cancelled()) return false;
+            // Archive readers may reuse their input buffer, so retain a copy.
+            chunks.push(bytes.slice());
+            read += bytes.length;
+            if (onProgress) onProgress(read, total);
+            return true;
+          },
+          close() {},
+          skip() {
+            failed = true;
+          },
+          error() {
+            failed = true;
+          },
+        };
+        try {
+          await LogArchives.extractEntry(
+            source.file,
+            source.archivePath,
+            source.innerPath,
+            sink,
+            { isCancelled: cancelled }
+          );
+        } catch (error) {
+          failed = true;
+        }
+        if (cancelled() || !found || failed) return null;
+        return new Blob(chunks, { type: media.mime });
+      }
+
       // Split streamed text into lines with the same semantics as
       // String.split("\n"): every "\n" ends a line, a trailing newline yields a
       // final empty line, and a lone "\r" before the newline is stripped.
@@ -2921,6 +3148,139 @@
         text.textContent = message;
         line.appendChild(text);
         viewerBody.appendChild(line);
+      }
+
+      function mediaViewerMessage(message, isError) {
+        viewerBody.innerHTML = "";
+        const text = document.createElement("p");
+        text.className = "viewer-media-message" + (isError ? " error" : "");
+        text.textContent = message;
+        if (viewerMode === "image") {
+          const stage = document.createElement("div");
+          stage.className = "viewer-image-stage";
+          stage.appendChild(text);
+          viewerBody.appendChild(stage);
+        } else {
+          viewerBody.appendChild(text);
+        }
+      }
+
+      async function openMediaViewer(path, source, media, token) {
+        viewerMode = media.kind;
+        viewer.classList.add("media-mode");
+        viewer.classList.toggle("image-mode", media.kind === "image");
+        viewer.classList.toggle("video-mode", media.kind === "video");
+        viewerData = null;
+        viewerIdx = -1;
+        viewerSpacer = null;
+        viewerWindow = null;
+        viewerImageElement = null;
+        viewerImageBaseWidth = 0;
+        viewerImageBaseHeight = 0;
+        viewerImageZoom = 1;
+        viewerBody.classList.remove("wrap");
+        viewerBody.style.fontSize = "";
+        viewerBody.style.removeProperty("--vrh");
+        viewerBody.scrollTop = 0;
+        viewerBody.scrollLeft = 0;
+        viewerScroll.hidden = true;
+        viewerScrollThumb.hidden = true;
+        viewerScrollCursor.hidden = true;
+        updateViewerZoomLabel();
+        mediaViewerMessage(
+          source.kind === "archive"
+            ? `Extracting ${media.kind} from archive...`
+            : `Opening ${media.kind}...`
+        );
+        viewerMinfo.textContent =
+          source.kind === "file" ? formatBytes(source.file.size) : "Loading...";
+        viewerBody.focus();
+
+        let lastProgressUi = 0;
+        const blob = await mediaBlobForSource(
+          source,
+          media,
+          token,
+          (read, total) => {
+            const now = performance.now();
+            if (now - lastProgressUi < 100) return;
+            lastProgressUi = now;
+            viewerMinfo.textContent = total
+              ? `Loading ${Math.min(100, Math.round((read / total) * 100))}%...`
+              : `Loading ${formatBytes(read)}...`;
+          }
+        );
+        if (token !== viewerToken) return;
+        if (!blob) {
+          viewerMinfo.textContent = "";
+          mediaViewerMessage(`Could not read this ${media.kind}.`, true);
+          return;
+        }
+
+        const url = URL.createObjectURL(blob);
+        if (token !== viewerToken) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        viewerObjectUrl = url;
+
+        const preview = document.createElement(
+          media.kind === "image" ? "img" : "video"
+        );
+        preview.className = "viewer-media";
+        if (media.kind === "image") {
+          viewerImageElement = preview;
+          preview.draggable = false;
+          preview.alt = path.split("/").pop() || "Image preview";
+          preview.addEventListener("load", () => {
+            if (token !== viewerToken) return;
+            fitViewerImage(true);
+            updateViewerZoomLabel();
+            viewerMinfo.textContent =
+              `${preview.naturalWidth.toLocaleString()} × ` +
+              `${preview.naturalHeight.toLocaleString()} · ${formatBytes(blob.size)}`;
+          });
+        } else {
+          preview.controls = true;
+          preview.preload = "metadata";
+          preview.playsInline = true;
+          preview.addEventListener("loadedmetadata", () => {
+            if (token !== viewerToken) return;
+            const details = [];
+            if (preview.videoWidth && preview.videoHeight) {
+              details.push(
+                `${preview.videoWidth.toLocaleString()} × ` +
+                  `${preview.videoHeight.toLocaleString()}`
+              );
+            }
+            if (Number.isFinite(preview.duration)) {
+              details.push(formatMediaDuration(preview.duration));
+            }
+            details.push(formatBytes(blob.size));
+            viewerMinfo.textContent = details.join(" · ");
+          });
+        }
+        preview.addEventListener("error", () => {
+          if (token !== viewerToken) return;
+          clearViewerObjectUrl();
+          viewerImageElement = null;
+          updateViewerZoomLabel();
+          viewerMinfo.textContent = media.mime;
+          mediaViewerMessage(
+            `This browser cannot display this ${media.kind} format or codec.`,
+            true
+          );
+        });
+        viewerBody.innerHTML = "";
+        if (media.kind === "image") {
+          const stage = document.createElement("div");
+          stage.className = "viewer-image-stage";
+          stage.appendChild(preview);
+          viewerBody.appendChild(stage);
+        } else {
+          viewerBody.appendChild(preview);
+        }
+        preview.src = url;
       }
 
       // The viewer is virtualized so huge files open instantly and scroll
@@ -3454,10 +3814,152 @@
       }
 
       function updateViewerZoomLabel() {
+        if (viewerMode === "image") {
+          const ready = !!(
+            viewerImageElement && viewerImageElement.naturalWidth
+          );
+          viewerZoomReset.textContent = Math.round(viewerImageZoom * 100) + "%";
+          viewerZoomIn.disabled =
+            !ready || viewerImageZoom >= VIEWER_IMAGE_ZOOM_MAX - 0.001;
+          viewerZoomOut.disabled =
+            !ready || viewerImageZoom <= VIEWER_IMAGE_ZOOM_MIN + 0.001;
+          return;
+        }
         const pct = Math.round((viewerFontPx / VIEWER_FONT_DEFAULT) * 100);
         viewerZoomReset.textContent = pct + "%";
         viewerZoomIn.disabled = viewerFontPx >= VIEWER_FONT_MAX - 0.01;
         viewerZoomOut.disabled = viewerFontPx <= VIEWER_FONT_MIN + 0.01;
+      }
+
+      function applyViewerImageSize(forceCenter, anchor) {
+        const image = viewerImageElement;
+        if (!image || !image.naturalWidth) return;
+        const body = viewerBody;
+        const oldWidth = body.scrollWidth || body.clientWidth || 1;
+        const oldHeight = body.scrollHeight || body.clientHeight || 1;
+        const rect = body.getBoundingClientRect();
+        const viewportX = anchor
+          ? Math.max(0, Math.min(anchor.clientX - rect.left, body.clientWidth))
+          : body.clientWidth / 2;
+        const viewportY = anchor
+          ? Math.max(0, Math.min(anchor.clientY - rect.top, body.clientHeight))
+          : body.clientHeight / 2;
+        const contentX = forceCenter
+          ? 0.5
+          : (body.scrollLeft + viewportX) / oldWidth;
+        const contentY = forceCenter
+          ? 0.5
+          : (body.scrollTop + viewportY) / oldHeight;
+
+        image.style.width = viewerImageBaseWidth * viewerImageZoom + "px";
+        image.style.height = viewerImageBaseHeight * viewerImageZoom + "px";
+
+        // Reading scrollWidth/Height flushes the new dimensions before restoring
+        // the same relative point beneath the cursor (or viewport center).
+        const newWidth = body.scrollWidth;
+        const newHeight = body.scrollHeight;
+        body.scrollLeft = contentX * newWidth - viewportX;
+        body.scrollTop = contentY * newHeight - viewportY;
+      }
+
+      function fitViewerImage(forceCenter) {
+        const image = viewerImageElement;
+        if (!image || !image.naturalWidth) return;
+        // Keep this inset in sync with .viewer-image-stage's 20px padding.
+        const availableWidth = Math.max(1, viewerBody.clientWidth - 40);
+        const availableHeight = Math.max(1, viewerBody.clientHeight - 40);
+        const fit = Math.min(
+          1,
+          availableWidth / image.naturalWidth,
+          availableHeight / image.naturalHeight
+        );
+        viewerImageBaseWidth = image.naturalWidth * fit;
+        viewerImageBaseHeight = image.naturalHeight * fit;
+        applyViewerImageSize(forceCenter);
+      }
+
+      function setViewerImageZoom(zoom, anchor) {
+        zoom = Math.max(
+          VIEWER_IMAGE_ZOOM_MIN,
+          Math.min(VIEWER_IMAGE_ZOOM_MAX, zoom)
+        );
+        viewerImageZoom = Math.round(zoom * 1000) / 1000;
+        applyViewerImageSize(false, anchor);
+        updateViewerZoomLabel();
+      }
+
+      function viewerImageAnchor(event) {
+        return {
+          clientX: Number.isFinite(event.clientX)
+            ? event.clientX
+            : viewerBody.getBoundingClientRect().left + viewerBody.clientWidth / 2,
+          clientY: Number.isFinite(event.clientY)
+            ? event.clientY
+            : viewerBody.getBoundingClientRect().top + viewerBody.clientHeight / 2,
+        };
+      }
+
+      function onViewerImageWheel(event) {
+        if (viewerMode !== "image" || !event.ctrlKey) return;
+        event.preventDefault();
+        if (!viewerImageElement || !viewerImageElement.naturalWidth) return;
+        let delta = event.deltaY;
+        if (event.deltaMode === 1) delta *= 16;
+        else if (event.deltaMode === 2) delta *= viewerBody.clientHeight;
+        // Clamp one event so a mouse-wheel notch cannot jump several zoom levels;
+        // trackpad pinches arrive as many small events and remain smooth.
+        const factor = Math.max(
+          0.8,
+          Math.min(1.25, Math.exp(-delta * 0.01))
+        );
+        setViewerImageZoom(
+          viewerImageZoom * factor,
+          viewerImageAnchor(event)
+        );
+      }
+
+      function onViewerImageGestureStart(event) {
+        if (viewerMode !== "image") return;
+        event.preventDefault();
+        viewerGestureStartZoom = viewerImageZoom;
+      }
+
+      function onViewerImageGestureChange(event) {
+        if (viewerMode !== "image") return;
+        event.preventDefault();
+        const scale = Number.isFinite(event.scale) ? event.scale : 1;
+        setViewerImageZoom(
+          viewerGestureStartZoom * scale,
+          viewerImageAnchor(event)
+        );
+      }
+
+      function onViewerImageGestureEnd(event) {
+        if (viewerMode === "image") event.preventDefault();
+      }
+
+      function changeViewerZoom(direction) {
+        if (viewerMode === "image") {
+          setViewerImageZoom(
+            viewerImageZoom *
+              (direction > 0
+                ? VIEWER_IMAGE_ZOOM_STEP
+                : 1 / VIEWER_IMAGE_ZOOM_STEP)
+          );
+        } else if (viewerMode === "text") {
+          setViewerFont(
+            viewerFontPx *
+              (direction > 0 ? VIEWER_ZOOM_STEP : 1 / VIEWER_ZOOM_STEP)
+          );
+        }
+      }
+
+      function resetViewerZoom() {
+        if (viewerMode === "image") {
+          setViewerImageZoom(1);
+        } else if (viewerMode === "text") {
+          setViewerFont(VIEWER_FONT_DEFAULT);
+        }
       }
 
       // Zoom = change the viewer font size, which drives the measured row height.
@@ -3725,6 +4227,10 @@
             lastRun && lastRun.matchers ? lastRun.matchers.highlight : null;
         }
         const token = ++viewerToken;
+        clearViewerObjectUrl();
+        viewerMode = "text";
+        viewer.classList.remove("media-mode", "image-mode", "video-mode");
+        viewerImageElement = null;
         viewer.hidden = false;
         document.body.style.overflow = "hidden";
         viewerTitle.innerHTML = formatPath(path);
@@ -3783,6 +4289,12 @@
               "archive and search again."
           );
           updateViewerInfo();
+          return;
+        }
+
+        const media = mediaInfoForSource(path, source);
+        if (media) {
+          await openMediaViewer(path, source, media, token);
           return;
         }
 
@@ -3893,7 +4405,11 @@
 
       function closeViewer() {
         viewerToken++; // stops any in-flight streamed load
+        clearViewerObjectUrl();
         viewer.hidden = true;
+        viewerMode = "text";
+        viewer.classList.remove("media-mode", "image-mode", "video-mode");
+        viewerImageElement = null;
         viewerData = null;
         viewerFindInput.value = "";
         viewerFindCount.textContent = "";
@@ -3915,6 +4431,7 @@
         viewerScroll.hidden = true;
         viewerScrollThumb.hidden = true;
         viewerScrollCursor.hidden = true;
+        viewerMinfo.textContent = "";
         drawViewerMatchMap();
         document.body.style.overflow = "";
       }
@@ -3947,6 +4464,16 @@
           unit++;
         }
         return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`;
+      }
+
+      function formatMediaDuration(seconds) {
+        const total = Math.max(0, Math.round(seconds));
+        const hours = Math.floor(total / 3600);
+        const minutes = Math.floor((total % 3600) / 60);
+        const secs = total % 60;
+        return hours
+          ? `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+          : `${minutes}:${String(secs).padStart(2, "0")}`;
       }
 
       function debounce(callback, waitMs) {
