@@ -813,26 +813,31 @@
         inset: 0;
         position: absolute;
         width: 100%;
+        z-index: 1;
       }
 
       .viewer-scroll-thumb {
-        background: rgba(255, 255, 255, 0.14);
-        border: 1px solid rgba(255, 255, 255, 0.24);
+        background: rgba(21, 32, 46, 0.28);
+        border: 1px solid rgba(255, 255, 255, 0.95);
         border-radius: 3px;
+        box-shadow:
+          0 0 0 1px rgba(0, 0, 0, 0.95),
+          0 0 4px rgba(0, 0, 0, 0.9);
         left: 1px;
         pointer-events: none;
         position: absolute;
         right: 1px;
         top: 0;
         will-change: transform;
+        z-index: 2;
       }
 
       .viewer-scroll:hover .viewer-scroll-thumb {
-        background: rgba(255, 255, 255, 0.22);
+        background: rgba(38, 58, 82, 0.38);
       }
 
       .viewer-scroll.dragging .viewer-scroll-thumb {
-        background: rgba(255, 255, 255, 0.3);
+        background: rgba(52, 79, 110, 0.48);
       }
 
       .viewer-scroll-cursor {
@@ -845,6 +850,7 @@
         right: 0;
         top: 0;
         will-change: transform;
+        z-index: 3;
       }
 
       .viewer-scroll-thumb[hidden],
