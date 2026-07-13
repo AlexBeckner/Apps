@@ -48,8 +48,21 @@ The Worker itself only does two things:
   near the viewport (virtualized blocks), so even multi-hundred-MB files open
   quickly, scroll smoothly, and stay fully navigable -- the match counter and
   First/Prev/Next/Last always cover the whole file.
+- Timestamped lines in the text viewer are clickable and can be added directly
+  to the vehicle route's event timeline. Manually added events include a remove
+  action in the timeline.
+- Detects timestamped UTM coordinates in localization logs and renders a
+  north-up vehicle route with drag/pinch navigation, playback, GPS/odometry
+  filtering, DBW engagement highlighting, a timestamped event list, annotation
+  markers, and GeoJSON export. Plain files are analyzed automatically; archive
+  analysis is opt-in so large bundles are not decompressed unexpectedly.
 - Displayed paths hide the shared root folder (or archive) so only the nested
   folders and file names are shown.
+
+The route view uses OpenStreetMap tiles by default when the logs provide enough
+information to determine the UTM zone. Those tile requests reveal the viewed
+geographic area, but log files and route geometry are never uploaded. The
+viewer can be switched to the fully offline local coordinate plot at any time.
 
 ### Archive handling
 

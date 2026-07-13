@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="icon" type="image/png" href="favicon.png">
+    <link rel="stylesheet" href="route.css">
     <title>Log Search</title>
     <style>
       * {
@@ -603,6 +604,20 @@
         font-weight: 700;
       }
 
+      .viewer-event-status {
+        color: #7fb2ff;
+        flex: 0 1 auto;
+        font-size: 12px;
+      }
+
+      .viewer-event-status:empty {
+        display: none;
+      }
+
+      .viewer-event-status.error {
+        color: #ff6b6b;
+      }
+
       /* In-file find: retargets the viewer's highlight + match navigation to a
          query typed here; clearing it restores the original search matches. */
       .viewer-find {
@@ -899,6 +914,22 @@
         background: #16202e;
       }
 
+      .v-line.v-eventable {
+        cursor: pointer;
+      }
+
+      .v-line.v-eventable .v-ln {
+        color: #7fb2ff;
+      }
+
+      .v-line.v-event-added {
+        background: #132019;
+      }
+
+      .v-line.v-event-added .v-ln {
+        color: #52d273;
+      }
+
       /* Line-number gutter is sized to the file's digit count (set per file), so
          short files don't waste a wide fixed column. */
       .v-ln {
@@ -1051,6 +1082,79 @@
         </div>
       </div>
 
+      <section class="route-panel" id="route-panel" aria-label="Vehicle route trace" hidden>
+        <div class="route-head">
+          <div class="route-heading">
+            <h2>Vehicle route</h2>
+            <p class="route-status" id="route-status" aria-live="polite"></p>
+          </div>
+          <div class="route-actions">
+            <label class="toggle">
+              <input id="route-include-propagated" type="checkbox" disabled>
+              Include odometry points
+            </label>
+            <button id="route-archives" type="button" hidden>Analyze archives</button>
+            <button id="route-download" type="button" disabled>Download GeoJSON</button>
+            <button id="route-collapse" type="button">Hide</button>
+          </div>
+        </div>
+        <div class="route-body" id="route-body">
+          <p class="route-empty" id="route-empty">Reading localization data...</p>
+          <div id="route-visual" hidden>
+            <div class="route-stats" id="route-stats"></div>
+            <div class="route-workspace" id="route-workspace">
+              <section class="route-events" id="route-events" hidden>
+                <h3>Timeline events</h3>
+                <div class="route-event-list" id="route-event-list"></div>
+              </section>
+              <div class="route-map-column">
+                <div class="route-map-frame" id="route-map-frame">
+                  <div class="route-tiles" id="route-tiles" hidden></div>
+                  <svg
+                    class="route-svg"
+                    id="route-svg"
+                    viewBox="0 0 1000 560"
+                    preserveAspectRatio="none"
+                    role="img"
+                    aria-label="Interactive north-up trace of the route taken by the vehicle"
+                  ></svg>
+                  <div class="route-map-buttons">
+                    <button id="route-street" type="button" disabled>Street map</button>
+                    <button class="route-map-zoom" id="route-zoom-out" type="button" title="Zoom out" hidden>&minus;</button>
+                    <button class="route-map-zoom" id="route-zoom-in" type="button" title="Zoom in" hidden>+</button>
+                    <button id="route-fit" type="button">Fit route</button>
+                  </div>
+                  <div class="route-tooltip" id="route-tooltip" hidden></div>
+                  <div class="route-map-hint">Drag to move &middot; Pinch or scroll to zoom</div>
+                  <div class="route-map-attribution" id="route-attribution" hidden>
+                    &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a>
+                  </div>
+                </div>
+                <div class="route-under-map">
+                  <div class="route-timeline">
+                    <button id="route-play" type="button" disabled>Play</button>
+                    <input id="route-range" type="range" min="0" max="0" value="0" disabled aria-label="Route playback position">
+                    <select id="route-speed" aria-label="Playback speed">
+                      <option value="10">10&times;</option>
+                      <option value="30" selected>30&times;</option>
+                      <option value="60">60&times;</option>
+                    </select>
+                    <span class="route-time" id="route-time"></span>
+                  </div>
+                  <div class="route-legend" aria-label="Route legend">
+                    <span class="route-legend-item"><span class="route-swatch"></span><span id="route-legend-label">Route</span></span>
+                    <span class="route-legend-item" id="route-engaged-legend" hidden><span class="route-swatch engaged"></span>Engaged</span>
+                    <span class="route-legend-item"><span class="route-swatch start"></span>Start</span>
+                    <span class="route-legend-item"><span class="route-swatch end"></span>End</span>
+                    <span class="route-legend-item"><span class="route-swatch event"></span>Event</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <div class="chips" id="term-filter" aria-label="Filter by term"></div>
 
       <div class="results-head" id="results-head" style="display: none;">
@@ -1076,6 +1180,7 @@
       <div class="viewer-box" role="dialog" aria-modal="true" aria-label="File viewer">
         <div class="viewer-head">
           <div class="viewer-title" id="viewer-title"></div>
+          <span class="viewer-event-status" id="viewer-event-status" aria-live="polite"></span>
           <div class="viewer-find viewer-text-only">
             <input id="viewer-find" type="text" placeholder="Find in file..." autocomplete="off" spellcheck="false" aria-label="Find in file">
             <span class="viewer-find-count" id="viewer-find-count" aria-live="polite"></span>
@@ -1109,6 +1214,8 @@
     </div>
 
     <script src="archives.js"></script>
+    <script src="route-core.js"></script>
+    <script src="route.js"></script>
     <script>
       // Retain matches until their text is estimated to use this much memory,
       // rather than a fixed count -- so a run with a few hundred thousand short
@@ -1199,6 +1306,7 @@
       const pagerBottom = el("pager-bottom");
       const viewer = el("viewer");
       const viewerTitle = el("viewer-title");
+      const viewerEventStatus = el("viewer-event-status");
       const viewerMinfo = el("viewer-minfo");
       const viewerFirst = el("viewer-first");
       const viewerPrev = el("viewer-prev");
@@ -1257,6 +1365,7 @@
       let viewerFontPx = VIEWER_FONT_DEFAULT; // current zoom (persists across files)
       let viewerWrap = false; // false = extended (default), true = fit-to-width
       let viewerFindTimer = 0; // debounce handle for the in-file find box
+      let viewerEventStatusTimer = 0; // clears add-to-timeline feedback
       let viewerMode = "text"; // text, image, or video
       let viewerObjectUrl = null; // active local-media URL, revoked on close/open
       let viewerImageElement = null;
@@ -1274,6 +1383,7 @@
 
       function setSelection(files) {
         selected = files;
+        if (window.LogRoute) window.LogRoute.setSelection(files);
         if (!files.length) {
           setDropInfo("");
           searchBtn.disabled = true;
@@ -3387,12 +3497,13 @@
         return viewerData ? viewerData.matchLines.length : 0;
       }
 
-      function newViewerData(hitLine, highlight) {
+      function newViewerData(path, hitLine, highlight) {
         // matchLines is the "active" set the nav/minimap/highlight all key off.
         // It starts as the base (original-search) set and is the same array as
         // baseMatchLines until an in-file find retargets it (see applyFind).
         const baseMatchLines = [];
         return {
+          path,
           blocks: [], // { first, count, text, starts } for O(1) line lookup
           pending: [], // lines waiting to be sealed into the next block
           matchLines: baseMatchLines, // line number of every active match, in order
@@ -3413,6 +3524,7 @@
           lastScrollTop: 0, // last vertical offset, to spot horizontal scrolls
           _lnDigits: 0, // last applied line-number gutter digit count
           wrapRealH: null, // exact wrapped height when the whole file is rendered
+          addedEventLines: new Set(), // viewer lines manually added to the route
         };
       }
 
@@ -3636,12 +3748,37 @@
       function buildViewerRows(data, firstLn, lastLn, highlight) {
         const parts = [];
         for (let ln = firstLn; ln <= lastLn; ln++) {
-          const cls = ln === data.hitLine ? "v-line v-hit" : "v-line";
+          const text = getLineText(data, ln);
+          const timestamp =
+            window.LogRouteCore &&
+            typeof window.LogRouteCore.timestampFromLine === "function"
+              ? window.LogRouteCore.timestampFromLine(text)
+              : Number.NaN;
+          const eventable = Number.isFinite(timestamp);
+          const alreadyAdded =
+            data.addedEventLines.has(ln) ||
+            !!(
+              window.LogRoute &&
+              typeof window.LogRoute.hasEventFromLog === "function" &&
+              window.LogRoute.hasEventFromLog(data.path, ln)
+            );
+          if (alreadyAdded) data.addedEventLines.add(ln);
+          const classes = ["v-line"];
+          if (ln === data.hitLine) classes.push("v-hit");
+          if (eventable) classes.push("v-eventable");
+          if (alreadyAdded) classes.push("v-event-added");
+          const eventAttributes = eventable
+            ? ` data-event-timestamp="${timestamp}" title="${
+                alreadyAdded
+                  ? "Already in the event timeline"
+                  : "Click to add this line to the event timeline"
+              }"`
+            : "";
           parts.push(
-            `<div class="${cls}" data-ln="${ln}">` +
+            `<div class="${classes.join(" ")}" data-ln="${ln}"${eventAttributes}>` +
               `<span class="v-ln">${ln}</span>` +
               `<span class="v-tx">` +
-              highlightText(getLineText(data, ln), highlight) +
+              highlightText(text, highlight) +
               `</span></div>`
           );
         }
@@ -3670,13 +3807,47 @@
       function onViewerMatchClick(event) {
         const data = viewerData;
         if (!data || viewerMode !== "text") return;
-        const mark = event.target.closest("mark");
-        if (!mark) return;
+        const row = event.target.closest(".v-line[data-ln]");
+        if (!row) return;
         const selection = window.getSelection && window.getSelection();
         if (selection && !selection.isCollapsed) return;
-        const row = mark.closest(".v-line[data-ln]");
-        if (!row) return;
         const ln = Number(row.dataset.ln);
+
+        const mark = event.target.closest("mark");
+        if (!mark) {
+          const timestamp = Number(row.dataset.eventTimestamp);
+          if (!Number.isFinite(timestamp)) return;
+          if (
+            !window.LogRoute ||
+            typeof window.LogRoute.addEventFromLog !== "function"
+          ) {
+            showViewerEventStatus(
+              "The event timeline is not available for this selection.",
+              true
+            );
+            return;
+          }
+          const result = window.LogRoute.addEventFromLog({
+            timestamp,
+            content: getLineText(data, ln),
+            path: data.path,
+            lineNo: ln,
+          });
+          if (result && result.ok) {
+            data.addedEventLines.add(ln);
+            row.classList.add("v-event-added");
+            row.title = "Already in the event timeline";
+            showViewerEventStatus(result.message || "Added to event timeline.");
+          } else {
+            showViewerEventStatus(
+              (result && result.message) ||
+                "Could not add this line to the event timeline.",
+              true
+            );
+          }
+          return;
+        }
+
         const marks = row.querySelectorAll("mark");
         const within = Array.prototype.indexOf.call(marks, mark);
         const index = lowerBound(data.matchLines, ln) + within;
@@ -3689,6 +3860,19 @@
         mark.classList.add("v-cur");
         updateViewerScrollbar();
         updateViewerInfo();
+      }
+
+      function showViewerEventStatus(message, isError = false) {
+        clearTimeout(viewerEventStatusTimer);
+        viewerEventStatusTimer = 0;
+        viewerEventStatus.textContent = message || "";
+        viewerEventStatus.classList.toggle("error", !!isError);
+        if (!message) return;
+        viewerEventStatusTimer = window.setTimeout(() => {
+          viewerEventStatusTimer = 0;
+          viewerEventStatus.textContent = "";
+          viewerEventStatus.classList.remove("error");
+        }, 3200);
       }
 
       // Where the viewport top currently sits in the file's full (unscaled)
@@ -4353,6 +4537,7 @@
         document.body.style.overflow = "hidden";
         viewerTitle.innerHTML = formatPath(path);
         viewerIdx = -1;
+        showViewerEventStatus("");
         // Each file opens in its natural state (original-search highlights or
         // browse); any leftover find query from the previous file is cleared.
         viewerFindInput.value = "";
@@ -4378,7 +4563,7 @@
           '<div class="v-line"><span class="v-tx">Loading...</span></div>';
         viewerBody.append(viewerSpacer, viewerWindow);
 
-        const data = newViewerData(lineNo, highlight);
+        const data = newViewerData(path, lineNo, highlight);
         data.rowH = rowH;
         viewerData = data;
 
@@ -4523,6 +4708,7 @@
 
       function closeViewer() {
         viewerToken++; // stops any in-flight streamed load
+        showViewerEventStatus("");
         clearViewerObjectUrl();
         viewer.hidden = true;
         viewerMode = "text";
