@@ -135,6 +135,10 @@ test("interpolates engaged route segments from DBW state transitions", () => {
   );
 
   const trace = buildTrace(result, false);
+  assert.deepEqual(
+    trace.points.map((point) => point.heading),
+    [90, 90, 90]
+  );
   assert.equal(trace.engagementSegments.length, 1);
   assert.equal(trace.engagementSegments[0].length, 3);
   assert.equal(trace.engagementSegments[0][0].timestamp, 1783962765);

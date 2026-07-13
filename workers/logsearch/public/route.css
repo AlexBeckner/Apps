@@ -230,8 +230,10 @@
 
 .route-current-marker {
   fill: #fff;
+  pointer-events: none;
   stroke: #1f6feb;
-  stroke-width: 4;
+  stroke-linejoin: round;
+  stroke-width: 3;
 }
 
 .route-map-buttons {
@@ -244,6 +246,14 @@
 .route-map-buttons button {
   background: rgba(20, 20, 20, 0.9);
   padding: 5px 10px;
+}
+
+.route-map-buttons select {
+  background: rgba(20, 20, 20, 0.9);
+  border: 1px solid #666;
+  color: #eee;
+  font: inherit;
+  padding: 5px 8px;
 }
 
 .route-map-buttons .route-map-zoom {
@@ -265,6 +275,10 @@
 }
 
 .route-map-attribution[hidden] {
+  display: none;
+}
+
+.route-map-attribution [hidden] {
   display: none;
 }
 

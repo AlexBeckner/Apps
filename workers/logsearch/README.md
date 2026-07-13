@@ -60,9 +60,11 @@ The Worker itself only does two things:
   folders and file names are shown.
 
 The route view uses OpenStreetMap tiles by default when the logs provide enough
-information to determine the UTM zone. Those tile requests reveal the viewed
-geographic area, but log files and route geometry are never uploaded. The
-viewer can be switched to the fully offline local coordinate plot at any time.
+information to determine the UTM zone, with USGS The National Map imagery as an
+optional satellite layer. Tile requests reveal the viewed geographic area to
+the selected provider, but log files and route geometry are never uploaded.
+The viewer can be switched to the fully offline local coordinate plot at any
+time.
 
 ### Archive handling
 

@@ -8,6 +8,18 @@
   const VIEW_WIDTH = 1000;
   const VIEW_HEIGHT = 560;
   const TILE_SIZE = 256;
+  const TILE_SOURCES = {
+    osm: {
+      maxZoom: 19,
+      url: (zoom, x, y) =>
+        `https://tile.openstreetmap.org/${zoom}/${x}/${y}.png`,
+    },
+    satellite: {
+      maxZoom: 16,
+      url: (zoom, x, y) =>
+        `https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/${zoom}/${y}/${x}`,
+    },
+  };
 
   const byId = (id) => document.getElementById(id);
   const panel = byId("route-panel");
@@ -28,11 +40,13 @@
   const tileLayer = byId("route-tiles");
   const svg = byId("route-svg");
   const tooltip = byId("route-tooltip");
-  const streetButton = byId("route-street");
+  const mapStyleSelect = byId("route-map-style");
   const zoomOutButton = byId("route-zoom-out");
   const zoomInButton = byId("route-zoom-in");
   const fitButton = byId("route-fit");
   const attribution = byId("route-attribution");
+  const osmAttribution = byId("route-attribution-osm");
+  const satelliteAttribution = byId("route-attribution-satellite");
   const playButton = byId("route-play");
   const rangeInput = byId("route-range");
   const speedInput = byId("route-speed");
@@ -60,6 +74,7 @@
     playLastReal: 0,
     playSimulatedTime: 0,
     streetMode: false,
+    tileStyle: "osm",
     mapChoiceMade: false,
     streetZoom: null,
     streetCenter: null,
@@ -137,6 +152,7 @@
     state.includePropagated = false;
     state.currentIndex = -1;
     state.streetMode = false;
+    state.tileStyle = "osm";
     state.mapChoiceMade = false;
     state.streetZoom = null;
     state.streetCenter = null;
@@ -169,8 +185,8 @@
     archiveButton.disabled = false;
     archiveButton.textContent = "Analyze archives";
     downloadButton.disabled = true;
-    streetButton.disabled = true;
-    streetButton.textContent = "Street map";
+    mapStyleSelect.disabled = true;
+    mapStyleSelect.value = "osm";
     zoomOutButton.hidden = true;
     zoomInButton.hidden = true;
     rangeInput.min = "0";
@@ -461,12 +477,17 @@
 
     propagatedInput.disabled = !counts.propagated;
     downloadButton.disabled = !state.result.zone;
-    streetButton.disabled = !state.result.zone;
+    mapStyleSelect.disabled = !state.result.zone;
     if (state.result.zone && !state.mapChoiceMade) {
       state.streetMode = true;
+      state.tileStyle = "osm";
+      mapStyleSelect.value = "osm";
+    } else if (!state.result.zone) {
+      state.streetMode = false;
+      mapStyleSelect.value = "local";
     }
-    streetButton.title = state.result.zone
-      ? "Switch between OpenStreetMap and the offline coordinate plot"
+    mapStyleSelect.title = state.result.zone
+      ? "Choose OpenStreetMap, satellite imagery, or the offline coordinate plot"
       : "A latitude/longitude anchor is required to identify the UTM zone";
 
     emptyEl.hidden = true;
@@ -805,15 +826,17 @@
     if (canUseStreet) {
       const street = streetProjection();
       project = street.project;
-      drawTiles(street);
-      streetButton.textContent = "Local plot";
+      drawTiles(street, state.tileStyle);
+      mapStyleSelect.value = state.tileStyle;
       zoomOutButton.hidden = false;
       zoomInButton.hidden = false;
       tileLayer.hidden = false;
       attribution.hidden = false;
+      osmAttribution.hidden = state.tileStyle !== "osm";
+      satelliteAttribution.hidden = state.tileStyle !== "satellite";
     } else {
       state.streetMode = false;
-      streetButton.textContent = "Street map";
+      mapStyleSelect.value = "local";
       zoomOutButton.hidden = false;
       zoomInButton.hidden = false;
       tileLayer.replaceChildren();
@@ -907,11 +930,10 @@
         r: 7,
       })
     );
-    state.currentMarker = svgElement("circle", {
+    state.currentMarker = svgElement("path", {
       class: "route-current-marker",
-      cx: first.x,
-      cy: first.y,
-      r: 7,
+      d: "M 0 -13 L 10 10 L 0 6 L -10 10 Z",
+      transform: currentMarkerTransform(state.trace.points[0], first),
     });
     svg.appendChild(state.currentMarker);
     drawNorthArrow();
@@ -1111,9 +1133,13 @@
     };
   }
 
-  function drawTiles(street) {
+  function drawTiles(street, style) {
+    const source = TILE_SOURCES[style] || TILE_SOURCES.osm;
     const displayZoom = street.zoom;
-    const tileZoom = Math.max(0, Math.min(19, Math.floor(displayZoom)));
+    const tileZoom = Math.max(
+      0,
+      Math.min(source.maxZoom, Math.floor(displayZoom))
+    );
     const displayTileSize = TILE_SIZE * 2 ** (displayZoom - tileZoom);
     const count = 2 ** tileZoom;
     const minTileX = Math.floor(street.topLeft.x / displayTileSize);
@@ -1137,7 +1163,7 @@
     for (let tileY = minTileY; tileY <= maxTileY; tileY++) {
       for (let tileX = minTileX; tileX <= maxTileX; tileX++) {
         const wrappedX = ((tileX % count) + count) % count;
-        const key = `${tileZoom}/${tileX}/${tileY}`;
+        const key = `${style}/${tileZoom}/${tileX}/${tileY}`;
         needed.add(key);
         let image = existing.get(key);
         if (!image) {
@@ -1148,7 +1174,7 @@
           image.draggable = false;
           image.referrerPolicy = "origin";
           image.dataset.tileKey = key;
-          image.src = `https://tile.openstreetmap.org/${tileZoom}/${wrappedX}/${tileY}.png`;
+          image.src = source.url(tileZoom, wrappedX, tileY);
           tileLayer.appendChild(image);
         }
         image.style.left = `${
@@ -1200,6 +1226,13 @@
     return data.trim();
   }
 
+  function currentMarkerTransform(point, position) {
+    const heading = Number.isFinite(point.heading) ? point.heading : 0;
+    return `translate(${position.x.toFixed(2)} ${position.y.toFixed(
+      2
+    )}) rotate(${heading.toFixed(1)})`;
+  }
+
   function diamondPoints(x, y, radius) {
     return `${x},${y - radius} ${x + radius},${y} ${x},${
       y + radius
@@ -1238,8 +1271,10 @@
     const point = state.trace.points[state.currentIndex];
     if (state.currentMarker && point) {
       const position = state.project(point);
-      state.currentMarker.setAttribute("cx", position.x);
-      state.currentMarker.setAttribute("cy", position.y);
+      state.currentMarker.setAttribute(
+        "transform",
+        currentMarkerTransform(point, position)
+      );
     }
   }
 
@@ -1311,17 +1346,22 @@
     playButton.textContent = "Play";
   }
 
-  function toggleStreetMap() {
+  function changeMapStyle() {
     state.mapChoiceMade = true;
-    if (state.streetMode) {
+    const style = mapStyleSelect.value;
+    if (style === "local") {
       state.streetMode = false;
-      streetButton.textContent = "Street map";
       renderMap();
       return;
     }
-    if (!state.result || !state.result.zone) return;
+    if (!state.result || !state.result.zone) {
+      state.streetMode = false;
+      mapStyleSelect.value = "local";
+      renderMap();
+      return;
+    }
     state.streetMode = true;
-    streetButton.textContent = "Local plot";
+    state.tileStyle = style === "satellite" ? "satellite" : "osm";
     zoomOutButton.hidden = false;
     zoomInButton.hidden = false;
     renderMap();
@@ -1824,7 +1864,7 @@
     setCurrentIndex(Number(rangeInput.value));
   });
   playButton.addEventListener("click", togglePlayback);
-  streetButton.addEventListener("click", toggleStreetMap);
+  mapStyleSelect.addEventListener("change", changeMapStyle);
   zoomOutButton.addEventListener("click", () => zoomMap(-1));
   zoomInButton.addEventListener("click", () => zoomMap(1));
   fitButton.addEventListener("click", fitMap);

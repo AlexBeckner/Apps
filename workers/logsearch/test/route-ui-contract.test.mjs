@@ -37,6 +37,29 @@ test("route dependencies load before the main inline application", async () => {
   assert.ok(route < inline);
 });
 
+test("map layer control defaults to OSM and offers satellite imagery", async () => {
+  const [html, routeScript, css] = await Promise.all([
+    readFile(new URL("public/index.html", root), "utf8"),
+    readFile(new URL("public/route.js", root), "utf8"),
+    readFile(new URL("public/route.css", root), "utf8"),
+  ]);
+  const control = html.match(
+    /<select id="route-map-style"[\s\S]*?<\/select>/
+  )?.[0];
+
+  assert.ok(control);
+  assert.match(control, /<option value="osm" selected>Street \(OSM\)<\/option>/);
+  assert.match(control, /<option value="satellite">Satellite<\/option>/);
+  assert.match(control, /<option value="local">Local plot<\/option>/);
+  assert.match(routeScript, /USGSImageryOnly\/MapServer\/tile/);
+  assert.match(
+    routeScript,
+    /mapStyleSelect\.addEventListener\("change", changeMapStyle\)/
+  );
+  assert.match(html, /USDA, USGS The National Map/);
+  assert.match(css, /\.route-map-buttons select\s*\{/);
+});
+
 test("route workspace places events before an interactive map", async () => {
   const [html, routeScript, css] = await Promise.all([
     readFile(new URL("public/index.html", root), "utf8"),
@@ -62,10 +85,15 @@ test("route workspace places events before an interactive map", async () => {
   assert.match(routeScript, /setHoveredEvent\(index, true\)/);
   assert.match(routeScript, /showEventTooltip\(eventIndex, event\)/);
   assert.match(routeScript, /class: "route-engaged-path"/);
+  assert.match(
+    routeScript,
+    /state\.currentMarker = svgElement\("path",[\s\S]*currentMarkerTransform/
+  );
   assert.match(html, /id="route-engaged-legend" hidden/);
   assert.match(css, /\.route-workspace\s*\{[^}]*grid-template-columns:/s);
   assert.match(css, /\.route-map-frame\s*\{[^}]*touch-action:\s*none/s);
   assert.match(css, /\.route-engaged-path\s*\{[^}]*stroke:\s*#52d273/s);
+  assert.match(css, /\.route-current-marker\s*\{[^}]*fill:\s*#fff/s);
   assert.match(css, /\.route-event-button\.is-active/);
   assert.match(css, /\.route-event-button\.is-hovered/);
 });

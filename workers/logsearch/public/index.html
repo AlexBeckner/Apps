@@ -1119,7 +1119,11 @@
                     aria-label="Interactive north-up trace of the route taken by the vehicle"
                   ></svg>
                   <div class="route-map-buttons">
-                    <button id="route-street" type="button" disabled>Street map</button>
+                    <select id="route-map-style" aria-label="Map style" disabled>
+                      <option value="osm" selected>Street (OSM)</option>
+                      <option value="satellite">Satellite</option>
+                      <option value="local">Local plot</option>
+                    </select>
                     <button class="route-map-zoom" id="route-zoom-out" type="button" title="Zoom out" hidden>&minus;</button>
                     <button class="route-map-zoom" id="route-zoom-in" type="button" title="Zoom in" hidden>+</button>
                     <button id="route-fit" type="button">Fit route</button>
@@ -1127,7 +1131,8 @@
                   <div class="route-tooltip" id="route-tooltip" hidden></div>
                   <div class="route-map-hint">Drag to move &middot; Pinch or scroll to zoom</div>
                   <div class="route-map-attribution" id="route-attribution" hidden>
-                    &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a>
+                    <span id="route-attribution-osm">&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a></span>
+                    <span id="route-attribution-satellite" hidden>Imagery: <a href="https://www.usgs.gov/programs/national-geospatial-program/national-map" target="_blank" rel="noopener noreferrer">USDA, USGS The National Map</a></span>
                   </div>
                 </div>
                 <div class="route-under-map">

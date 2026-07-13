@@ -486,6 +486,7 @@
       }
       points.push(point);
     }
+    assignMovementHeadings(points);
 
     const bounds = coordinateBounds(points);
     const durationSeconds =
@@ -513,6 +514,55 @@
       durationSeconds,
       distanceMeters,
     };
+  }
+
+  function assignMovementHeadings(points) {
+    const minimumDistance = 2;
+    for (let index = 0; index < points.length; index++) {
+      const point = points[index];
+      let previous = null;
+      let next = null;
+
+      for (let priorIndex = index - 1; priorIndex >= 0; priorIndex--) {
+        if (points[priorIndex + 1].breakBefore) break;
+        if (routePointDistance(point, points[priorIndex]) >= minimumDistance) {
+          previous = points[priorIndex];
+          break;
+        }
+      }
+      for (let nextIndex = index + 1; nextIndex < points.length; nextIndex++) {
+        if (points[nextIndex].breakBefore) break;
+        if (routePointDistance(point, points[nextIndex]) >= minimumDistance) {
+          next = points[nextIndex];
+          break;
+        }
+      }
+
+      point.heading = movementHeading(previous || point, next || point);
+      if (!Number.isFinite(point.heading) && next) {
+        point.heading = movementHeading(point, next);
+      }
+      if (!Number.isFinite(point.heading) && previous) {
+        point.heading = movementHeading(previous, point);
+      }
+    }
+  }
+
+  function routePointDistance(start, end) {
+    return Math.hypot(
+      end.easting - start.easting,
+      end.northing - start.northing
+    );
+  }
+
+  function movementHeading(start, end) {
+    const deltaEasting = end.easting - start.easting;
+    const deltaNorthing = end.northing - start.northing;
+    if (Math.hypot(deltaEasting, deltaNorthing) < 0.25) return null;
+    return (
+      (Math.atan2(deltaEasting, deltaNorthing) * 180) / Math.PI +
+      360
+    ) % 360;
   }
 
   function buildEngagementSegments(points, transitions) {
