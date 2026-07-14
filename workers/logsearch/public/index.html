@@ -1108,7 +1108,13 @@
                 <div class="route-event-list" id="route-event-list"></div>
               </section>
               <div class="route-map-column">
-                <div class="route-map-frame" id="route-map-frame">
+                <div
+                  class="route-map-frame"
+                  id="route-map-frame"
+                  tabindex="0"
+                  aria-label="Route map playback"
+                  aria-describedby="route-map-hint"
+                >
                   <div class="route-tiles" id="route-tiles" hidden></div>
                   <svg
                     class="route-svg"
@@ -1120,8 +1126,9 @@
                   ></svg>
                   <div class="route-map-buttons">
                     <select id="route-map-style" aria-label="Map style" disabled>
-                      <option value="osm" selected>Street (OSM)</option>
-                      <option value="satellite">Satellite (NAIP)</option>
+                      <option value="satellite" selected>Satellite (NAIP)</option>
+                      <option value="dark">Dark streets (OSM)</option>
+                      <option value="osm">Street (OSM)</option>
                       <option value="local">Local plot</option>
                     </select>
                     <button class="route-map-zoom" id="route-zoom-out" type="button" title="Zoom out" hidden>&minus;</button>
@@ -1129,7 +1136,7 @@
                     <button id="route-fit" type="button">Fit route</button>
                   </div>
                   <div class="route-tooltip" id="route-tooltip" hidden></div>
-                  <div class="route-map-hint">Drag to move &middot; Pinch or scroll to zoom</div>
+                  <div class="route-map-hint" id="route-map-hint">Click map, then use left/right arrows to step &middot; Space to play/pause &middot; Drag to move &middot; Pinch or scroll to zoom</div>
                   <div class="route-map-attribution" id="route-attribution" hidden>
                     <span id="route-attribution-osm">&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a></span>
                     <span id="route-attribution-satellite" hidden>NAIP imagery: <a href="https://www.usgs.gov/programs/national-geospatial-program/national-map" target="_blank" rel="noopener noreferrer">USGS, USDA, The National Map</a></span>
@@ -1140,6 +1147,7 @@
                     <button id="route-play" type="button" disabled>Play</button>
                     <input id="route-range" type="range" min="0" max="0" value="0" disabled aria-label="Route playback position">
                     <select id="route-speed" aria-label="Playback speed">
+                      <option value="1">1&times;</option>
                       <option value="10">10&times;</option>
                       <option value="30" selected>30&times;</option>
                       <option value="60">60&times;</option>

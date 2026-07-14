@@ -37,7 +37,7 @@ test("route dependencies load before the main inline application", async () => {
   assert.ok(route < inline);
 });
 
-test("map layer control defaults to OSM and offers NAIP imagery", async () => {
+test("map layer control defaults to satellite and offers dark streets", async () => {
   const [html, routeScript, css] = await Promise.all([
     readFile(new URL("public/index.html", root), "utf8"),
     readFile(new URL("public/route.js", root), "utf8"),
@@ -48,19 +48,30 @@ test("map layer control defaults to OSM and offers NAIP imagery", async () => {
   )?.[0];
 
   assert.ok(control);
-  assert.match(control, /<option value="osm" selected>Street \(OSM\)<\/option>/);
   assert.match(
     control,
-    /<option value="satellite">Satellite \(NAIP\)<\/option>/
+    /<option value="satellite" selected>Satellite \(NAIP\)<\/option>/
   );
+  assert.match(
+    control,
+    /<option value="dark">Dark streets \(OSM\)<\/option>/
+  );
+  assert.match(control, /<option value="osm">Street \(OSM\)<\/option>/);
   assert.match(control, /<option value="local">Local plot<\/option>/);
   assert.match(routeScript, /USGSNAIPPlus\/ImageServer\/exportImage/);
   assert.match(routeScript, /bboxSR: "3857"/);
   assert.match(
     routeScript,
+    /dark:\s*\{[\s\S]*?tile\.openstreetmap\.org/
+  );
+  assert.match(routeScript, /tileStyle: "satellite"/);
+  assert.match(
+    routeScript,
     /mapStyleSelect\.addEventListener\("change", changeMapStyle\)/
   );
   assert.match(html, /USGS, USDA, The National Map/);
+  assert.doesNotMatch(html, /carto\.com/);
+  assert.match(css, /\.route-tiles\.is-dark\s*\{[^}]*filter:/s);
   assert.match(css, /\.route-map-buttons select\s*\{/);
 });
 
@@ -100,6 +111,36 @@ test("route workspace places events before an interactive map", async () => {
   assert.match(css, /\.route-current-marker\s*\{[^}]*fill:\s*#fff/s);
   assert.match(css, /\.route-event-button\.is-active/);
   assert.match(css, /\.route-event-button\.is-hovered/);
+});
+
+test("route map and playback bar support keyboard playback", async () => {
+  const [html, routeScript, css] = await Promise.all([
+    readFile(new URL("public/index.html", root), "utf8"),
+    readFile(new URL("public/route.js", root), "utf8"),
+    readFile(new URL("public/route.css", root), "utf8"),
+  ]);
+  const mapFrame = html.match(
+    /<div\s+class="route-map-frame"[\s\S]*?>/
+  )?.[0];
+
+  assert.ok(mapFrame);
+  assert.match(mapFrame, /\btabindex="0"/);
+  assert.match(mapFrame, /\baria-describedby="route-map-hint"/);
+  assert.match(html, /left\/right arrows to step/);
+  assert.match(routeScript, /function onMapKeyDown\(event\)/);
+  assert.match(routeScript, /event\.key === "ArrowLeft"/);
+  assert.match(routeScript, /event\.key === "ArrowRight"/);
+  assert.match(routeScript, /if \(event\.key === " "\)/);
+  assert.match(routeScript, /mapFrame\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(
+    routeScript,
+    /mapFrame\.addEventListener\("keydown", onMapKeyDown\)/
+  );
+  assert.match(
+    routeScript,
+    /rangeInput\.addEventListener\("keydown", onPlaybackSpace\)/
+  );
+  assert.match(css, /\.route-map-frame:focus-visible/);
 });
 
 test("timestamped viewer lines can create manual route events", async () => {

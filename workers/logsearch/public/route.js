@@ -38,6 +38,11 @@
       url: (zoom, x, y) =>
         `https://tile.openstreetmap.org/${zoom}/${x}/${y}.png`,
     },
+    dark: {
+      maxZoom: 19,
+      url: (zoom, x, y) =>
+        `https://tile.openstreetmap.org/${zoom}/${x}/${y}.png`,
+    },
     satellite: {
       maxZoom: 19,
       url: naipTileUrl,
@@ -97,7 +102,7 @@
     playLastReal: 0,
     playSimulatedTime: 0,
     streetMode: false,
-    tileStyle: "osm",
+    tileStyle: "satellite",
     mapChoiceMade: false,
     streetZoom: null,
     streetCenter: null,
@@ -175,7 +180,7 @@
     state.includePropagated = false;
     state.currentIndex = -1;
     state.streetMode = false;
-    state.tileStyle = "osm";
+    state.tileStyle = "satellite";
     state.mapChoiceMade = false;
     state.streetZoom = null;
     state.streetCenter = null;
@@ -201,6 +206,7 @@
     eventsEl.hidden = true;
     svg.replaceChildren();
     tileLayer.replaceChildren();
+    tileLayer.classList.remove("is-dark");
     tileLayer.hidden = true;
     attribution.hidden = true;
     tooltip.hidden = true;
@@ -209,7 +215,7 @@
     archiveButton.textContent = "Analyze archives";
     downloadButton.disabled = true;
     mapStyleSelect.disabled = true;
-    mapStyleSelect.value = "osm";
+    mapStyleSelect.value = "satellite";
     zoomOutButton.hidden = true;
     zoomInButton.hidden = true;
     rangeInput.min = "0";
@@ -503,14 +509,14 @@
     mapStyleSelect.disabled = !state.result.zone;
     if (state.result.zone && !state.mapChoiceMade) {
       state.streetMode = true;
-      state.tileStyle = "osm";
-      mapStyleSelect.value = "osm";
+      state.tileStyle = "satellite";
+      mapStyleSelect.value = "satellite";
     } else if (!state.result.zone) {
       state.streetMode = false;
       mapStyleSelect.value = "local";
     }
     mapStyleSelect.title = state.result.zone
-      ? "Choose OpenStreetMap, satellite imagery, or the offline coordinate plot"
+      ? "Choose satellite imagery, light or dark streets, or the offline coordinate plot"
       : "A latitude/longitude anchor is required to identify the UTM zone";
 
     emptyEl.hidden = true;
@@ -849,13 +855,14 @@
     if (canUseStreet) {
       const street = streetProjection();
       project = street.project;
+      tileLayer.classList.toggle("is-dark", state.tileStyle === "dark");
       drawTiles(street, state.tileStyle);
       mapStyleSelect.value = state.tileStyle;
       zoomOutButton.hidden = false;
       zoomInButton.hidden = false;
       tileLayer.hidden = false;
       attribution.hidden = false;
-      osmAttribution.hidden = state.tileStyle !== "osm";
+      osmAttribution.hidden = state.tileStyle === "satellite";
       satelliteAttribution.hidden = state.tileStyle !== "satellite";
     } else {
       state.streetMode = false;
@@ -863,6 +870,7 @@
       zoomOutButton.hidden = false;
       zoomInButton.hidden = false;
       tileLayer.replaceChildren();
+      tileLayer.classList.remove("is-dark");
       tileLayer.hidden = true;
       attribution.hidden = true;
       project = offlineProjection();
@@ -1384,7 +1392,7 @@
       return;
     }
     state.streetMode = true;
-    state.tileStyle = style === "satellite" ? "satellite" : "osm";
+    state.tileStyle = TILE_SOURCES[style] ? style : "satellite";
     zoomOutButton.hidden = false;
     zoomInButton.hidden = false;
     renderMap();
@@ -1556,6 +1564,35 @@
     );
   }
 
+  function onPlaybackSpace(event) {
+    if (event.key !== " ") return;
+    event.preventDefault();
+    if (!event.repeat) togglePlayback();
+  }
+
+  function onMapKeyDown(event) {
+    if (
+      event.target !== mapFrame ||
+      !state.trace ||
+      !state.trace.points.length
+    ) {
+      return;
+    }
+    if (event.key === " ") {
+      onPlaybackSpace(event);
+      return;
+    }
+
+    const step =
+      event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0;
+    if (!step) return;
+    event.preventDefault();
+    stopPlayback();
+    state.activeEventIndex = -1;
+    syncEventHighlights(false);
+    setCurrentIndex(state.currentIndex + step);
+  }
+
   function onMapPointerDown(event) {
     if (!state.trace || isMapControl(event.target)) return;
     if (
@@ -1566,6 +1603,7 @@
       return;
     }
     if (event.pointerType === "mouse" && event.button !== 0) return;
+    mapFrame.focus({ preventScroll: true });
     event.preventDefault();
     const point = mapPointFromClient(event.clientX, event.clientY);
     state.activePointers.set(event.pointerId, point);
@@ -1886,12 +1924,14 @@
     syncEventHighlights(false);
     setCurrentIndex(Number(rangeInput.value));
   });
+  rangeInput.addEventListener("keydown", onPlaybackSpace);
   playButton.addEventListener("click", togglePlayback);
   mapStyleSelect.addEventListener("change", changeMapStyle);
   zoomOutButton.addEventListener("click", () => zoomMap(-1));
   zoomInButton.addEventListener("click", () => zoomMap(1));
   fitButton.addEventListener("click", fitMap);
   downloadButton.addEventListener("click", downloadGeoJson);
+  mapFrame.addEventListener("keydown", onMapKeyDown);
   mapFrame.addEventListener("pointerdown", onMapPointerDown);
   mapFrame.addEventListener("pointermove", onMapPointerDrag);
   mapFrame.addEventListener("pointerup", onMapPointerUp);

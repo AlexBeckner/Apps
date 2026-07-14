@@ -59,12 +59,12 @@ The Worker itself only does two things:
 - Displayed paths hide the shared root folder (or archive) so only the nested
   folders and file names are shown.
 
-The route view uses OpenStreetMap tiles by default when the logs provide enough
-information to determine the UTM zone, with high-resolution USGS NAIP Plus
-imagery as an optional U.S. satellite layer. Tile requests reveal the viewed
-geographic area to the selected provider, but log files and route geometry are
-never uploaded. The viewer can be switched to the fully offline local
-coordinate plot at any time.
+The route view uses high-resolution USGS NAIP Plus imagery by default when the
+logs provide enough information to determine the UTM zone. Standard and
+CSS-darkened OpenStreetMap street views are also available. Tile requests
+reveal the viewed geographic area to the selected provider, but log files and
+route geometry are never uploaded. The viewer can be switched to the fully
+offline local coordinate plot at any time.
 
 ### Archive handling
 
