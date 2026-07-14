@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import vm from "node:vm";
 
 const root = new URL("../", import.meta.url);
 
@@ -27,14 +28,102 @@ test("route UI exposes every element required by route.js", async () => {
 test("route dependencies load before the main inline application", async () => {
   const html = await readFile(new URL("public/index.html", root), "utf8");
   const archives = html.indexOf('<script src="archives.js"></script>');
+  const persistence = html.indexOf('<script src="persistence.js"></script>');
   const core = html.indexOf('<script src="route-core.js"></script>');
   const route = html.indexOf('<script src="route.js"></script>');
   const inline = html.indexOf("<script>", route);
 
   assert.ok(archives >= 0);
-  assert.ok(archives < core);
+  assert.ok(archives < persistence);
+  assert.ok(persistence < core);
   assert.ok(core < route);
   assert.ok(route < inline);
+});
+
+test("main inline application has valid JavaScript syntax", async () => {
+  const html = await readFile(new URL("public/index.html", root), "utf8");
+  const start = html.lastIndexOf("<script>") + "<script>".length;
+  const end = html.indexOf("</script>", start);
+
+  assert.ok(start >= "<script>".length);
+  assert.ok(end > start);
+  assert.doesNotThrow(() => new vm.Script(html.slice(start, end)));
+});
+
+test("uploaded files and search state persist in IndexedDB", async () => {
+  const [html, persistenceScript] = await Promise.all([
+    readFile(new URL("public/index.html", root), "utf8"),
+    readFile(new URL("public/persistence.js", root), "utf8"),
+  ]);
+
+  assert.match(persistenceScript, /indexedDB\.open\(DB_NAME, DB_VERSION\)/);
+  assert.match(persistenceScript, /createObjectStore\(FILE_STORE/);
+  assert.match(persistenceScript, /createObjectStore\(STATE_STORE/);
+  assert.match(persistenceScript, /async function replaceSession\(/);
+  assert.match(persistenceScript, /async function saveState\(/);
+  assert.match(persistenceScript, /async function loadSession\(/);
+  assert.match(persistenceScript, /new root\.File\(\[record\.blob\]/);
+  assert.match(html, /function captureSessionState\(/);
+  assert.match(html, /async function restoreCachedSession\(/);
+  assert.match(html, /await runSearch\(\{ restoreState: snapshot \}\)/);
+  assert.match(html, /void restoreCachedSession\(\)/);
+  assert.match(html, /id="clear-cache"/);
+});
+
+test("uploads can replace or add files by picker and drag position", async () => {
+  const html = await readFile(new URL("public/index.html", root), "utf8");
+
+  assert.match(html, /id="new-file"/);
+  assert.match(html, /id="new-folder"/);
+  assert.match(html, /id="add-file"/);
+  assert.match(html, /id="add-folder"/);
+  assert.match(
+    html,
+    /class="dropzone-group" role="group" aria-label="New selection"/
+  );
+  assert.match(
+    html,
+    /class="dropzone-group" role="group" aria-label="Add to selection"/
+  );
+  assert.doesNotMatch(html, /id="source-picker"/);
+  assert.match(html, /<input id="files" type="file" multiple>/);
+  assert.match(
+    html,
+    /<input id="folder" type="file" webkitdirectory directory multiple>/
+  );
+  assert.match(html, /function pickFiles\(mode = "replace"\)/);
+  assert.match(html, /function pickFolder\(mode = "replace"\)/);
+  assert.match(
+    html,
+    /newFileBtn\.addEventListener\("click", \(\) => pickFiles\("replace"\)\)/
+  );
+  assert.match(
+    html,
+    /newFolderBtn\.addEventListener\("click", \(\) => pickFolder\("replace"\)\)/
+  );
+  assert.match(
+    html,
+    /addFileBtn\.addEventListener\("click", \(\) => pickFiles\("add"\)\)/
+  );
+  assert.match(
+    html,
+    /addFolderBtn\.addEventListener\("click", \(\) => pickFolder\("add"\)\)/
+  );
+  assert.match(html, /data-drop-mode="replace"/);
+  assert.match(html, /data-drop-mode="add"/);
+  assert.match(html, /function mergeSelections\(existing, incoming\)/);
+  assert.match(
+    html,
+    /mode === "add"\s*\?\s*mergeSelections\(selected, files\)/
+  );
+  assert.match(
+    html,
+    /return clientX < window\.innerWidth \/ 2 \? "replace" : "add"/
+  );
+  assert.match(
+    html,
+    /ingestDataTransfer\(event\.dataTransfer, selectionMode\)/
+  );
 });
 
 test("map layer control defaults to satellite and offers dark streets", async () => {
@@ -241,7 +330,7 @@ test("route renders vehicle speed with a fixed-band gradient", async () => {
   );
 });
 
-test("timestamped viewer lines can create manual route events", async () => {
+test("timestamped viewer lines can toggle manual route events", async () => {
   const [html, routeScript, css] = await Promise.all([
     readFile(new URL("public/index.html", root), "utf8"),
     readFile(new URL("public/route.js", root), "utf8"),
@@ -249,12 +338,22 @@ test("timestamped viewer lines can create manual route events", async () => {
   ]);
 
   assert.match(html, /data-event-timestamp=/);
-  assert.match(html, /window\.LogRoute\.addEventFromLog\(/);
+  assert.match(html, /route\.addEventFromLog\(/);
+  assert.match(html, /route\.removeEventFromLog\(data\.path, ln\)/);
+  assert.match(html, /Click to remove this line from the event timeline/);
+  assert.match(html, /logroute:manual-event-removed/);
   assert.match(html, /class="viewer-event-status"/);
   assert.match(html, /\.v-line\.v-eventable/);
   assert.match(html, /\.v-line\.v-event-added/);
   assert.match(routeScript, /function addEventFromLog\(/);
-  assert.match(routeScript, /addEventFromLog, hasEventFromLog, setSelection/);
+  assert.match(routeScript, /function removeEventFromLog\(/);
+  assert.match(routeScript, /function normalizeManualEvents\(/);
+  assert.match(routeScript, /function getSessionState\(/);
+  assert.match(routeScript, /logroute:session-state-changed/);
+  assert.match(
+    routeScript,
+    /root\.LogRoute = \{[\s\S]*addEventFromLog,[\s\S]*getSessionState,[\s\S]*hasEventFromLog,[\s\S]*removeEventFromLog,[\s\S]*\}/
+  );
   assert.match(routeScript, /function removeManualEvent\(/);
   assert.match(routeScript, /removeButton\.className = "route-event-remove"/);
   assert.match(routeScript, /if \(event\.source === "manual"\)/);

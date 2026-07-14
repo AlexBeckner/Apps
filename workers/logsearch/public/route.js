@@ -97,6 +97,7 @@
     cancelAnalysis: false,
     analyzing: false,
     archivesScanned: false,
+    archiveAnalysisRequested: false,
     analysisErrors: [],
     includePropagated: false,
     currentIndex: -1,
@@ -123,13 +124,19 @@
     currentMarker: null,
   };
 
-  function setSelection(items) {
+  function setSelection(items, sessionState) {
     state.selectionToken++;
     state.cancelAnalysis = true;
     stopPlayback();
     resetState();
 
     state.selection = Array.isArray(items) ? items.slice() : [];
+    state.manualEvents = normalizeManualEvents(
+      sessionState && sessionState.manualEvents
+    );
+    state.archiveAnalysisRequested = !!(
+      sessionState && sessionState.analyzeArchives
+    );
     if (!state.selection.length) {
       panel.hidden = true;
       return;
@@ -165,6 +172,8 @@
 
     if (direct.length) {
       void analyzeDirectFiles(direct, state.selectionToken);
+    } else if (state.archiveAnalysisRequested) {
+      void analyzeArchives();
     } else {
       statusEl.textContent = "Route analysis is ready.";
     }
@@ -174,6 +183,7 @@
     state.cancelAnalysis = false;
     state.analyzing = false;
     state.archivesScanned = false;
+    state.archiveAnalysisRequested = false;
     state.analysisErrors = [];
     state.accumulator = core.createAccumulator();
     state.manualEvents = [];
@@ -260,14 +270,19 @@
       state.analyzing = false;
       updateResult();
       configureArchiveButton();
+      if (state.archiveAnalysisRequested && state.archives.length) {
+        void analyzeArchives();
+      }
     }
   }
 
   async function analyzeArchives() {
     if (state.analyzing) {
       state.cancelAnalysis = true;
+      state.archiveAnalysisRequested = false;
       archiveButton.disabled = true;
       archiveButton.textContent = "Cancelling...";
+      notifySessionStateChanged();
       return;
     }
     if (!state.archives.length || !root.LogArchives) return;
@@ -275,8 +290,10 @@
     const token = state.selectionToken;
     state.cancelAnalysis = false;
     state.analyzing = true;
+    state.archiveAnalysisRequested = true;
     state.analysisErrors = [];
     configureArchiveButton();
+    notifySessionStateChanged();
 
     let completed = true;
     try {
@@ -312,6 +329,7 @@
       state.cancelAnalysis = false;
       updateResult();
       configureArchiveButton();
+      notifySessionStateChanged();
     }
   }
 
@@ -730,6 +748,65 @@
     }
   }
 
+  function normalizeManualEvents(events) {
+    const normalized = [];
+    const seen = new Set();
+    for (const saved of Array.isArray(events) ? events : []) {
+      const timestamp = Number(saved && saved.timestamp);
+      const path = String((saved && saved.path) || "");
+      const lineNo = Math.trunc(Number(saved && saved.lineNo));
+      if (!Number.isFinite(timestamp) || !path || lineNo < 1) continue;
+      const key = `${path}\u0000${lineNo}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const rawContent = String((saved && saved.content) || "").trim();
+      normalized.push({
+        id: `manual:restored:${normalized.length}:${lineNo}`,
+        timestamp,
+        type: "Log line",
+        disengagementType: "",
+        severity: null,
+        content: (rawContent || `Log line ${lineNo.toLocaleString()}`).slice(
+          0,
+          1000
+        ),
+        path,
+        lineNo,
+        source: "manual",
+      });
+    }
+    return normalized;
+  }
+
+  function getSessionState() {
+    return {
+      analyzeArchives:
+        state.archiveAnalysisRequested || state.archivesScanned,
+      manualEvents: state.manualEvents.map((event) => ({
+        timestamp: event.timestamp,
+        content: event.content,
+        path: event.path,
+        lineNo: event.lineNo,
+      })),
+    };
+  }
+
+  function notifySessionStateChanged() {
+    if (typeof root.dispatchEvent !== "function" || !root.CustomEvent) return;
+    root.dispatchEvent(new root.CustomEvent("logroute:session-state-changed"));
+  }
+
+  function notifyManualEventRemoved(event) {
+    if (typeof root.dispatchEvent === "function" && root.CustomEvent) {
+      root.dispatchEvent(
+        new root.CustomEvent("logroute:manual-event-removed", {
+          detail: { path: event.path, lineNo: event.lineNo },
+        })
+      );
+    }
+    notifySessionStateChanged();
+  }
+
   function addEventFromLog(input) {
     if (!state.result || !state.trace || !state.trace.points.length) {
       return {
@@ -785,6 +862,7 @@
       (candidate) => candidate.id === event.id
     );
     if (eventIndex >= 0) selectEvent(eventIndex, true);
+    notifySessionStateChanged();
     return {
       ok: true,
       duplicate: false,
@@ -799,13 +877,48 @@
     );
   }
 
+  function removeEventFromLog(path, lineNo) {
+    const normalizedPath = String(path || "");
+    const normalizedLineNo = Number(lineNo);
+    const existing = state.manualEvents.find(
+      (event) =>
+        event.path === normalizedPath && event.lineNo === normalizedLineNo
+    );
+    if (!existing) {
+      return {
+        ok: false,
+        message: `Line ${normalizedLineNo.toLocaleString()} is not in the event timeline.`,
+      };
+    }
+    if (!removeManualEvent(existing.id)) {
+      return {
+        ok: false,
+        message: `Could not remove line ${normalizedLineNo.toLocaleString()} from the event timeline.`,
+      };
+    }
+    return {
+      ok: true,
+      message: `Removed line ${normalizedLineNo.toLocaleString()} from the event timeline.`,
+    };
+  }
+
   function removeManualEvent(eventId) {
     const manualIndex = state.manualEvents.findIndex(
       (event) => event.id === eventId
     );
-    if (manualIndex < 0 || !state.result || !state.trace) return false;
+    if (manualIndex < 0) return false;
 
     const removed = state.manualEvents[manualIndex];
+    if (!state.result || !state.trace) {
+      state.manualEvents.splice(manualIndex, 1);
+      if (state.result) {
+        state.result.events = state.result.events.filter(
+          (event) => event.id !== eventId
+        );
+      }
+      notifyManualEventRemoved(removed);
+      return true;
+    }
     const currentPoint = state.trace.points[state.currentIndex];
     const currentTimestamp = currentPoint ? currentPoint.timestamp : null;
     const activeId =
@@ -841,13 +954,7 @@
     renderMap();
     updateTimeline();
 
-    if (typeof root.dispatchEvent === "function" && root.CustomEvent) {
-      root.dispatchEvent(
-        new root.CustomEvent("logroute:manual-event-removed", {
-          detail: { path: removed.path, lineNo: removed.lineNo },
-        })
-      );
-    }
+    notifyManualEventRemoved(removed);
     return true;
   }
 
@@ -2087,5 +2194,11 @@
   });
   svg.addEventListener("click", onMapClick);
 
-  root.LogRoute = { addEventFromLog, hasEventFromLog, setSelection };
+  root.LogRoute = {
+    addEventFromLog,
+    getSessionState,
+    hasEventFromLog,
+    setSelection,
+    removeEventFromLog,
+  };
 })(typeof globalThis !== "undefined" ? globalThis : this);

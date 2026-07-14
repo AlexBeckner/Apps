@@ -58,35 +58,63 @@
       }
 
       .dropzone {
+        display: grid;
+        gap: 10px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        margin-top: 12px;
+        text-align: center;
+      }
+
+      .dropzone-group {
         border: 1px dashed #666;
         border-radius: 6px;
-        cursor: pointer;
-        display: block;
-        margin-top: 12px;
-        padding: 22px 16px;
-        text-align: center;
-        transition: border-color 0.15s ease, background 0.15s ease;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        overflow: hidden;
+        transition: border-color 0.15s ease;
       }
 
-      .dropzone:hover,
-      .dropzone:focus-within {
+      .dropzone-group:hover,
+      .dropzone-group:focus-within {
         border-color: #888;
+      }
+
+      .dropzone button.dropzone-action {
+        align-items: center;
+        background: transparent;
+        border: 0;
+        border-radius: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        justify-content: center;
+        min-height: 84px;
+        padding: 16px;
+      }
+
+      .dropzone button.dropzone-action + button.dropzone-action {
+        border-left: 1px dashed #666;
+      }
+
+      .dropzone button.dropzone-action:hover:not(:disabled),
+      .dropzone button.dropzone-action:focus-visible {
         background: #161616;
+        border-color: #888;
+        outline: none;
       }
 
-      .dropzone-plus {
-        color: #888;
-        display: block;
-        font-size: 40px;
-        font-weight: 300;
-        line-height: 1;
-        /* The "+" glyph sits a hair below its line-box center; nudge it up. */
-        transform: translateY(-0.06em);
+      .dropzone-action-title {
+        font-size: 15px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
       }
 
-      /* Exactly one of the plus sign / info line shows at a time. */
-      .dropzone.has-selection .dropzone-plus {
-        display: none;
+      .dropzone #selection {
+        border: 1px dashed #666;
+        border-radius: 6px;
+        grid-column: 1 / -1;
+        padding: 9px 12px;
       }
 
       .dropzone:not(.has-selection) #selection {
@@ -97,40 +125,54 @@
         display: none;
       }
 
-      /* Full-screen drop target: shown only while files are dragged over the
-         page, so a folder/archive can be dropped anywhere, not just the box. */
+      /* Full-screen drop targets: shown only while files are dragged over the
+         page. The pointer's half of the viewport decides whether the drop
+         replaces the current selection or adds to it. */
       .drop-overlay {
-        align-items: center;
         background: rgba(10, 16, 26, 0.82);
         display: none;
+        gap: 16px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         inset: 0;
-        justify-content: center;
         padding: 24px;
+        pointer-events: none;
         position: fixed;
         z-index: 100;
       }
 
       .drop-overlay.active {
-        display: flex;
+        display: grid;
       }
 
-      .drop-overlay-inner {
+      .drop-overlay-target {
+        align-items: center;
         border: 2px dashed #7fb2ff;
         border-radius: 16px;
         color: #cfe0ff;
-        font-size: 96px;
-        font-weight: 300;
-        line-height: 1;
-        padding: 40px 64px;
-        /* Let drag events fall through to a single target so the enter/leave
-           counter that toggles the overlay never flickers on child edges. */
-        pointer-events: none;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        justify-content: center;
+        opacity: 0.55;
+        padding: 40px 24px;
+        transition:
+          background 0.12s ease,
+          border-color 0.12s ease,
+          opacity 0.12s ease;
       }
 
-      /* Nudge just the glyph up (not the dashed box) to optically center it. */
-      .drop-overlay-plus {
-        display: block;
-        transform: translateY(-0.06em);
+      .drop-overlay-target.targeted {
+        background: rgba(31, 111, 235, 0.2);
+        border-color: #cfe0ff;
+        opacity: 1;
+      }
+
+      .drop-overlay-title {
+        font-size: clamp(24px, 4vw, 54px);
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-align: center;
+        text-transform: uppercase;
       }
 
       /* Top row: a "controls" box on the left and the file heatmap on the
@@ -247,9 +289,18 @@
       }
 
       .actions {
+        align-items: center;
         display: flex;
         gap: 8px;
         margin-top: 10px;
+      }
+
+      .cache-status {
+        font-size: 12px;
+      }
+
+      .cache-status.error {
+        color: #ff6b6b;
       }
 
       .progress {
@@ -1011,25 +1062,76 @@
           flex: 0 1 auto;
         }
       }
+
+      @media (max-width: 520px) {
+        .dropzone {
+          grid-template-columns: 1fr;
+        }
+
+        .dropzone #selection {
+          grid-column: 1;
+        }
+      }
     </style>
   </head>
   <body>
     <div class="drop-overlay" id="drop-overlay" aria-hidden="true">
-      <div class="drop-overlay-inner"><span class="drop-overlay-plus">+</span></div>
+      <div class="drop-overlay-target" data-drop-mode="replace">
+        <span class="drop-overlay-title">New</span>
+      </div>
+      <div class="drop-overlay-target" data-drop-mode="add">
+        <span class="drop-overlay-title">Add</span>
+      </div>
     </div>
     <main>
       <div class="top-grid" id="top-grid">
         <div class="top-left">
-          <label
+          <div
             class="dropzone"
             id="dropzone"
-            tabindex="0"
-            aria-label="Choose a log folder, or drag and drop a folder or archive anywhere on the page"
+            role="group"
+            aria-label="Choose new or additional log files and folders"
           >
-            <span class="dropzone-plus" aria-hidden="true">+</span>
+            <div class="dropzone-group" role="group" aria-label="New selection">
+              <button
+                class="dropzone-action"
+                id="new-file"
+                type="button"
+                aria-label="Choose new log files and replace the current files"
+              >
+                <span class="dropzone-action-title">New File</span>
+              </button>
+              <button
+                class="dropzone-action"
+                id="new-folder"
+                type="button"
+                aria-label="Choose a new log folder and replace the current files"
+              >
+                <span class="dropzone-action-title">New Folder</span>
+              </button>
+            </div>
+            <div class="dropzone-group" role="group" aria-label="Add to selection">
+              <button
+                class="dropzone-action"
+                id="add-file"
+                type="button"
+                aria-label="Choose log files and add them to the current files"
+              >
+                <span class="dropzone-action-title">Add File</span>
+              </button>
+              <button
+                class="dropzone-action"
+                id="add-folder"
+                type="button"
+                aria-label="Choose a log folder and add it to the current files"
+              >
+                <span class="dropzone-action-title">Add Folder</span>
+              </button>
+            </div>
             <p class="muted" id="selection"></p>
+            <input id="files" type="file" multiple>
             <input id="folder" type="file" webkitdirectory directory multiple>
-          </label>
+          </div>
 
           <div class="controls">
             <div>
@@ -1063,6 +1165,8 @@
 
           <div class="actions">
             <button id="cancel" type="button" style="display: none;">Cancel</button>
+            <button id="clear-cache" type="button" hidden>Forget saved session</button>
+            <span class="cache-status muted" id="cache-status" aria-live="polite"></span>
           </div>
 
           <div class="progress" id="progress" style="display: none;">
@@ -1233,6 +1337,7 @@
     </div>
 
     <script src="archives.js"></script>
+    <script src="persistence.js"></script>
     <script src="route-core.js"></script>
     <script src="route.js"></script>
     <script>
@@ -1299,6 +1404,11 @@
       const el = (id) => document.getElementById(id);
       const dropzone = el("dropzone");
       const dropOverlay = el("drop-overlay");
+      const newFileBtn = el("new-file");
+      const newFolderBtn = el("new-folder");
+      const addFileBtn = el("add-file");
+      const addFolderBtn = el("add-folder");
+      const filesInput = el("files");
       const folderInput = el("folder");
       const selectionEl = el("selection");
       const termsInput = el("terms");
@@ -1306,6 +1416,8 @@
       const regexInput = el("regex");
       const searchBtn = el("search");
       const cancelBtn = el("cancel");
+      const clearCacheBtn = el("clear-cache");
+      const cacheStatus = el("cache-status");
       const progressEl = el("progress");
       const progressText = el("progress-text");
       const progressBar = el("progress-bar");
@@ -1374,6 +1486,13 @@
       let globalScanLoading = false; // a global re-scan is currently in flight
       let running = false;
       let cancelRequested = false;
+      let searchWasRun = false;
+      let restoringCachedSession = false;
+      let sessionCachingEnabled = false;
+      let sessionStateTimer = 0;
+      let persistenceQueue = Promise.resolve();
+      let cacheSelectionGeneration = 0;
+      let pendingSelectionMode = "replace";
       let displayRoot = ""; // shared root folder/archive trimmed from shown paths
       let viewerData = null; // virtualized model of the file open in the viewer
       let viewerIdx = -1; // index of the focused match in viewerData.matchLines
@@ -1393,17 +1512,254 @@
       let viewerImageZoom = 1;
       let viewerGestureStartZoom = 1; // Safari's cumulative pinch scale anchor
 
-      // The drop box shows a single status line; empty text collapses it and
-      // brings back the plus sign.
+      // The drop box shows a single status line below its two actions; empty
+      // text collapses that status row.
       function setDropInfo(text) {
         selectionEl.textContent = text || "";
         dropzone.classList.toggle("has-selection", !!text);
       }
 
-      function setSelection(files) {
-        selected = files;
-        if (window.LogRoute) window.LogRoute.setSelection(files);
-        if (!files.length) {
+      function selectionSummary(files = selected) {
+        if (!files.length) return "";
+        const totalBytes = files.reduce((sum, item) => sum + item.file.size, 0);
+        const roots = new Set(
+          files.map((item) => item.path.split("/")[0] || "(files)")
+        );
+        const source =
+          roots.size === 1
+            ? ` from "${roots.values().next().value}"`
+            : ` across ${roots.size.toLocaleString()} sources`;
+        return (
+          `${files.length.toLocaleString()} file${files.length === 1 ? "" : "s"} ` +
+          `(${formatBytes(totalBytes)})${source}`
+        );
+      }
+
+      function showSelectionSummary() {
+        setDropInfo(selectionSummary());
+      }
+
+      // Paths are the app's file identity. When an added folder contains a path
+      // that is already selected, use the newly added file in the existing
+      // position instead of creating two ambiguous entries with the same path.
+      function mergeSelections(existing, incoming) {
+        const merged = [];
+        const indexByPath = new Map();
+        for (const item of [
+          ...(Array.isArray(existing) ? existing : []),
+          ...(Array.isArray(incoming) ? incoming : []),
+        ]) {
+          if (!item || !item.file) continue;
+          const path = String(item.path || item.file.name || "");
+          if (!path) continue;
+          const normalized = item.path === path ? item : { ...item, path };
+          const existingIndex = indexByPath.get(path);
+          if (existingIndex === undefined) {
+            indexByPath.set(path, merged.length);
+            merged.push(normalized);
+          } else {
+            merged[existingIndex] = normalized;
+          }
+        }
+        return merged;
+      }
+
+      function applyIncomingSelection(files, mode) {
+        setSelection(
+          mode === "add"
+            ? mergeSelections(selected, files)
+            : mergeSelections([], files)
+        );
+      }
+
+      function setCacheStatus(message, isError = false) {
+        cacheStatus.textContent = message || "";
+        cacheStatus.classList.toggle("error", !!isError);
+      }
+
+      function captureSessionState() {
+        const routeState =
+          window.LogRoute &&
+          typeof window.LogRoute.getSessionState === "function"
+            ? window.LogRoute.getSessionState()
+            : null;
+        return {
+          version: 1,
+          terms: termsInput.value,
+          caseSensitive: caseInput.checked,
+          regexMode: regexInput.checked,
+          filterText: filterInput.value,
+          searchWasRun,
+          activeTerm,
+          activeFile,
+          currentPage,
+          globalScanKey: globalScan ? globalScan.key : null,
+          viewerFontPx,
+          viewerWrap,
+          routeState,
+        };
+      }
+
+      function enqueuePersistence(operation) {
+        const queued = persistenceQueue.then(operation, operation);
+        persistenceQueue = queued.catch(() => {});
+        return queued;
+      }
+
+      function cacheErrorMessage(error) {
+        return error && error.name === "QuotaExceededError"
+          ? "Browser storage is full; this session cannot be restored after refresh."
+          : "Could not save this session in browser storage.";
+      }
+
+      function writeSessionState() {
+        window.clearTimeout(sessionStateTimer);
+        sessionStateTimer = 0;
+        const persistence = window.LogSearchPersistence;
+        if (
+          restoringCachedSession ||
+          !sessionCachingEnabled ||
+          !selected.length ||
+          !persistence
+        ) {
+          return Promise.resolve();
+        }
+        const snapshot = captureSessionState();
+        return enqueuePersistence(() => persistence.saveState(snapshot)).catch(
+          (error) => setCacheStatus(cacheErrorMessage(error), true)
+        );
+      }
+
+      function scheduleSessionStateSave(immediate = false) {
+        if (
+          restoringCachedSession ||
+          !sessionCachingEnabled ||
+          !selected.length
+        ) {
+          return;
+        }
+        window.clearTimeout(sessionStateTimer);
+        sessionStateTimer = 0;
+        if (immediate) {
+          void writeSessionState();
+        } else {
+          sessionStateTimer = window.setTimeout(writeSessionState, 200);
+        }
+      }
+
+      function cacheSelection(files) {
+        const persistence = window.LogSearchPersistence;
+        if (!persistence || !persistence.isSupported()) return;
+        const generation = ++cacheSelectionGeneration;
+        sessionCachingEnabled = true;
+        clearCacheBtn.hidden = false;
+        setCacheStatus("Saving session locally...");
+        const snapshot = captureSessionState();
+        void enqueuePersistence(async () => {
+          try {
+            await persistence.replaceSession(files, snapshot);
+          } catch (error) {
+            try {
+              await persistence.clearSession();
+            } catch (clearError) {}
+            throw error;
+          }
+        })
+          .then(() => {
+            if (generation === cacheSelectionGeneration) {
+              setCacheStatus("Session saved locally.");
+            }
+          })
+          .catch((error) => {
+            if (generation !== cacheSelectionGeneration) return;
+            sessionCachingEnabled = false;
+            clearCacheBtn.hidden = true;
+            setCacheStatus(cacheErrorMessage(error), true);
+          });
+      }
+
+      async function forgetCachedSession() {
+        const persistence = window.LogSearchPersistence;
+        if (!persistence) return;
+        cacheSelectionGeneration++;
+        sessionCachingEnabled = false;
+        window.clearTimeout(sessionStateTimer);
+        sessionStateTimer = 0;
+        setCacheStatus("Forgetting saved session...");
+        try {
+          await enqueuePersistence(() => persistence.clearSession());
+          clearCacheBtn.hidden = true;
+          setCacheStatus(
+            "Saved session forgotten; current files stay open until refresh."
+          );
+        } catch (error) {
+          setCacheStatus("Could not clear the saved session.", true);
+        }
+      }
+
+      async function restoreCachedSession() {
+        const persistence = window.LogSearchPersistence;
+        if (!persistence || !persistence.isSupported()) return;
+        let cached;
+        try {
+          cached = await persistence.loadSession();
+        } catch (error) {
+          setCacheStatus("Could not restore the saved session.", true);
+          return;
+        }
+        if (!cached || !cached.files.length) return;
+
+        const snapshot = cached.state || {};
+        restoringCachedSession = true;
+        sessionCachingEnabled = true;
+        clearCacheBtn.hidden = false;
+        setCacheStatus("Restoring saved session...");
+        try {
+          termsInput.value =
+            typeof snapshot.terms === "string" ? snapshot.terms : "";
+          caseInput.checked = !!snapshot.caseSensitive;
+          regexInput.checked = !!snapshot.regexMode;
+          filterInput.value =
+            typeof snapshot.filterText === "string" ? snapshot.filterText : "";
+          if (Number.isFinite(Number(snapshot.viewerFontPx))) {
+            setViewerFont(Number(snapshot.viewerFontPx));
+          }
+          setViewerWrap(!!snapshot.viewerWrap);
+          setSelection(cached.files, {
+            fromCache: true,
+            routeState: snapshot.routeState || null,
+          });
+          searchWasRun = !!snapshot.searchWasRun;
+          if (searchWasRun && termsInput.value.trim()) {
+            await runSearch({ restoreState: snapshot });
+          }
+          setCacheStatus(
+            `Restored ${cached.files.length.toLocaleString()} saved file${
+              cached.files.length === 1 ? "" : "s"
+            }.`
+          );
+        } catch (error) {
+          setCacheStatus("Could not finish restoring the saved session.", true);
+        } finally {
+          restoringCachedSession = false;
+          scheduleSessionStateSave(true);
+        }
+      }
+
+      function setSelection(files, options = {}) {
+        if (!options.fromCache) {
+          sessionCachingEnabled = false;
+          window.clearTimeout(sessionStateTimer);
+          sessionStateTimer = 0;
+        }
+        selected = mergeSelections([], files);
+        if (window.LogRoute) {
+          window.LogRoute.setSelection(
+            selected,
+            options.routeState || null
+          );
+        }
+        if (!selected.length) {
           setDropInfo("");
           searchBtn.disabled = true;
           clearSearchState();
@@ -1412,17 +1768,13 @@
           setBrowseFill(false);
           return;
         }
-        const totalBytes = files.reduce((sum, f) => sum + f.file.size, 0);
-        const root = files[0].path.split("/")[0] || "(folder)";
-        setDropInfo(
-          `${files.length.toLocaleString()} file${files.length === 1 ? "" : "s"} ` +
-            `(${formatBytes(totalBytes)}) from "${root}"`
-        );
+        showSelectionSummary();
         searchBtn.disabled = false;
         // A new selection drops any previous results and shows the file list so
         // files can be opened right away, before (or without) a search.
         clearSearchState();
         renderBrowseHeatmap();
+        if (!options.fromCache) cacheSelection(selected);
       }
 
       function filesFromInput(fileList) {
@@ -1454,9 +1806,23 @@
       // Open the folder picker. In Chromium this uses the File System Access
       // API so the dialog opens in Downloads; elsewhere it falls back to the
       // native <input webkitdirectory> picker (browser-chosen location).
-      async function pickFolder() {
+      function openFallbackFolderPicker(mode) {
+        pendingSelectionMode = mode;
+        // Clearing the value lets choosing the same folder fire `change` again.
+        folderInput.value = "";
+        folderInput.click();
+      }
+
+      function pickFiles(mode = "replace") {
+        pendingSelectionMode = mode === "add" ? "add" : "replace";
+        filesInput.value = "";
+        filesInput.click();
+      }
+
+      async function pickFolder(mode = "replace") {
+        const selectionMode = mode === "add" ? "add" : "replace";
         if (!directoryPickerSupported) {
-          folderInput.click();
+          openFallbackFolderPicker(selectionMode);
           return;
         }
         let dirHandle;
@@ -1468,32 +1834,45 @@
           // AbortError just means the picker was dismissed; on anything else
           // fall back to the native picker so folder selection still works.
           if (error && error.name === "AbortError") return;
-          folderInput.click();
+          openFallbackFolderPicker(selectionMode);
           return;
         }
-        setDropInfo("Reading folder...");
+        setDropInfo(
+          selectionMode === "add" && selected.length
+            ? "Reading folder to add..."
+            : "Reading folder..."
+        );
         try {
-          setSelection(await filesFromDirectoryHandle(dirHandle));
+          applyIncomingSelection(
+            await filesFromDirectoryHandle(dirHandle),
+            selectionMode
+          );
         } catch (error) {
-          setDropInfo("");
+          showSelectionSummary();
           showConfigError(
             "Could not read the selected folder: " + error.message
           );
         }
       }
 
-      folderInput.addEventListener("change", () => {
-        setSelection(filesFromInput(folderInput.files));
+      filesInput.addEventListener("change", () => {
+        const files = filesFromInput(filesInput.files);
+        const selectionMode = pendingSelectionMode;
+        filesInput.value = "";
+        applyIncomingSelection(files, selectionMode);
       });
 
-      // The dropzone is a <label> wrapping the file input, so a click normally
-      // opens the native picker. When the File System Access API is available,
-      // intercept that click and open the Downloads-rooted picker instead.
-      dropzone.addEventListener("click", (event) => {
-        if (!directoryPickerSupported) return;
-        event.preventDefault();
-        pickFolder();
+      folderInput.addEventListener("change", () => {
+        const files = filesFromInput(folderInput.files);
+        const selectionMode = pendingSelectionMode;
+        folderInput.value = "";
+        applyIncomingSelection(files, selectionMode);
       });
+
+      newFileBtn.addEventListener("click", () => pickFiles("replace"));
+      newFolderBtn.addEventListener("click", () => pickFolder("replace"));
+      addFileBtn.addEventListener("click", () => pickFiles("add"));
+      addFolderBtn.addEventListener("click", () => pickFolder("add"));
 
       // Drag & drop works anywhere on the page, not just over the dropzone. A
       // full-screen overlay appears while files are dragged in, and dropping a
@@ -1508,35 +1887,53 @@
         return !!dt && Array.from(dt.types || []).includes("Files");
       }
 
+      function dropModeAt(clientX) {
+        return clientX < window.innerWidth / 2 ? "replace" : "add";
+      }
+
+      function targetDropMode(mode) {
+        for (const target of dropOverlay.querySelectorAll("[data-drop-mode]")) {
+          target.classList.toggle("targeted", target.dataset.dropMode === mode);
+        }
+      }
+
+      function hideDropOverlay() {
+        dragDepth = 0;
+        dropOverlay.classList.remove("active");
+        targetDropMode("");
+      }
+
       window.addEventListener("dragenter", (event) => {
         if (!dragHasFiles(event)) return;
         event.preventDefault();
         dragDepth++;
         dropOverlay.classList.add("active");
+        targetDropMode(dropModeAt(event.clientX));
       });
       window.addEventListener("dragover", (event) => {
         if (!dragHasFiles(event)) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = "copy";
+        targetDropMode(dropModeAt(event.clientX));
       });
       window.addEventListener("dragleave", (event) => {
         if (!dragHasFiles(event)) return;
         dragDepth = Math.max(0, dragDepth - 1);
-        if (dragDepth === 0) dropOverlay.classList.remove("active");
+        if (dragDepth === 0) hideDropOverlay();
       });
       window.addEventListener("drop", (event) => {
         if (!dragHasFiles(event)) return;
         event.preventDefault();
-        dragDepth = 0;
-        dropOverlay.classList.remove("active");
-        ingestDataTransfer(event.dataTransfer);
+        const selectionMode = dropModeAt(event.clientX);
+        hideDropOverlay();
+        ingestDataTransfer(event.dataTransfer, selectionMode);
       });
 
       // Read dropped items into the selection. Folders are traversed via the
       // entry API; browsers without it fall back to the flat file list. All
       // DataTransfer reads happen synchronously up front because it is cleared
       // once the drop handler returns.
-      async function ingestDataTransfer(dataTransfer) {
+      async function ingestDataTransfer(dataTransfer, mode = "replace") {
         if (!dataTransfer) return;
         const entries = [];
         const items = dataTransfer.items;
@@ -1551,15 +1948,19 @@
           : Array.from(dataTransfer.files || []);
 
         if (entries.length) {
-          setDropInfo("Reading folder...");
+          setDropInfo(
+            mode === "add" && selected.length
+              ? "Reading dropped items to add..."
+              : "Reading dropped items..."
+          );
           try {
             const files = [];
             for (const entry of entries) {
               await walkEntry(entry, files);
             }
-            setSelection(files);
+            applyIncomingSelection(files, mode);
           } catch (error) {
-            setDropInfo("");
+            showSelectionSummary();
             showConfigError(
               "Could not read the dropped items: " + error.message
             );
@@ -1567,16 +1968,9 @@
           return;
         }
         if (flatFiles && flatFiles.length) {
-          setSelection(filesFromInput(flatFiles));
+          applyIncomingSelection(filesFromInput(flatFiles), mode);
         }
       }
-
-      dropzone.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          pickFolder();
-        }
-      });
 
       async function walkEntry(entry, out) {
         if (entry.isFile) {
@@ -1618,12 +2012,17 @@
           termsInput.value = current.map(serializeTerm).join(", ");
         }
         showConfigError("");
+        scheduleSessionStateSave();
       });
 
       searchBtn.addEventListener("click", runSearch);
       cancelBtn.addEventListener("click", () => {
         cancelRequested = true;
       });
+      clearCacheBtn.addEventListener("click", forgetCachedSession);
+      termsInput.addEventListener("input", () => scheduleSessionStateSave());
+      caseInput.addEventListener("change", () => scheduleSessionStateSave());
+      regexInput.addEventListener("change", () => scheduleSessionStateSave());
       termsInput.addEventListener("keydown", (event) => {
         if (event.key === "Enter" && !searchBtn.disabled && !running) runSearch();
       });
@@ -1633,6 +2032,7 @@
           currentPage = 0;
           invalidateGlobalScan();
           renderResults();
+          scheduleSessionStateSave();
         }, 150)
       );
       downloadBtn.addEventListener("click", downloadCsv);
@@ -1761,6 +2161,16 @@
 
       viewerBody.addEventListener("click", onViewerMatchClick);
       viewerBody.addEventListener("scroll", onViewerScroll);
+      window.addEventListener(
+        "logroute:manual-event-removed",
+        onViewerManualEventRemoved
+      );
+      window.addEventListener("logroute:session-state-changed", () =>
+        scheduleSessionStateSave(true)
+      );
+      window.addEventListener("pagehide", () => {
+        if (sessionStateTimer) void writeSessionState();
+      });
       // Chromium exposes a trackpad pinch as a cancelable Ctrl+wheel event;
       // Safari exposes gesture events. Handle both so the image zooms in place
       // instead of the browser scaling the whole page.
@@ -1932,8 +2342,10 @@
         return { combined, highlight, perTerm };
       }
 
-      async function runSearch() {
+      async function runSearch(options = {}) {
         if (running) return;
+        const restoreState =
+          options && options.restoreState ? options.restoreState : null;
         showConfigError("");
         let terms;
         try {
@@ -1952,6 +2364,7 @@
           // clearing the terms and pressing Enter/Search shows the file list.
           clearSearchState();
           renderBrowseHeatmap();
+          scheduleSessionStateSave(true);
           return;
         }
 
@@ -1963,6 +2376,8 @@
           return;
         }
 
+        searchWasRun = true;
+        scheduleSessionStateSave(true);
         running = true;
         cancelRequested = false;
         searchBtn.disabled = true;
@@ -2027,6 +2442,30 @@
         lastRun = ctx;
         displayRoot = commonRoot(Object.keys(ctx.fileCounts));
 
+        let restoredPage = 0;
+        if (restoreState) {
+          activeTerm =
+            typeof restoreState.activeTerm === "string" &&
+            Object.prototype.hasOwnProperty.call(
+              ctx.termCounts,
+              restoreState.activeTerm
+            )
+              ? restoreState.activeTerm
+              : null;
+          activeFile =
+            typeof restoreState.activeFile === "string" &&
+            Object.prototype.hasOwnProperty.call(
+              ctx.fileCounts,
+              restoreState.activeFile
+            )
+              ? restoreState.activeFile
+              : null;
+          restoredPage = Number.isFinite(Number(restoreState.currentPage))
+            ? Math.max(0, Math.trunc(Number(restoreState.currentPage)))
+            : 0;
+          currentPage = restoredPage;
+        }
+
         running = false;
         cancelBtn.style.display = "none";
         searchBtn.disabled = false;
@@ -2038,6 +2477,41 @@
         renderHeatmap(ctx);
         renderTermFilter(ctx);
         renderResults();
+        if (restoreState) {
+          await restoreSearchResultState(restoreState, restoredPage);
+        }
+        scheduleSessionStateSave(true);
+      }
+
+      async function restoreSearchResultState(snapshot, restoredPage) {
+        if (activeFile && storeCapped()) {
+          const path = activeFile;
+          const token = fileScanToken;
+          let rescanned = null;
+          try {
+            rescanned = await rescanFileMatches(path);
+          } catch (error) {
+            rescanned = null;
+          }
+          if (token !== fileScanToken || activeFile !== path) return;
+          if (rescanned) {
+            activeFileMatches = rescanned.matches;
+            activeFileCapped = rescanned.capped;
+          }
+          currentPage = restoredPage;
+          renderResults();
+          return;
+        }
+        if (
+          !activeFile &&
+          snapshot.globalScanKey &&
+          snapshot.globalScanKey === globalScanKey() &&
+          needsGlobalRescan()
+        ) {
+          await runGlobalRescan();
+          currentPage = restoredPage;
+          renderResults();
+        }
       }
 
       // Turn the flat selection into scan tasks, expanding archives when the
@@ -2480,6 +2954,7 @@
       // repaints it as either the browse list or search results.
       function clearSearchState() {
         lastRun = null;
+        searchWasRun = false;
         activeTerm = null;
         activeFile = null;
         activeFileMatches = null;
@@ -2520,6 +2995,7 @@
         fileScanToken++;
         invalidateGlobalScan();
         syncHeatRows();
+        scheduleSessionStateSave();
 
         if (!activeFile) {
           renderResults();
@@ -2611,6 +3087,7 @@
           invalidateGlobalScan();
           syncTermChips();
           renderResults();
+          scheduleSessionStateSave();
         });
         termFilterEl.appendChild(all);
 
@@ -2625,6 +3102,7 @@
             invalidateGlobalScan();
             syncTermChips();
             renderResults();
+            scheduleSessionStateSave();
           });
           termFilterEl.appendChild(chip);
         }
@@ -2753,6 +3231,7 @@
         globalScanLoading = false;
         currentPage = 0;
         renderResults();
+        scheduleSessionStateSave();
         scrollToResults();
       }
 
@@ -2981,6 +3460,7 @@
       function gotoPage(page) {
         currentPage = page;
         renderResults();
+        scheduleSessionStateSave();
         // Land at the top of the results so a new page starts from its first
         // row rather than wherever the previous page was scrolled to.
         resultsHead.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -3774,14 +4254,17 @@
               ? window.LogRouteCore.timestampFromLine(text)
               : Number.NaN;
           const eventable = Number.isFinite(timestamp);
-          const alreadyAdded =
-            data.addedEventLines.has(ln) ||
-            !!(
-              window.LogRoute &&
-              typeof window.LogRoute.hasEventFromLog === "function" &&
-              window.LogRoute.hasEventFromLog(data.path, ln)
-            );
-          if (alreadyAdded) data.addedEventLines.add(ln);
+          const canCheckTimeline =
+            window.LogRoute &&
+            typeof window.LogRoute.hasEventFromLog === "function";
+          const alreadyAdded = canCheckTimeline
+            ? window.LogRoute.hasEventFromLog(data.path, ln)
+            : data.addedEventLines.has(ln);
+          if (alreadyAdded) {
+            data.addedEventLines.add(ln);
+          } else {
+            data.addedEventLines.delete(ln);
+          }
           const classes = ["v-line"];
           if (ln === data.hitLine) classes.push("v-hit");
           if (eventable) classes.push("v-eventable");
@@ -3789,7 +4272,7 @@
           const eventAttributes = eventable
             ? ` data-event-timestamp="${timestamp}" title="${
                 alreadyAdded
-                  ? "Already in the event timeline"
+                  ? "Click to remove this line from the event timeline"
                   : "Click to add this line to the event timeline"
               }"`
             : "";
@@ -3819,6 +4302,27 @@
         if (mark) mark.classList.add("v-cur");
       }
 
+      function onViewerManualEventRemoved(event) {
+        const data = viewerData;
+        const detail = event && event.detail;
+        const lineNo = Number(detail && detail.lineNo);
+        if (
+          !data ||
+          data.path !== String((detail && detail.path) || "") ||
+          !Number.isFinite(lineNo)
+        ) {
+          return;
+        }
+        data.addedEventLines.delete(lineNo);
+        if (!viewerWindow) return;
+        const row = viewerWindow.querySelector(
+          `.v-line[data-ln="${lineNo}"]`
+        );
+        if (!row) return;
+        row.classList.remove("v-event-added");
+        row.title = "Click to add this line to the event timeline";
+      }
+
       // A line can contain several highlighted matches, represented by repeated
       // line numbers in matchLines. Combine the clicked mark's position within
       // its row with the first index for that line to focus the exact occurrence
@@ -3836,31 +4340,51 @@
         if (!mark) {
           const timestamp = Number(row.dataset.eventTimestamp);
           if (!Number.isFinite(timestamp)) return;
-          if (
-            !window.LogRoute ||
-            typeof window.LogRoute.addEventFromLog !== "function"
-          ) {
+          const route = window.LogRoute;
+          const alreadyAdded =
+            route && typeof route.hasEventFromLog === "function"
+              ? route.hasEventFromLog(data.path, ln)
+              : row.classList.contains("v-event-added");
+          const routeAction = alreadyAdded
+            ? "removeEventFromLog"
+            : "addEventFromLog";
+          if (!route || typeof route[routeAction] !== "function") {
             showViewerEventStatus(
               "The event timeline is not available for this selection.",
               true
             );
             return;
           }
-          const result = window.LogRoute.addEventFromLog({
-            timestamp,
-            content: getLineText(data, ln),
-            path: data.path,
-            lineNo: ln,
-          });
+          const result = alreadyAdded
+            ? route.removeEventFromLog(data.path, ln)
+            : route.addEventFromLog({
+                timestamp,
+                content: getLineText(data, ln),
+                path: data.path,
+                lineNo: ln,
+              });
           if (result && result.ok) {
-            data.addedEventLines.add(ln);
-            row.classList.add("v-event-added");
-            row.title = "Already in the event timeline";
-            showViewerEventStatus(result.message || "Added to event timeline.");
+            if (alreadyAdded) {
+              data.addedEventLines.delete(ln);
+              row.classList.remove("v-event-added");
+              row.title = "Click to add this line to the event timeline";
+              showViewerEventStatus(
+                result.message || "Removed from event timeline."
+              );
+            } else {
+              data.addedEventLines.add(ln);
+              row.classList.add("v-event-added");
+              row.title = "Click to remove this line from the event timeline";
+              showViewerEventStatus(
+                result.message || "Added to event timeline."
+              );
+            }
           } else {
             showViewerEventStatus(
               (result && result.message) ||
-                "Could not add this line to the event timeline.",
+                (alreadyAdded
+                  ? "Could not remove this line from the event timeline."
+                  : "Could not add this line to the event timeline."),
               true
             );
           }
@@ -4302,6 +4826,7 @@
           drawViewerMatchMap();
         }
         updateViewerZoomLabel();
+        scheduleSessionStateSave();
       }
 
       // Toggle fit-to-width wrapping. Row height is unchanged (one visual row is
@@ -4320,6 +4845,7 @@
           reanchorViewer(topLine);
           scheduleViewerRender();
         }
+        scheduleSessionStateSave();
       }
 
       // Bring the focused match's mark into horizontal view (long, unwrapped
@@ -4819,6 +5345,7 @@
           "Note: automatic archive expansion (.zip/.tar/.gz) needs a newer " +
           "browser; plain folders still work here.";
       }
+      void restoreCachedSession();
     </script>
   </body>
 </html>
