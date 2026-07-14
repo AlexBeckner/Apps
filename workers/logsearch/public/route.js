@@ -8,6 +8,30 @@
   const VIEW_WIDTH = 1000;
   const VIEW_HEIGHT = 560;
   const TILE_SIZE = 256;
+  const WEB_MERCATOR_HALF_WORLD = 20037508.342789244;
+
+  function naipTileUrl(zoom, x, y) {
+    const tileSpan = (WEB_MERCATOR_HALF_WORLD * 2) / 2 ** zoom;
+    const minX = -WEB_MERCATOR_HALF_WORLD + x * tileSpan;
+    const maxX = minX + tileSpan;
+    const maxY = WEB_MERCATOR_HALF_WORLD - y * tileSpan;
+    const minY = maxY - tileSpan;
+    const parameters = new URLSearchParams({
+      bbox: [minX, minY, maxX, maxY]
+        .map((coordinate) => coordinate.toFixed(3))
+        .join(","),
+      bboxSR: "3857",
+      imageSR: "3857",
+      size: `${TILE_SIZE},${TILE_SIZE}`,
+      format: "jpg",
+      compressionQuality: "90",
+      interpolation: "RSP_BilinearInterpolation",
+      renderingRule: JSON.stringify({ rasterFunction: "NaturalColor" }),
+      f: "image",
+    });
+    return `https://imagery.nationalmap.gov/arcgis/rest/services/USGSNAIPPlus/ImageServer/exportImage?${parameters}`;
+  }
+
   const TILE_SOURCES = {
     osm: {
       maxZoom: 19,
@@ -15,9 +39,8 @@
         `https://tile.openstreetmap.org/${zoom}/${x}/${y}.png`,
     },
     satellite: {
-      maxZoom: 16,
-      url: (zoom, x, y) =>
-        `https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/${zoom}/${y}/${x}`,
+      maxZoom: 19,
+      url: naipTileUrl,
     },
   };
 

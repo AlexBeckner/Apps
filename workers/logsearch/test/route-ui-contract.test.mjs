@@ -37,7 +37,7 @@ test("route dependencies load before the main inline application", async () => {
   assert.ok(route < inline);
 });
 
-test("map layer control defaults to OSM and offers satellite imagery", async () => {
+test("map layer control defaults to OSM and offers NAIP imagery", async () => {
   const [html, routeScript, css] = await Promise.all([
     readFile(new URL("public/index.html", root), "utf8"),
     readFile(new URL("public/route.js", root), "utf8"),
@@ -49,14 +49,18 @@ test("map layer control defaults to OSM and offers satellite imagery", async () 
 
   assert.ok(control);
   assert.match(control, /<option value="osm" selected>Street \(OSM\)<\/option>/);
-  assert.match(control, /<option value="satellite">Satellite<\/option>/);
+  assert.match(
+    control,
+    /<option value="satellite">Satellite \(NAIP\)<\/option>/
+  );
   assert.match(control, /<option value="local">Local plot<\/option>/);
-  assert.match(routeScript, /USGSImageryOnly\/MapServer\/tile/);
+  assert.match(routeScript, /USGSNAIPPlus\/ImageServer\/exportImage/);
+  assert.match(routeScript, /bboxSR: "3857"/);
   assert.match(
     routeScript,
     /mapStyleSelect\.addEventListener\("change", changeMapStyle\)/
   );
-  assert.match(html, /USDA, USGS The National Map/);
+  assert.match(html, /USGS, USDA, The National Map/);
   assert.match(css, /\.route-map-buttons select\s*\{/);
 });
 
