@@ -8,6 +8,7 @@ keep_vars = true
 ALLOWED_ORIGIN = "https://deploydashboard.appliedapps.workers.dev"
 SNAPSHOT_SIZE = "10"
 CACHE_SECONDS = "10"
+STALE_ACTIVE_RECHECK_SECONDS = "300"
 
 [[d1_databases]]
 binding = "DB"

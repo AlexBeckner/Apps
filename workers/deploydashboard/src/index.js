@@ -1,5 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 import { companyAuthResponse } from "../../githubdashboard/src/company-auth.js";
+import {
+  AWAITING_DEPLOY,
+  FINISHED_BUILD_STATES,
+  deriveState,
+  parseRateLimitReset,
+  parseRetryAfterMs,
+} from "./buildkite.js";
 
 const BUILDKITE_API_BASE = "https://api.buildkite.com/v2";
 const DEFAULT_ORG_SLUG = "mosaic";
@@ -8,15 +15,20 @@ const DEFAULT_FLASHING_PIPELINE = "core-stack-aaos-flashing";
 const GITHUB_OWNER = "AppliedNeuron";
 const GITHUB_REPO = "core-stack";
 const HISTORY_SIZE = 10;
+const DEFAULT_SNAPSHOT_SIZE = 10;
 const DEFAULT_CACHE_SECONDS = 10;
-const DEFAULT_REFRESH_LEASE_SECONDS = 25;
+const DEFAULT_REFRESH_LEASE_SECONDS = 120;
 const DEFAULT_BUILD_DETAIL_LEASE_SECONDS = 60;
+const DEFAULT_STALE_ACTIVE_RECHECK_SECONDS = 300;
+const DEFAULT_BUILDKITE_FETCH_TIMEOUT_MS = 8000;
+const BUILDKITE_MAX_ATTEMPTS = 2;
+const BUILDKITE_RETRY_BASE_MS = 250;
+const MAX_BUILDKITE_BODY_BYTES = 20 * 1024 * 1024;
 const BACKFILL_PER_PAGE = 100;
 const DEFAULT_BACKFILL_PAGES = 50;
 const MAX_BACKFILL_PAGES = 200;
 const MAX_STALE_ACTIVE_RECHECKS = 10;
 const REFRESH_SCHEDULER_NAME = "global-refresh-scheduler";
-const AWAITING_DEPLOY = "awaiting_deploy";
 
 const PR_NUMBER_RE = /\(#(\d+)\)/g;
 const CANONICAL_RIG_RE = /^(?:cosmo|wanda|(?:rog|mce|dmx)\d{3})$/;
@@ -34,7 +46,6 @@ const AAOS_VERSION_KEYS = new Set([
   "version",
 ]);
 const HIDDEN_JOB_TYPES = new Set(["wait", "waiter"]);
-const FINISHED_BUILD_STATES = new Set(["passed", "failed", "canceled", "skipped"]);
 const ACTIVE_JOB_STATES = new Set([
   "accepted",
   "assigned",
@@ -53,7 +64,9 @@ const NON_TERMINAL_STATES = [
   "blocked_failed",
   "failing",
   "canceling",
+  AWAITING_DEPLOY,
 ];
+const RETRYABLE_BUILDKITE_STATUSES = new Set([408, 425, 500, 502, 503, 504]);
 const IN_PROGRESS_STATES = new Set([
   "creating",
   "scheduled",
@@ -68,8 +81,13 @@ export class RefreshScheduler extends DurableObject {
   async start() {
     const intervalMs = refreshIntervalMs(this.env);
     const currentAlarm = await this.ctx.storage.getAlarm();
-    if (!currentAlarm || currentAlarm > Date.now() + intervalMs * 2) {
-      await this.ctx.storage.setAlarm(Date.now() + 1000);
+    const now = Date.now();
+    if (
+      !currentAlarm ||
+      currentAlarm < now - intervalMs ||
+      currentAlarm > now + intervalMs * 2
+    ) {
+      await this.ctx.storage.setAlarm(now + 1000);
     }
     return {
       configured: true,
@@ -252,6 +270,11 @@ async function handleHealth(env) {
       db_total_builds: stats.total_builds,
       last_event_at: stats.last_event_at,
       last_refresh_at: await getMeta(env, metaKey(source.key, "last_refresh_at")),
+      last_refresh_attempt_at: await getMeta(
+        env,
+        metaKey(source.key, "last_refresh_attempt_at")
+      ),
+      rate_limited_until: await currentRateLimitUntil(env, source.key),
     });
   }
 
@@ -389,7 +412,9 @@ async function buildSnapshotPayload(
   { historySize = HISTORY_SIZE, errors = [], rateLimitedUntil = null } = {}
 ) {
   const aggregate = await aggregateSnapshot(env, source.key, historySize);
-  const fetchedAt = Math.floor(Date.now() / 1000);
+  const fetchedAt =
+    Number(await getMeta(env, metaKey(source.key, "last_refresh_at"))) ||
+    Math.floor(Date.now() / 1000);
   return {
     rigs: aggregate.rigs,
     fetched_at: fetchedAt,
@@ -404,7 +429,14 @@ async function buildSnapshotPayload(
 
 async function getCachedSnapshot(env, source, historySize = HISTORY_SIZE) {
   const cached = await readCachedSnapshot(env, source.key, historySize);
-  if (cached) return cached;
+  if (cached) {
+    const rateLimitedUntil = await currentRateLimitUntil(env, source.key);
+    return {
+      ...cached,
+      rate_limited_until:
+        rateLimitedUntil > Date.now() / 1000 ? rateLimitedUntil : null,
+    };
+  }
 
   return {
     rigs: [],
@@ -461,6 +493,15 @@ function trimSnapshotHistory(snapshot, historySize = HISTORY_SIZE) {
 }
 
 async function refreshSource(env, source) {
+  const knownRateLimitUntil = await currentRateLimitUntil(env, source.key);
+  if (knownRateLimitUntil > Date.now() / 1000) {
+    return {
+      errors: [],
+      rate_limited_until: knownRateLimitUntil,
+      skipped: true,
+    };
+  }
+
   const lease = await acquireRefreshLease(env, source.key);
   if (!lease.acquired) {
     return { errors: [], rate_limited_until: null, skipped: true };
@@ -469,10 +510,14 @@ async function refreshSource(env, source) {
   const errors = [];
   let rateLimitedUntil = null;
   let builds = [];
+  let fetchSucceeded = false;
+  let storeSucceeded = true;
+  let staleCheckedNumbers = [];
 
   try {
     try {
       builds = await fetchRecentBuilds(env, source);
+      fetchSucceeded = true;
     } catch (error) {
       errors.push(buildkiteErrorMessage(error));
       rateLimitedUntil = error.rateLimitedUntil || null;
@@ -480,6 +525,7 @@ async function refreshSource(env, source) {
 
     if (builds.length) {
       const rescue = await refreshStaleActiveBuilds(env, source, builds);
+      staleCheckedNumbers = rescue.checked_numbers;
       builds = builds.concat(rescue.builds);
       errors.push(...rescue.errors);
       if (!rateLimitedUntil && rescue.rate_limited_until) {
@@ -487,14 +533,29 @@ async function refreshSource(env, source) {
       }
       try {
         await saveBuildsWithSummary(env, source.key, builds);
+        await markBuildsChecked(env, source.key, staleCheckedNumbers);
       } catch (error) {
+        storeSucceeded = false;
         const message = `D1 write failed during refresh: ${error.message || error}`;
-        console.error(message);
+        console.error({
+          event: "deploydashboard_refresh_store_failed",
+          source: source.key,
+          message,
+        });
         errors.push(message.slice(0, 300));
       }
     }
 
-    await setMeta(env, metaKey(source.key, "last_refresh_at"), String(Math.floor(Date.now() / 1000)));
+    const attemptedAt = Math.floor(Date.now() / 1000);
+    await setMeta(env, metaKey(source.key, "last_refresh_attempt_at"), String(attemptedAt));
+    if (fetchSucceeded && storeSucceeded) {
+      await setMeta(env, metaKey(source.key, "last_refresh_at"), String(attemptedAt));
+    }
+    if (rateLimitedUntil) {
+      await rememberRateLimit(env, source.key, rateLimitedUntil);
+    } else if (fetchSucceeded) {
+      await rememberRateLimit(env, source.key, 0);
+    }
     await setMeta(env, metaKey(source.key, "last_refresh_errors"), JSON.stringify(errors));
     await writeCachedSnapshot(env, source, errors, rateLimitedUntil);
     return { errors, rate_limited_until: rateLimitedUntil };
@@ -504,11 +565,15 @@ async function refreshSource(env, source) {
 }
 
 async function fetchRecentBuilds(env, source) {
-  return buildkiteJson(env, `${buildsUrl(source)}?${new URLSearchParams({
+  const builds = await buildkiteJson(env, `${buildsUrl(source)}?${new URLSearchParams({
     per_page: String(snapshotSize(env)),
     page: "1",
     include_retried_jobs: "true",
   })}`);
+  if (!Array.isArray(builds)) {
+    throw httpError(502, `Unexpected Buildkite response shape: ${typeof builds}`);
+  }
+  return builds;
 }
 
 async function fetchBuildDetail(env, source, buildNumber) {
@@ -520,25 +585,123 @@ async function buildkiteJson(env, url) {
     throw httpError(500, "Worker secret BUILDKITE_API_TOKEN is not configured.");
   }
 
-  const response = await fetch(url, {
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${env.BUILDKITE_API_TOKEN}`,
-      "User-Agent": "deploydashboard-worker/0.1",
-    },
-  });
-  const text = await response.text();
+  let lastError = null;
+  for (let attempt = 0; attempt < BUILDKITE_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await buildkiteJsonAttempt(env, url);
+    } catch (error) {
+      lastError = error;
+      if (!error.retryable || attempt + 1 >= BUILDKITE_MAX_ATTEMPTS) {
+        throw error;
+      }
+      await sleep(buildkiteRetryDelayMs(error, attempt));
+    }
+  }
+  throw lastError || httpError(502, "Buildkite request failed.");
+}
+
+async function buildkiteJsonAttempt(env, url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    buildkiteFetchTimeoutMs(env)
+  );
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${env.BUILDKITE_API_TOKEN}`,
+        "User-Agent": "deploydashboard-worker/0.1",
+      },
+      signal: controller.signal,
+    });
+  } catch (cause) {
+    clearTimeout(timeout);
+    const error = httpError(
+      502,
+      controller.signal.aborted
+        ? "Buildkite request timed out."
+        : `Buildkite request failed: ${cause?.message || cause}`
+    );
+    error.retryable = true;
+    throw error;
+  }
+
+  let text;
+  try {
+    text = await responseTextWithinLimit(response);
+  } catch (cause) {
+    const error = httpError(
+      502,
+      controller.signal.aborted
+        ? "Buildkite response timed out."
+        : cause?.message || "Buildkite response could not be read."
+    );
+    error.retryable = cause?.retryable !== false;
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!response.ok) {
     const error = httpError(response.status, `${response.status} ${response.statusText}: ${text.slice(0, 200)}`);
     error.bodyText = text;
     error.rateLimitedUntil = response.status === 429 ? parseRateLimitReset(response, text) : null;
+    error.retryable = RETRYABLE_BUILDKITE_STATUSES.has(response.status);
+    error.retryAfterMs = parseRetryAfterMs(response.headers.get("Retry-After"));
     throw error;
   }
   try {
     return JSON.parse(text);
   } catch {
-    throw httpError(502, "Unexpected Buildkite response shape: invalid JSON");
+    const error = httpError(502, "Unexpected Buildkite response shape: invalid JSON");
+    error.retryable = true;
+    throw error;
   }
+}
+
+async function responseTextWithinLimit(response) {
+  const contentLength = Number(response.headers.get("Content-Length"));
+  if (Number.isFinite(contentLength) && contentLength > MAX_BUILDKITE_BODY_BYTES) {
+    throw nonRetryableBuildkiteError(
+      "Buildkite response exceeded the dashboard size limit."
+    );
+  }
+  if (!response.body) return "";
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let byteCount = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    byteCount += value.byteLength;
+    if (byteCount > MAX_BUILDKITE_BODY_BYTES) {
+      await reader.cancel();
+      throw nonRetryableBuildkiteError(
+        "Buildkite response exceeded the dashboard size limit."
+      );
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
+function nonRetryableBuildkiteError(message) {
+  const error = httpError(502, message);
+  error.retryable = false;
+  return error;
+}
+
+function buildkiteRetryDelayMs(error, attempt) {
+  const exponential = BUILDKITE_RETRY_BASE_MS * 2 ** attempt;
+  const retryAfter = Number(error.retryAfterMs) || 0;
+  return Math.min(5000, Math.max(exponential, retryAfter));
+}
+
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function refreshStaleActiveBuilds(env, source, snapshotBuilds) {
@@ -547,8 +710,14 @@ async function refreshStaleActiveBuilds(env, source, snapshotBuilds) {
       .map((build) => build?.number)
       .filter((number) => Number.isInteger(number))
   );
-  const activeNumbers = await getActiveBuildNumbers(env, source.key, MAX_STALE_ACTIVE_RECHECKS);
+  const activeNumbers = await getActiveBuildNumbers(
+    env,
+    source.key,
+    MAX_STALE_ACTIVE_RECHECKS,
+    [...snapshotNumbers]
+  );
   const builds = [];
+  const checkedNumbers = [];
   const errors = [];
   let rateLimitedUntil = null;
 
@@ -556,20 +725,47 @@ async function refreshStaleActiveBuilds(env, source, snapshotBuilds) {
     if (snapshotNumbers.has(number)) continue;
     try {
       builds.push(await fetchBuildDetail(env, source, number));
+      checkedNumbers.push(number);
     } catch (error) {
       errors.push(buildkiteErrorMessage(error));
       if (!rateLimitedUntil && error.rateLimitedUntil) {
         rateLimitedUntil = error.rateLimitedUntil;
       }
-      if (error.rateLimitedUntil) break;
+      if (!error.rateLimitedUntil) {
+        checkedNumbers.push(number);
+      }
+      if (error.rateLimitedUntil || error.retryable) break;
     }
   }
 
-  return { builds, errors, rate_limited_until: rateLimitedUntil };
+  return {
+    builds,
+    checked_numbers: checkedNumbers,
+    errors,
+    rate_limited_until: rateLimitedUntil,
+  };
 }
 
 async function backfill(env, source, maxPages) {
   const cap = Math.max(1, Math.min(maxPages || DEFAULT_BACKFILL_PAGES, MAX_BACKFILL_PAGES));
+  const knownRateLimitUntil = await currentRateLimitUntil(env, source.key);
+  if (knownRateLimitUntil > Date.now() / 1000) {
+    return {
+      ok: false,
+      stopped_reason: "rate_limited",
+      pages_fetched: 0,
+      builds_seen: 0,
+      builds_written: 0,
+      builds_new: 0,
+      builds_updated: 0,
+      builds_unchanged: 0,
+      errors: ["Buildkite rate limit is still active."],
+      rate_limited_until: knownRateLimitUntil,
+      max_pages: cap,
+      stats: await storeStats(env, source.key),
+    };
+  }
+
   let pagesFetched = 0;
   let buildsSeen = 0;
   let buildsWritten = 0;
@@ -592,6 +788,9 @@ async function backfill(env, source, maxPages) {
       errors.push(`Buildkite API returned on page ${page}: ${error.message || error}`);
       stoppedReason = error.rateLimitedUntil ? "rate_limited" : "http_error";
       rateLimitedUntil = error.rateLimitedUntil || null;
+      if (rateLimitedUntil) {
+        await rememberRateLimit(env, source.key, rateLimitedUntil);
+      }
       break;
     }
 
@@ -624,7 +823,16 @@ async function backfill(env, source, maxPages) {
     }
   }
 
-  await setMeta(env, metaKey(source.key, "last_refresh_at"), String(Math.floor(Date.now() / 1000)));
+  const attemptedAt = Math.floor(Date.now() / 1000);
+  await setMeta(env, metaKey(source.key, "last_refresh_attempt_at"), String(attemptedAt));
+  if (pagesFetched > 0) {
+    await setMeta(env, metaKey(source.key, "last_refresh_at"), String(attemptedAt));
+  }
+  if (!rateLimitedUntil && pagesFetched > 0) {
+    await rememberRateLimit(env, source.key, 0);
+  }
+  await setMeta(env, metaKey(source.key, "last_refresh_errors"), JSON.stringify(errors));
+  await writeCachedSnapshot(env, source, errors, rateLimitedUntil);
 
   return {
     ok: errors.length === 0,
@@ -692,6 +900,19 @@ async function getBuildAttempts(env, source, buildNumber, { force }) {
     (force && !(await buildDetailLeaseActive(env, source.key, buildNumber)));
 
   if (needsDetailFetch) {
+    const knownRateLimitUntil = await currentRateLimitUntil(env, source.key);
+    if (knownRateLimitUntil > Date.now() / 1000) {
+      errors.push("Buildkite rate limit is still active.");
+      rateLimitedUntil = knownRateLimitUntil;
+      return raw
+        ? {
+            ...buildToAttempts(raw),
+            errors,
+            rate_limited_until: rateLimitedUntil,
+          }
+        : emptyBuildAttempts(buildNumber, errors, rateLimitedUntil);
+    }
+
     const lease = await acquireBuildDetailLease(env, source.key, buildNumber);
     if (!lease.acquired) {
       return raw
@@ -705,9 +926,13 @@ async function getBuildAttempts(env, source, buildNumber, { force }) {
     try {
       raw = await fetchBuildDetail(env, source, buildNumber);
       await saveBuildsWithSummary(env, source.key, [raw]);
+      await markBuildsChecked(env, source.key, [buildNumber]);
     } catch (error) {
       errors.push(buildkiteErrorMessage(error));
       rateLimitedUntil = error.rateLimitedUntil || null;
+      if (rateLimitedUntil) {
+        await rememberRateLimit(env, source.key, rateLimitedUntil);
+      }
     }
   }
 
@@ -827,7 +1052,12 @@ async function saveBuildsWithSummary(env, sourceKey, builds) {
         created_at = excluded.created_at,
         last_event_at = excluded.last_event_at,
         raw_json = excluded.raw_json,
-        updated_at = excluded.updated_at`
+        updated_at = excluded.updated_at
+      WHERE builds.rig IS NOT excluded.rig
+         OR builds.state IS NOT excluded.state
+         OR builds.created_at IS NOT excluded.created_at
+         OR builds.last_event_at IS NOT excluded.last_event_at
+         OR builds.raw_json IS NOT excluded.raw_json`
     ).bind(...values).run();
   }
 
@@ -915,16 +1145,53 @@ async function getBuild(env, sourceKey, buildNumber) {
   return row ? decodeRawBuild(row.raw_json) : null;
 }
 
-async function getActiveBuildNumbers(env, sourceKey, limit) {
-  const placeholders = NON_TERMINAL_STATES.map(() => "?").join(", ");
+async function getActiveBuildNumbers(env, sourceKey, limit, excludedNumbers = []) {
+  const statePlaceholders = NON_TERMINAL_STATES.map(() => "?").join(", ");
+  const terminalStates = [...FINISHED_BUILD_STATES];
+  const terminalPlaceholders = terminalStates.map(() => "?").join(", ");
+  const exclusions = new Set(excludedNumbers.filter(Number.isInteger));
+  const checkedBefore = Date.now() / 1000 - staleActiveRecheckSeconds(env);
+  const candidateLimit = limit + exclusions.size;
   const result = await env.DB.prepare(
     `SELECT build_number
      FROM builds
-     WHERE source = ? AND state IN (${placeholders})
-     ORDER BY last_event_at DESC, build_number DESC
+     WHERE source = ?
+       AND state IN (${statePlaceholders})
+       AND updated_at <= ?
+       AND (
+         state <> ?
+         OR COALESCE(json_extract(raw_json, '$.state'), 'unknown')
+            NOT IN (${terminalPlaceholders})
+       )
+     ORDER BY updated_at ASC, build_number DESC
      LIMIT ?`
-  ).bind(sourceKey, ...NON_TERMINAL_STATES, limit).all();
-  return (result.results || []).map((row) => Number(row.build_number)).filter(Number.isInteger);
+  ).bind(
+    sourceKey,
+    ...NON_TERMINAL_STATES,
+    checkedBefore,
+    AWAITING_DEPLOY,
+    ...terminalStates,
+    candidateLimit
+  ).all();
+  return (result.results || [])
+    .map((row) => Number(row.build_number))
+    .filter((number) => Number.isInteger(number) && !exclusions.has(number))
+    .slice(0, limit);
+}
+
+async function markBuildsChecked(env, sourceKey, buildNumbers) {
+  const numbers = [...new Set(buildNumbers)].filter(Number.isInteger);
+  if (!numbers.length) return;
+
+  const checkedAt = Date.now() / 1000;
+  for (const chunk of chunked(numbers, 90)) {
+    const placeholders = chunk.map(() => "?").join(", ");
+    await env.DB.prepare(
+      `UPDATE builds
+       SET updated_at = ?
+       WHERE source = ? AND build_number IN (${placeholders})`
+    ).bind(checkedAt, sourceKey, ...chunk).run();
+  }
 }
 
 async function rigTotals(env, sourceKey) {
@@ -1068,6 +1335,22 @@ async function setMeta(env, key, value) {
        value = excluded.value,
        updated_at = excluded.updated_at`
   ).bind(key, value, Date.now() / 1000).run();
+}
+
+async function currentRateLimitUntil(env, _sourceKey) {
+  return Number(await getMeta(env, buildkiteRateLimitKey())) || 0;
+}
+
+async function rememberRateLimit(env, _sourceKey, until) {
+  const current = Number(await getMeta(env, buildkiteRateLimitKey())) || 0;
+  const requested = Number(until) || 0;
+  let next = Math.max(current, requested);
+  if (requested <= 0 && current <= Date.now() / 1000) {
+    next = 0;
+  }
+  if (current !== next) {
+    await setMeta(env, buildkiteRateLimitKey(), String(next));
+  }
 }
 
 function configuredSources(env) {
@@ -1254,21 +1537,6 @@ function buildAttemptChains(jobs) {
   return attempt;
 }
 
-function deriveState(build) {
-  const raw = String(build.state || "unknown");
-  const jobs = build.jobs;
-  if (Array.isArray(jobs)) {
-    return jobs.some(isPendingProceedBlock) ? AWAITING_DEPLOY : raw;
-  }
-  return raw === "blocked" || raw === "blocked_failed" ? AWAITING_DEPLOY : raw;
-}
-
-function isPendingProceedBlock(job) {
-  if (!job || typeof job !== "object") return false;
-  if (job.type !== "manual" || job.state !== "blocked") return false;
-  return !String(job.label || "").toLowerCase().includes("force unlock");
-}
-
 function finishedBuildHasActiveJobs(build) {
   if (!FINISHED_BUILD_STATES.has(String(build.state || ""))) return false;
   const jobs = build.jobs;
@@ -1414,25 +1682,6 @@ function decodeRawBuild(rawJson) {
   }
 }
 
-function parseRateLimitReset(response, bodyText) {
-  const normalize = (value) => {
-    const now = Date.now() / 1000;
-    return value > now ? value : now + value;
-  };
-  try {
-    const data = JSON.parse(bodyText);
-    if (Number.isFinite(data?.reset) && data.reset > 0) return normalize(Number(data.reset));
-  } catch {
-    // Fall through to headers.
-  }
-  for (const header of ["RateLimit-Reset", "X-RateLimit-Reset"]) {
-    const value = Number(response.headers.get(header));
-    if (Number.isFinite(value) && value > 0) return normalize(value);
-  }
-  const retryAfter = Number(response.headers.get("Retry-After"));
-  return Number.isFinite(retryAfter) && retryAfter > 0 ? Date.now() / 1000 + retryAfter : null;
-}
-
 function buildkiteErrorMessage(error) {
   const status = Number.isInteger(error.status) ? error.status : "?";
   return `Buildkite API returned ${status}: ${error.bodyText || error.message || error}`.slice(0, 300);
@@ -1521,8 +1770,14 @@ function httpError(status, message) {
 }
 
 function snapshotSize(env) {
-  const value = Number(env.SNAPSHOT_SIZE || 10);
-  return Math.max(1, Math.min(100, Number.isFinite(value) ? Math.floor(value) : 10));
+  const value = Number(env.SNAPSHOT_SIZE || DEFAULT_SNAPSHOT_SIZE);
+  return Math.max(
+    1,
+    Math.min(
+      100,
+      Number.isFinite(value) ? Math.floor(value) : DEFAULT_SNAPSHOT_SIZE
+    )
+  );
 }
 
 function snapshotHistorySize(url) {
@@ -1550,6 +1805,36 @@ function buildDetailLeaseSeconds(env) {
   return Math.max(10, Math.min(300, Number.isFinite(value) ? Math.floor(value) : DEFAULT_BUILD_DETAIL_LEASE_SECONDS));
 }
 
+function staleActiveRecheckSeconds(env) {
+  const value = Number(
+    env.STALE_ACTIVE_RECHECK_SECONDS || DEFAULT_STALE_ACTIVE_RECHECK_SECONDS
+  );
+  return Math.max(
+    30,
+    Math.min(
+      3600,
+      Number.isFinite(value)
+        ? Math.floor(value)
+        : DEFAULT_STALE_ACTIVE_RECHECK_SECONDS
+    )
+  );
+}
+
+function buildkiteFetchTimeoutMs(env) {
+  const value = Number(
+    env.BUILDKITE_FETCH_TIMEOUT_MS || DEFAULT_BUILDKITE_FETCH_TIMEOUT_MS
+  );
+  return Math.max(
+    1000,
+    Math.min(
+      30000,
+      Number.isFinite(value)
+        ? Math.floor(value)
+        : DEFAULT_BUILDKITE_FETCH_TIMEOUT_MS
+    )
+  );
+}
+
 function normalizePageCap(value) {
   const number = Number(value || DEFAULT_BACKFILL_PAGES);
   return Math.max(1, Math.min(MAX_BACKFILL_PAGES, Number.isFinite(number) ? Math.floor(number) : DEFAULT_BACKFILL_PAGES));
@@ -1565,6 +1850,10 @@ function metaKey(sourceKey, name) {
 
 function snapshotCacheKey(sourceKey) {
   return metaKey(sourceKey, "snapshot_json");
+}
+
+function buildkiteRateLimitKey() {
+  return metaKey("buildkite", "rate_limited_until");
 }
 
 function schedulerMetaKey(name) {

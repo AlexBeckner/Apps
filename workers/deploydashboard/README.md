@@ -9,6 +9,11 @@ serves the dashboard UI plus JSON API from the same protected origin.
 Automatic Buildkite refreshes are page-independent. The cron trigger runs every
 minute only as a watchdog to arm the Durable Object alarm if needed; the
 dashboard's 10-second browser poll only reads the latest cached snapshot.
+Each refresh reads only the latest 10 builds and retries transient API failures
+once. Every five minutes it uses small, targeted detail requests to reconcile
+older builds that were last seen in a non-terminal state. A remembered
+Buildkite rate limit pauses upstream requests until the reset time instead of
+repeatedly spending failed calls.
 
 ## Endpoints
 
