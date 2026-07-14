@@ -1135,8 +1135,14 @@
                     <button class="route-map-zoom" id="route-zoom-in" type="button" title="Zoom in" hidden>+</button>
                     <button id="route-fit" type="button">Fit route</button>
                   </div>
+                  <aside
+                    class="route-selection-details"
+                    id="route-selection-details"
+                    aria-label="Selected route point or event details"
+                    hidden
+                  ></aside>
                   <div class="route-tooltip" id="route-tooltip" hidden></div>
-                  <div class="route-map-hint" id="route-map-hint">Click map, then use left/right arrows to step &middot; Space to play/pause &middot; Drag to move &middot; Pinch or scroll to zoom</div>
+                  <div class="route-map-hint" id="route-map-hint">Click a point to jump &middot; Use left/right arrows to step &middot; Space to play/pause &middot; Drag to move &middot; Pinch or scroll to zoom</div>
                   <div class="route-map-attribution" id="route-attribution" hidden>
                     <span id="route-attribution-osm">&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a></span>
                     <span id="route-attribution-satellite" hidden>NAIP imagery: <a href="https://www.usgs.gov/programs/national-geospatial-program/national-map" target="_blank" rel="noopener noreferrer">USGS, USDA, The National Map</a></span>
@@ -1155,7 +1161,7 @@
                     <span class="route-time" id="route-time"></span>
                   </div>
                   <div class="route-legend" aria-label="Route legend">
-                    <span class="route-legend-item"><span class="route-swatch"></span><span id="route-legend-label">Route</span></span>
+                    <span class="route-legend-item"><span class="route-swatch disengaged-speed"></span><span id="route-legend-label">Route</span></span>
                     <span class="route-legend-item" id="route-engaged-legend" hidden><span class="route-swatch engaged"></span>Engaged</span>
                     <span class="route-legend-item"><span class="route-swatch start"></span>Start</span>
                     <span class="route-legend-item"><span class="route-swatch end"></span>End</span>

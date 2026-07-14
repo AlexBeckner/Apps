@@ -21,6 +21,14 @@ test("detects route-related log files", () => {
     "anchor"
   );
   assert.equal(
+    roleForPath("run/stack_dds_bridge_driver_stdout.txt"),
+    "anchor"
+  );
+  assert.equal(
+    roleForPath("run/ego_state_estimator_stdout.txt"),
+    "speed"
+  );
+  assert.equal(
     roleForPath("run/annotation_notes_123.yaml"),
     "annotation-yaml"
   );
@@ -88,6 +96,116 @@ test("parses localization, coordinate anchors, and annotations", () => {
   assert.ok(Math.abs(withOdometry.points[0].lon - -122.039) < 0.001);
 });
 
+test("interpolates reported vehicle speed onto route points", () => {
+  const accumulator = createAccumulator();
+  const localization = createFileParser(
+    "run/localization_stdout.txt",
+    accumulator
+  );
+  localization.pushLine(
+    "Successfully Updated Estimation: {Timestamp: 1783962760, UTM coord: {500000, 4100000}}"
+  );
+  localization.pushLine(
+    "Successfully Updated Estimation: {Timestamp: 1783962770, UTM coord: {500020, 4100000}}"
+  );
+  localization.pushLine(
+    "Successfully Updated Estimation: {Timestamp: 1783962780, UTM coord: {500040, 4100000}}"
+  );
+  localization.finish();
+
+  const telemetry = createFileParser(
+    "run/stack_dds_bridge_driver_stdout.txt",
+    accumulator
+  );
+  telemetry.pushLine(
+    "2026-07-13 17:12:40.000000000 [INFO] VehicleSignalsCallback: Publishing gear_state=3, speed=2 m/s, vehicle_state=4"
+  );
+  telemetry.pushLine(
+    "2026-07-13 17:13:00.000000000 [INFO] VehicleSignalsCallback: Publishing gear_state=3, speed=6 m/s, vehicle_state=4"
+  );
+  telemetry.finish();
+
+  const estimator = createFileParser(
+    "run/ego_state_estimator_stdout.txt",
+    accumulator
+  );
+  estimator.pushLine(
+    "2026-07-13 17:12:50.000000000 [INFO] [GSE Wheel] Update applied, r_w=0.35 omega_meas=80 vx=30 omega_z_meas=0"
+  );
+  estimator.finish();
+
+  const result = finalize(accumulator, { zone: 10 });
+  assert.equal(result.speedSamples.length, 3);
+  const trace = buildTrace(result, false);
+  assert.deepEqual(
+    trace.points.map((point) => point.speed),
+    [2, 4, 6]
+  );
+  assert.deepEqual(
+    trace.points.map((point) => point.speedSource),
+    ["reported", "reported", "reported"]
+  );
+  assert.deepEqual(
+    trace.points.map((point) => point.speedInterpolated),
+    [false, true, false]
+  );
+});
+
+test("calculates centered route speed and suppresses startup jitter", () => {
+  const movingAccumulator = createAccumulator();
+  const moving = createFileParser(
+    "localization_stdout.txt",
+    movingAccumulator
+  );
+  moving.pushLine(
+    "Successfully Updated Estimation: {Timestamp: 1000, UTM coord: {500000, 4100000}}"
+  );
+  moving.pushLine(
+    "Successfully Updated Estimation: {Timestamp: 1002.5, UTM coord: {500002.5, 4100000}}"
+  );
+  moving.pushLine(
+    "Successfully Updated Estimation: {Timestamp: 1005, UTM coord: {500005, 4100000}}"
+  );
+  moving.finish();
+
+  const movingTrace = buildTrace(
+    finalize(movingAccumulator, { zone: 10 }),
+    false
+  );
+  assert.deepEqual(
+    movingTrace.points.map((point) => point.speed),
+    [1, 1, 1]
+  );
+  assert.ok(
+    movingTrace.points.every((point) => point.speedSource === "calculated")
+  );
+
+  const stationaryAccumulator = createAccumulator();
+  const stationary = createFileParser(
+    "localization_stdout.txt",
+    stationaryAccumulator
+  );
+  stationary.pushLine(
+    "Initialized particles at Timestamp: 2000, UTM coord: {500000, 4100000}}"
+  );
+  stationary.pushLine(
+    "Successfully Updated Estimation: {Timestamp: 2000.05, UTM coord: {500000.25, 4100000}}"
+  );
+  stationary.pushLine(
+    "Successfully Updated Estimation: {Timestamp: 2002.5, UTM coord: {500000.25, 4100000}}"
+  );
+  stationary.pushLine(
+    "Successfully Updated Estimation: {Timestamp: 2005, UTM coord: {500000.25, 4100000}}"
+  );
+  stationary.finish();
+
+  const stationaryTrace = buildTrace(
+    finalize(stationaryAccumulator, { zone: 10 }),
+    false
+  );
+  assert.ok(stationaryTrace.points.every((point) => point.speed === 0));
+});
+
 test("interpolates engaged route segments from DBW state transitions", () => {
   const accumulator = createAccumulator();
   const localization = createFileParser(
@@ -145,6 +263,9 @@ test("interpolates engaged route segments from DBW state transitions", () => {
   assert.equal(trace.engagementSegments[0][0].easting, 500005);
   assert.equal(trace.engagementSegments[0][2].timestamp, 1783962775);
   assert.equal(trace.engagementSegments[0][2].easting, 500015);
+  assert.ok(
+    trace.engagementSegments[0].every((point) => point.speed === 1)
+  );
 });
 
 test("converts the sample UTM coordinate to its Mountain View location", () => {

@@ -5,6 +5,18 @@
     /Timestamp:\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?),\s*UTM coord:\s*\{\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?),\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*\}/;
   const LAT_LON_RE =
     /\blat(?:itude)?\s*[=:]\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*,?\s*\blon(?:gitude)?\s*[=:]\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))/i;
+  const VEHICLE_SPEED_RE =
+    /VehicleSignalsCallback:.*?\bspeed\s*=\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*m\/s\b/i;
+  const GSE_SPEED_RE =
+    /\[GSE Wheel\].*?\bvx\s*=\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)/i;
+  const LONGITUDINAL_SPEED_RE =
+    /\bLongitudinal velocity:\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*m\/s\b/i;
+  const SPEED_WINDOW_HALF_SECONDS = 2.5;
+  const MAX_GEOMETRIC_POINT_GAP_SECONDS = 10;
+  const MAX_REPORTED_SPEED_GAP_SECONDS = 25;
+  const REPORTED_SPEED_EDGE_SECONDS = 5;
+  const MAX_VALID_SPEED_MPS = 80;
+  const STATIONARY_SPEED_MPS = 0.2;
 
   function basename(path) {
     const parts = String(path || "").split("/");
@@ -29,6 +41,12 @@
       return "engagement";
     }
     if (
+      /^ego_state_estimator(?:_[a-z0-9-]+)?_stdout\.(?:txt|log)$/.test(base) ||
+      base === "ego_state_estimator_stdout.txt"
+    ) {
+      return "speed";
+    }
+    if (
       /^(?:navigation_rasterizer|stack_dds_bridge_driver).*_stdout\.(?:txt|log)$/.test(
         base
       )
@@ -44,6 +62,7 @@
       anchors: [],
       events: [],
       engagementTransitions: [],
+      speedSamples: [],
       files: new Set(),
     };
   }
@@ -159,6 +178,18 @@
       pushLine(line) {
         lineNo++;
 
+        const speedSample =
+          role === "anchor" || role === "speed"
+            ? reportedSpeedSample(line)
+            : null;
+        if (speedSample) {
+          accumulator.speedSamples.push({
+            ...speedSample,
+            path,
+            lineNo,
+          });
+        }
+
         if (role === "localization") {
           const match = line.match(COORD_RE);
           if (match) {
@@ -219,6 +250,29 @@
     if (/Propagated particle filter state/i.test(line)) return "propagated";
     if (/Initialized particles/i.test(line)) return "initial";
     return "unknown";
+  }
+
+  function reportedSpeedSample(line) {
+    let match = line.match(VEHICLE_SPEED_RE);
+    let source = "vehicle-signals";
+    let priority = 2;
+    if (!match) {
+      match = line.match(GSE_SPEED_RE) || line.match(LONGITUDINAL_SPEED_RE);
+      source = "wheel-estimator";
+      priority = 1;
+    }
+    if (!match) return null;
+
+    const timestamp = timestampFromLine(line);
+    const speed = Math.abs(Number(match[1]));
+    if (
+      !Number.isFinite(timestamp) ||
+      !Number.isFinite(speed) ||
+      speed > MAX_VALID_SPEED_MPS
+    ) {
+      return null;
+    }
+    return { timestamp, speed, source, priority };
   }
 
   function cleanYamlValue(value) {
@@ -321,6 +375,7 @@
     const engagementTransitions = dedupeEngagementTransitions(
       accumulator.engagementTransitions || []
     );
+    const speedSamples = dedupeSpeedSamples(accumulator.speedSamples || []);
     const anchors = accumulator.anchors
       .filter(
         (anchor) =>
@@ -357,6 +412,7 @@
       points,
       events: dedupeEvents(accumulator.events),
       engagementTransitions,
+      speedSamples,
       anchor,
       zone,
       northern,
@@ -387,6 +443,34 @@
       if (seen.has(key)) continue;
       seen.add(key);
       output.push({ ...point });
+    }
+    return output;
+  }
+
+  function dedupeSpeedSamples(input) {
+    const sorted = input
+      .filter(
+        (sample) =>
+          Number.isFinite(sample.timestamp) &&
+          Number.isFinite(sample.speed) &&
+          sample.speed >= 0 &&
+          sample.speed <= MAX_VALID_SPEED_MPS
+      )
+      .slice()
+      .sort(
+        (a, b) =>
+          a.timestamp - b.timestamp ||
+          Number(b.priority || 0) - Number(a.priority || 0)
+      );
+    const seen = new Set();
+    const output = [];
+    for (const sample of sorted) {
+      const key = `${sample.source}|${sample.timestamp.toFixed(
+        3
+      )}|${sample.speed.toFixed(3)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      output.push({ ...sample });
     }
     return output;
   }
@@ -487,6 +571,7 @@
       points.push(point);
     }
     assignMovementHeadings(points);
+    assignPointSpeeds(points, result.speedSamples || []);
 
     const bounds = coordinateBounds(points);
     const durationSeconds =
@@ -514,6 +599,144 @@
       durationSeconds,
       distanceMeters,
     };
+  }
+
+  function assignPointSpeeds(points, samples) {
+    const reportedSeries = reportedSpeedSeries(samples);
+    for (let index = 0; index < points.length; index++) {
+      const point = points[index];
+      const geometricSpeed = geometricSpeedAtIndex(points, index);
+      const reported = reportedSpeedAtTimestamp(
+        reportedSeries,
+        point.timestamp
+      );
+      point.geometricSpeed = geometricSpeed;
+      if (reported) {
+        point.speed = normalizedSpeed(reported.speed);
+        point.speedSource = "reported";
+        point.speedInterpolated = reported.interpolated;
+      } else if (Number.isFinite(geometricSpeed)) {
+        point.speed = geometricSpeed;
+        point.speedSource = "calculated";
+        point.speedInterpolated = false;
+      } else {
+        point.speed = null;
+        point.speedSource = "";
+        point.speedInterpolated = false;
+      }
+    }
+  }
+
+  function reportedSpeedSeries(samples) {
+    const grouped = new Map();
+    for (const sample of samples) {
+      const priority = Number(sample.priority || 0);
+      if (!grouped.has(priority)) grouped.set(priority, []);
+      grouped.get(priority).push(sample);
+    }
+    return Array.from(grouped.entries())
+      .sort((a, b) => b[0] - a[0])
+      .map((entry) =>
+        entry[1].slice().sort((a, b) => a.timestamp - b.timestamp)
+      );
+  }
+
+  function reportedSpeedAtTimestamp(seriesList, timestamp) {
+    for (const series of seriesList) {
+      const match = interpolateSpeedSeries(series, timestamp);
+      if (match) return match;
+    }
+    return null;
+  }
+
+  function interpolateSpeedSeries(samples, timestamp) {
+    if (!samples.length || !Number.isFinite(timestamp)) return null;
+    let low = 0;
+    let high = samples.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (samples[middle].timestamp < timestamp) low = middle + 1;
+      else high = middle;
+    }
+
+    const after = samples[low] || null;
+    const before = low > 0 ? samples[low - 1] : null;
+    if (after && Math.abs(after.timestamp - timestamp) < 0.001) {
+      return { speed: after.speed, interpolated: false };
+    }
+    if (before && Math.abs(before.timestamp - timestamp) < 0.001) {
+      return { speed: before.speed, interpolated: false };
+    }
+    if (before && after) {
+      const gap = after.timestamp - before.timestamp;
+      if (gap > 0 && gap <= MAX_REPORTED_SPEED_GAP_SECONDS) {
+        const ratio = (timestamp - before.timestamp) / gap;
+        return {
+          speed: before.speed + (after.speed - before.speed) * ratio,
+          interpolated: true,
+        };
+      }
+    }
+
+    const nearest =
+      !before ||
+      (after &&
+        Math.abs(after.timestamp - timestamp) <
+          Math.abs(timestamp - before.timestamp))
+        ? after
+        : before;
+    if (
+      nearest &&
+      Math.abs(nearest.timestamp - timestamp) <= REPORTED_SPEED_EDGE_SECONDS
+    ) {
+      return { speed: nearest.speed, interpolated: true };
+    }
+    return null;
+  }
+
+  function geometricSpeedAtIndex(points, index) {
+    const point = points[index];
+    if (!point) return null;
+
+    let start = index;
+    while (
+      start > 0 &&
+      !points[start].breakBefore &&
+      point.timestamp - points[start].timestamp < SPEED_WINDOW_HALF_SECONDS
+    ) {
+      const gap = points[start].timestamp - points[start - 1].timestamp;
+      if (gap > MAX_GEOMETRIC_POINT_GAP_SECONDS) break;
+      start--;
+    }
+
+    let end = index;
+    while (
+      end + 1 < points.length &&
+      !points[end + 1].breakBefore &&
+      points[end].timestamp - point.timestamp < SPEED_WINDOW_HALF_SECONDS
+    ) {
+      const gap = points[end + 1].timestamp - points[end].timestamp;
+      if (gap > MAX_GEOMETRIC_POINT_GAP_SECONDS) break;
+      end++;
+    }
+    if (start === end) return null;
+
+    const elapsed = points[end].timestamp - points[start].timestamp;
+    if (!Number.isFinite(elapsed) || elapsed < 1) return null;
+    let distance = 0;
+    for (let cursor = start + 1; cursor <= end; cursor++) {
+      if (points[cursor].breakBefore) return null;
+      distance += routePointDistance(points[cursor - 1], points[cursor]);
+    }
+    const speed = distance / elapsed;
+    if (!Number.isFinite(speed) || speed > MAX_VALID_SPEED_MPS) return null;
+    return normalizedSpeed(speed);
+  }
+
+  function normalizedSpeed(speed) {
+    if (!Number.isFinite(speed)) return null;
+    const magnitude = Math.abs(speed);
+    return magnitude < STATIONARY_SPEED_MPS ? 0 : magnitude;
   }
 
   function assignMovementHeadings(points) {
@@ -630,6 +853,13 @@
       northing: start.northing + (end.northing - start.northing) * ratio,
       breakBefore: false,
     };
+    if (Number.isFinite(start.speed) && Number.isFinite(end.speed)) {
+      point.speed = start.speed + (end.speed - start.speed) * ratio;
+    } else if (Number.isFinite(start.speed)) {
+      point.speed = start.speed;
+    } else if (Number.isFinite(end.speed)) {
+      point.speed = end.speed;
+    }
     if (
       Number.isFinite(start.lat) &&
       Number.isFinite(start.lon) &&

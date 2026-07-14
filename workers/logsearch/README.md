@@ -54,8 +54,10 @@ The Worker itself only does two things:
 - Detects timestamped UTM coordinates in localization logs and renders a
   north-up vehicle route with drag/pinch navigation, playback, GPS/odometry
   filtering, DBW engagement highlighting, a timestamped event list, annotation
-  markers, and GeoJSON export. Plain files are analyzed automatically; archive
-  analysis is opt-in so large bundles are not decompressed unexpectedly.
+  markers, a vehicle-speed gradient, and GeoJSON export. Reported wheel speed is
+  interpolated onto the route when available, with a smoothed location-derived
+  fallback. Plain files are analyzed automatically; archive analysis is opt-in
+  so large bundles are not decompressed unexpectedly.
 - Displayed paths hide the shared root folder (or archive) so only the nested
   folders and file names are shown.
 

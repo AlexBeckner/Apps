@@ -99,7 +99,8 @@ test("route workspace places events before an interactive map", async () => {
   assert.match(routeScript, /selectEvent\(index, true\)/);
   assert.match(routeScript, /setHoveredEvent\(index, true\)/);
   assert.match(routeScript, /showEventTooltip\(eventIndex, event\)/);
-  assert.match(routeScript, /class: "route-engaged-path"/);
+  assert.match(routeScript, /state\.trace\.engagementSegments/);
+  assert.match(routeScript, /"is-engaged"/);
   assert.match(
     routeScript,
     /state\.currentMarker = svgElement\("path",[\s\S]*currentMarkerTransform/
@@ -107,7 +108,10 @@ test("route workspace places events before an interactive map", async () => {
   assert.match(html, /id="route-engaged-legend" hidden/);
   assert.match(css, /\.route-workspace\s*\{[^}]*grid-template-columns:/s);
   assert.match(css, /\.route-map-frame\s*\{[^}]*touch-action:\s*none/s);
-  assert.match(css, /\.route-engaged-path\s*\{[^}]*stroke:\s*#52d273/s);
+  assert.match(
+    css,
+    /\.route-speed-path\.is-engaged\.speed-band-0\s*\{[^}]*stroke:/s
+  );
   assert.match(css, /\.route-current-marker\s*\{[^}]*fill:\s*#fff/s);
   assert.match(css, /\.route-event-button\.is-active/);
   assert.match(css, /\.route-event-button\.is-hovered/);
@@ -140,7 +144,101 @@ test("route map and playback bar support keyboard playback", async () => {
     routeScript,
     /rangeInput\.addEventListener\("keydown", onPlaybackSpace\)/
   );
+  assert.match(routeScript, /applyTrace\(null, false\)/);
   assert.match(css, /\.route-map-frame:focus-visible/);
+});
+
+test("route tooltips require marker hover and selected details stay pinned", async () => {
+  const [html, routeScript, css] = await Promise.all([
+    readFile(new URL("public/index.html", root), "utf8"),
+    readFile(new URL("public/route.js", root), "utf8"),
+    readFile(new URL("public/route.css", root), "utf8"),
+  ]);
+
+  assert.match(html, /id="route-selection-details"/);
+  assert.match(html, /aria-label="Selected route point or event details"/);
+  assert.match(
+    routeScript,
+    /function onMapPointerMove\(event\)[\s\S]*?event\.target\.closest\("\.route-point-target"\)/
+  );
+  assert.match(routeScript, /function showPointTooltip\(pointIndex, pointerEvent\)/);
+  assert.match(routeScript, /selectionDetails\.textContent = detailLines\.join/);
+  assert.match(routeScript, /eventDetailLines\(selectedEvent\)/);
+  assert.doesNotMatch(routeScript, /nearestDistance/);
+  assert.doesNotMatch(routeScript, /drawNorthArrow/);
+  assert.match(css, /\.route-selection-details\s*\{[^}]*right:\s*10px/s);
+  assert.match(css, /\.route-selection-details\s*\{[^}]*top:\s*10px/s);
+});
+
+test("route plots small clickable markers for every trace point", async () => {
+  const [html, routeScript, css] = await Promise.all([
+    readFile(new URL("public/index.html", root), "utf8"),
+    readFile(new URL("public/route.js", root), "utf8"),
+    readFile(new URL("public/route.css", root), "utf8"),
+  ]);
+
+  assert.match(
+    routeScript,
+    /class: "route-point-marker route-point-target"/
+  );
+  assert.match(routeScript, /r: 2\.5/);
+  assert.match(routeScript, /"data-point-index": index/);
+  assert.match(routeScript, /kind === "propagated"/);
+  assert.match(routeScript, /classList\.add\("is-odometry"\)/);
+  assert.match(routeScript, /event\.target\.closest\("\.route-point-target"\)/);
+  assert.match(routeScript, /selectPoint\(pointIndex\)/);
+  assert.match(html, /Click a point to jump/);
+  assert.match(css, /\.route-point-target\s*\{[^}]*cursor:\s*pointer/s);
+  assert.match(
+    css,
+    /\.route-point-marker\s*\{[^}]*stroke:\s*transparent[^}]*stroke-width:\s*8/s
+  );
+  assert.match(css, /\.route-point-marker\.is-odometry\s*\{[^}]*fill:/s);
+});
+
+test("route renders vehicle speed with a fixed-band gradient", async () => {
+  const [html, routeScript, css] = await Promise.all([
+    readFile(new URL("public/index.html", root), "utf8"),
+    readFile(new URL("public/route.js", root), "utf8"),
+    readFile(new URL("public/route.css", root), "utf8"),
+  ]);
+
+  assert.doesNotMatch(html, /Slow &rarr; fast/);
+  assert.doesNotMatch(routeScript, /route-speed-legend/);
+  assert.match(routeScript, /SPEED_BAND_LIMITS = \[2, 4, 6, 8, 10, 12\]/);
+  assert.match(
+    routeScript,
+    /function buildSpeedPaths\(project, routeSegments, engagementClass\)/
+  );
+  assert.match(
+    routeScript,
+    /class: `route-speed-path \$\{engagementClass\} speed-band-\$\{segmentBand\}`/
+  );
+  assert.match(
+    routeScript,
+    /const disengagedSpeedPaths = buildSpeedPaths\([\s\S]*?"is-disengaged"[\s\S]*?const engagedSpeedPaths = buildSpeedPaths\([\s\S]*?"is-engaged"/
+  );
+  assert.match(routeScript, /formatSpeed\(point\.speed\)/);
+  assert.match(css, /\.route-progress-path\s*\{[^}]*stroke:\s*#050505/s);
+  assert.match(css, /\.route-progress-path\s*\{[^}]*stroke-width:\s*7/s);
+  assert.match(css, /\.route-speed-path\s*\{[^}]*opacity:\s*1/s);
+  assert.match(css, /\.route-speed-path\s*\{[^}]*stroke-width:\s*4/s);
+  assert.match(
+    css,
+    /\.route-speed-path\.is-disengaged\.speed-band-6\s*\{[^}]*stroke:/s
+  );
+  assert.match(
+    css,
+    /\.route-speed-path\.is-engaged\.speed-band-6\s*\{[^}]*stroke:/s
+  );
+  assert.match(
+    css,
+    /\.route-swatch\.disengaged-speed\s*\{[^}]*linear-gradient/s
+  );
+  assert.match(
+    css,
+    /\.route-swatch\.engaged\s*\{[^}]*linear-gradient/s
+  );
 });
 
 test("timestamped viewer lines can create manual route events", async () => {

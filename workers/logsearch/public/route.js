@@ -9,6 +9,7 @@
   const VIEW_HEIGHT = 560;
   const TILE_SIZE = 256;
   const WEB_MERCATOR_HALF_WORLD = 20037508.342789244;
+  const SPEED_BAND_LIMITS = [2, 4, 6, 8, 10, 12];
 
   function naipTileUrl(zoom, x, y) {
     const tileSpan = (WEB_MERCATOR_HALF_WORLD * 2) / 2 ** zoom;
@@ -68,6 +69,7 @@
   const tileLayer = byId("route-tiles");
   const svg = byId("route-svg");
   const tooltip = byId("route-tooltip");
+  const selectionDetails = byId("route-selection-details");
   const mapStyleSelect = byId("route-map-style");
   const zoomOutButton = byId("route-zoom-out");
   const zoomInButton = byId("route-zoom-in");
@@ -210,6 +212,8 @@
     tileLayer.hidden = true;
     attribution.hidden = true;
     tooltip.hidden = true;
+    selectionDetails.textContent = "";
+    selectionDetails.hidden = true;
     archiveButton.hidden = true;
     archiveButton.disabled = false;
     archiveButton.textContent = "Analyze archives";
@@ -494,6 +498,13 @@
         }`
       );
     }
+    if (state.result.speedSamples.length) {
+      details.push(
+        `${state.result.speedSamples.length.toLocaleString()} speed reading${
+          state.result.speedSamples.length === 1 ? "" : "s"
+        }`
+      );
+    }
     statusEl.textContent =
       `Found ${details.join(", ")} in ${state.result.files.length.toLocaleString()} file${
         state.result.files.length === 1 ? "" : "s"
@@ -521,7 +532,7 @@
 
     emptyEl.hidden = true;
     visualEl.hidden = false;
-    applyTrace(null, true);
+    applyTrace(null, false);
   }
 
   function applyTrace(preserveTimestamp, jumpToEnd) {
@@ -888,18 +899,42 @@
       d: "",
     });
     svg.append(fullPath, state.progressPath);
-    const engagedData = state.trace.engagementSegments
-      .map((segment) => pathData(segment, segment.length - 1, project))
-      .filter(Boolean)
-      .join(" ");
-    if (engagedData) {
-      svg.appendChild(
-        svgElement("path", {
-          class: "route-engaged-path",
-          d: engagedData,
-        })
-      );
+    const disengagedSpeedPaths = buildSpeedPaths(
+      project,
+      [state.trace.points],
+      "is-disengaged"
+    );
+    if (disengagedSpeedPaths.childElementCount) {
+      svg.appendChild(disengagedSpeedPaths);
     }
+    const engagedSpeedPaths = buildSpeedPaths(
+      project,
+      state.trace.engagementSegments,
+      "is-engaged"
+    );
+    if (engagedSpeedPaths.childElementCount) {
+      svg.appendChild(engagedSpeedPaths);
+    }
+
+    const pointMarkers = svgElement("g", {
+      class: "route-point-markers",
+      "aria-hidden": "true",
+    });
+    for (let index = 0; index < state.screenPoints.length; index++) {
+      const position = state.screenPoints[index];
+      const marker = svgElement("circle", {
+        class: "route-point-marker route-point-target",
+        cx: position.x,
+        cy: position.y,
+        r: 2.5,
+        "data-point-index": index,
+      });
+      if (state.trace.points[index].kind === "propagated") {
+        marker.classList.add("is-odometry");
+      }
+      pointMarkers.appendChild(marker);
+    }
+    svg.appendChild(pointMarkers);
 
     for (let index = 0; index < state.trace.events.length; index++) {
       const event = state.trace.events[index];
@@ -926,7 +961,7 @@
       marker.addEventListener("pointerleave", () => {
         clearHoveredEvent(index);
         if (tooltip.dataset.eventIndex === String(index)) {
-          tooltip.hidden = true;
+          hideMapTooltip();
         }
       });
       marker.addEventListener("focus", () => {
@@ -947,18 +982,20 @@
     const last = project(state.trace.points[state.trace.points.length - 1]);
     svg.appendChild(
       svgElement("circle", {
-        class: "route-start-marker",
+        class: "route-start-marker route-point-target",
         cx: first.x,
         cy: first.y,
         r: 7,
+        "data-point-index": 0,
       })
     );
     svg.appendChild(
       svgElement("circle", {
-        class: "route-end-marker",
+        class: "route-end-marker route-point-target",
         cx: last.x,
         cy: last.y,
         r: 7,
+        "data-point-index": state.trace.points.length - 1,
       })
     );
     state.currentMarker = svgElement("path", {
@@ -967,7 +1004,6 @@
       transform: currentMarkerTransform(state.trace.points[0], first),
     });
     svg.appendChild(state.currentMarker);
-    drawNorthArrow();
     updatePlaybackDrawing();
     syncEventHighlights(false);
   }
@@ -1223,27 +1259,6 @@
     }
   }
 
-  function drawNorthArrow() {
-    const group = svgElement("g", {
-      transform: `translate(${VIEW_WIDTH - 34} 27)`,
-    });
-    const label = svgElement("text", {
-      class: "route-grid-label",
-      x: 0,
-      y: 0,
-      "text-anchor": "middle",
-    });
-    label.textContent = "N";
-    const arrow = svgElement("path", {
-      d: "M 0 7 L -6 20 L 0 16 L 6 20 Z",
-      fill: "#c7d2e3",
-      stroke: "#111",
-      "stroke-width": 1,
-    });
-    group.append(label, arrow);
-    svg.appendChild(group);
-  }
-
   function pathData(points, lastIndex, project) {
     let data = "";
     const end = Math.min(lastIndex, points.length - 1);
@@ -1255,6 +1270,64 @@
       }${position.x.toFixed(2)},${position.y.toFixed(2)} `;
     }
     return data.trim();
+  }
+
+  function buildSpeedPaths(project, routeSegments, engagementClass) {
+    const group = svgElement("g", {
+      class: `route-speed-paths ${engagementClass}`,
+      "aria-hidden": "true",
+    });
+    let segment = [];
+    let segmentBand = -1;
+
+    function flush() {
+      if (segment.length >= 2 && segmentBand >= 0) {
+        group.appendChild(
+          svgElement("path", {
+            class: `route-speed-path ${engagementClass} speed-band-${segmentBand}`,
+            d: pathData(segment, segment.length - 1, project),
+          })
+        );
+      }
+      segment = [];
+      segmentBand = -1;
+    }
+
+    for (const points of routeSegments) {
+      flush();
+      for (let index = 1; index < points.length; index++) {
+        const previous = points[index - 1];
+        const point = points[index];
+        if (point.breakBefore) {
+          flush();
+          continue;
+        }
+        const values = [previous.speed, point.speed].filter(Number.isFinite);
+        if (!values.length) {
+          flush();
+          continue;
+        }
+        const speed =
+          values.reduce((total, value) => total + value, 0) / values.length;
+        const band = speedBand(speed);
+        if (segmentBand !== band) {
+          flush();
+          segment = [previous, point];
+          segmentBand = band;
+        } else {
+          segment.push(point);
+        }
+      }
+    }
+    flush();
+    return group;
+  }
+
+  function speedBand(speed) {
+    for (let index = 0; index < SPEED_BAND_LIMITS.length; index++) {
+      if (speed < SPEED_BAND_LIMITS[index]) return index;
+    }
+    return SPEED_BAND_LIMITS.length;
   }
 
   function currentMarkerTransform(point, position) {
@@ -1312,6 +1385,8 @@
   function updateTimeline() {
     if (!state.trace || state.currentIndex < 0) {
       timeEl.textContent = "";
+      selectionDetails.textContent = "";
+      selectionDetails.hidden = true;
       return;
     }
     const points = state.trace.points;
@@ -1328,6 +1403,15 @@
     timeEl.textContent = `${formatClock(timestamp)} · ${formatDuration(
       elapsed
     )} / ${formatDuration(state.trace.durationSeconds)}`;
+    const selectedEvent =
+      activeEvent && activeEvent.pointIndex === state.currentIndex
+        ? activeEvent
+        : null;
+    const detailLines = selectedEvent
+      ? eventDetailLines(selectedEvent)
+      : pointDetailLines(point);
+    selectionDetails.textContent = detailLines.join("\n");
+    selectionDetails.hidden = !detailLines.length;
   }
 
   function togglePlayback() {
@@ -1338,6 +1422,7 @@
     if (!state.trace || state.trace.points.length < 2) return;
     state.activeEventIndex = -1;
     syncEventHighlights(false);
+    updateTimeline();
     if (state.currentIndex >= state.trace.points.length - 1) setCurrentIndex(0);
     state.playSimulatedTime =
       state.trace.points[state.currentIndex].timestamp;
@@ -1598,7 +1683,8 @@
     if (
       event.target &&
       event.target.closest &&
-      event.target.closest(".route-event-marker")
+      (event.target.closest(".route-event-marker") ||
+        event.target.closest(".route-point-target"))
     ) {
       return;
     }
@@ -1692,7 +1778,7 @@
 
   function onMapPointerMove(event) {
     if (state.activePointers.size) {
-      tooltip.hidden = true;
+      hideMapTooltip();
       return;
     }
     const eventMarker =
@@ -1706,39 +1792,58 @@
         return;
       }
     }
-    if (!state.screenPoints.length) return;
-    const rect = mapFrame.getBoundingClientRect();
-    const x = ((event.clientX - rect.left) / rect.width) * VIEW_WIDTH;
-    const y = ((event.clientY - rect.top) / rect.height) * VIEW_HEIGHT;
-    let nearest = -1;
-    let nearestDistance = Infinity;
-    for (let index = 0; index < state.screenPoints.length; index++) {
-      const point = state.screenPoints[index];
-      const distance = Math.hypot(point.x - x, point.y - y);
-      if (distance < nearestDistance) {
-        nearest = index;
-        nearestDistance = distance;
+    const pointMarker =
+      event.target && event.target.closest
+        ? event.target.closest(".route-point-target")
+        : null;
+    if (pointMarker) {
+      const pointIndex = Number(pointMarker.dataset.pointIndex);
+      if (Number.isInteger(pointIndex)) {
+        showPointTooltip(pointIndex, event);
+        return;
       }
     }
-    if (nearest < 0 || nearestDistance > 20) {
-      tooltip.hidden = true;
-      delete tooltip.dataset.pointIndex;
-      delete tooltip.dataset.eventIndex;
+    hideMapTooltip();
+  }
+
+  function hideMapTooltip() {
+    tooltip.hidden = true;
+    delete tooltip.dataset.pointIndex;
+    delete tooltip.dataset.eventIndex;
+  }
+
+  function showPointTooltip(pointIndex, pointerEvent) {
+    const point =
+      state.trace && state.trace.points
+        ? state.trace.points[pointIndex]
+        : null;
+    if (!point) {
+      hideMapTooltip();
       return;
     }
-    const point = state.trace.points[nearest];
+    tooltip.textContent = pointDetailLines(point).join("\n");
+    tooltip.hidden = false;
+    delete tooltip.dataset.eventIndex;
+    tooltip.dataset.pointIndex = String(pointIndex);
+    positionMapTooltip(pointerEvent);
+  }
+
+  function pointDetailLines(point) {
     const lines = [
       `${pointLabel(point.kind)} · ${formatDateTime(point.timestamp)}`,
       `UTM ${point.easting.toFixed(2)}, ${point.northing.toFixed(2)}`,
     ];
+    if (Number.isFinite(point.speed)) {
+      lines.splice(
+        1,
+        0,
+        `${formatSpeed(point.speed)} · ${speedSourceLabel(point)}`
+      );
+    }
     if (Number.isFinite(point.lat) && Number.isFinite(point.lon)) {
       lines.push(`${point.lat.toFixed(6)}, ${point.lon.toFixed(6)}`);
     }
-    tooltip.textContent = lines.join("\n");
-    tooltip.hidden = false;
-    delete tooltip.dataset.eventIndex;
-    tooltip.dataset.pointIndex = String(nearest);
-    positionMapTooltip(event, rect);
+    return lines;
   }
 
   function showEventTooltip(eventIndex, pointerEvent) {
@@ -1746,8 +1851,19 @@
       state.trace && state.trace.events
         ? state.trace.events[eventIndex]
         : null;
-    if (!event) return;
-    const lines = [
+    if (!event) {
+      hideMapTooltip();
+      return;
+    }
+    tooltip.textContent = eventDetailLines(event).join("\n");
+    tooltip.hidden = false;
+    delete tooltip.dataset.pointIndex;
+    tooltip.dataset.eventIndex = String(eventIndex);
+    positionMapTooltip(pointerEvent);
+  }
+
+  function eventDetailLines(event) {
+    return [
       event.content || event.type || "Event",
       formatDateTime(event.timestamp),
       event.type || "",
@@ -1757,11 +1873,6 @@
         : "",
       event.severity != null ? `Severity: ${event.severity}` : "",
     ].filter(Boolean);
-    tooltip.textContent = lines.join("\n");
-    tooltip.hidden = false;
-    delete tooltip.dataset.pointIndex;
-    tooltip.dataset.eventIndex = String(eventIndex);
-    positionMapTooltip(pointerEvent);
   }
 
   function positionMapTooltip(pointerEvent, existingRect) {
@@ -1778,15 +1889,27 @@
     tooltip.style.top = `${Math.max(6, top)}px`;
   }
 
-  function onMapClick() {
-    if (performance.now() < state.suppressMapClickUntil) return;
-    if (tooltip.hidden) return;
-    const index = Number(tooltip.dataset.pointIndex);
-    if (!Number.isInteger(index)) return;
+  function selectPoint(pointIndex) {
     state.activeEventIndex = -1;
     syncEventHighlights(false);
     stopPlayback();
-    setCurrentIndex(index);
+    setCurrentIndex(pointIndex);
+  }
+
+  function onMapClick(event) {
+    if (performance.now() < state.suppressMapClickUntil) return;
+    const pointMarker =
+      event.target && event.target.closest
+        ? event.target.closest(".route-point-target")
+        : null;
+    if (pointMarker) {
+      const pointIndex = Number(pointMarker.dataset.pointIndex);
+      if (Number.isInteger(pointIndex)) {
+        selectPoint(pointIndex);
+        mapFrame.focus({ preventScroll: true });
+      }
+      return;
+    }
   }
 
   function downloadGeoJson() {
@@ -1873,6 +1996,24 @@
     return `${remainder}s`;
   }
 
+  function formatSpeed(metersPerSecond) {
+    if (!Number.isFinite(metersPerSecond)) return "—";
+    const decimals =
+      metersPerSecond === 0 ? 0 : metersPerSecond >= 10 ? 1 : 2;
+    return `${metersPerSecond.toFixed(decimals)} m/s (${(
+      metersPerSecond * 2.236936
+    ).toFixed(1)} mph)`;
+  }
+
+  function speedSourceLabel(point) {
+    if (point.speedSource === "reported") {
+      return point.speedInterpolated
+        ? "Reported speed (interpolated)"
+        : "Reported speed";
+    }
+    return "Calculated from route";
+  }
+
   function formatClock(timestamp) {
     return new Date(timestamp * 1000).toLocaleTimeString([], {
       hour: "2-digit",
@@ -1942,7 +2083,7 @@
   svg.addEventListener("pointerleave", () => {
     state.hoveredEventIndex = -1;
     syncEventHighlights(false);
-    tooltip.hidden = true;
+    hideMapTooltip();
   });
   svg.addEventListener("click", onMapClick);
 
