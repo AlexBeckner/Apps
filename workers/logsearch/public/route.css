@@ -198,6 +198,10 @@
   stroke-width: 7;
 }
 
+.route-map-frame.is-dark-map .route-progress-path {
+  stroke: #fff;
+}
+
 .route-speed-path {
   fill: none;
   opacity: 1;

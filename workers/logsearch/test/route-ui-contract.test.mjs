@@ -162,6 +162,40 @@ test("map layer control defaults to satellite and offers dark streets", async ()
   assert.doesNotMatch(html, /carto\.com/);
   assert.match(css, /\.route-tiles\.is-dark\s*\{[^}]*filter:/s);
   assert.match(css, /\.route-map-buttons select\s*\{/);
+  assert.match(
+    routeScript,
+    /mapFrame\.classList\.toggle\("is-dark-map", state\.tileStyle === "dark"\)/
+  );
+  assert.match(
+    css,
+    /\.route-map-frame\.is-dark-map \.route-progress-path\s*\{[^}]*stroke:\s*#fff/s
+  );
+});
+
+test("GPS-corrected point markers are opt-in while the route remains", async () => {
+  const [html, routeScript] = await Promise.all([
+    readFile(new URL("public/index.html", root), "utf8"),
+    readFile(new URL("public/route.js", root), "utf8"),
+  ]);
+  const input = html.match(
+    /<input id="route-include-corrected"[^>]*>/
+  )?.[0];
+
+  assert.ok(input);
+  assert.doesNotMatch(input, /\bchecked\b/);
+  assert.match(html, /Include GPS-corrected Points/);
+  assert.match(
+    routeScript,
+    /point\.kind === "corrected" && !correctedInput\.checked/
+  );
+  assert.match(
+    routeScript,
+    /state\.trace = core\.buildTrace\(state\.result, state\.includePropagated\)/
+  );
+  assert.match(
+    routeScript,
+    /correctedInput\.addEventListener\("change", changeCorrectedPointMarkers\)/
+  );
 });
 
 test("route workspace places events before an interactive map", async () => {
@@ -259,7 +293,7 @@ test("route tooltips require marker hover and selected details stay pinned", asy
   assert.match(css, /\.route-selection-details\s*\{[^}]*top:\s*10px/s);
 });
 
-test("route plots small clickable markers for every trace point", async () => {
+test("route plots small clickable markers for enabled trace points", async () => {
   const [html, routeScript, css] = await Promise.all([
     readFile(new URL("public/index.html", root), "utf8"),
     readFile(new URL("public/route.js", root), "utf8"),

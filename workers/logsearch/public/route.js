@@ -61,6 +61,7 @@
   const visualEl = byId("route-visual");
   const statsEl = byId("route-stats");
   const workspaceEl = byId("route-workspace");
+  const correctedInput = byId("route-include-corrected");
   const propagatedInput = byId("route-include-propagated");
   const archiveButton = byId("route-archives");
   const collapseButton = byId("route-collapse");
@@ -206,11 +207,13 @@
     state.hoveredEventIndex = -1;
     if (state.mapRenderRaf) cancelAnimationFrame(state.mapRenderRaf);
     state.mapRenderRaf = 0;
-    mapFrame.classList.remove("dragging");
+    mapFrame.classList.remove("dragging", "is-dark-map");
     state.project = null;
     state.screenPoints = [];
     state.progressPath = null;
     state.currentMarker = null;
+    correctedInput.checked = false;
+    correctedInput.disabled = true;
     propagatedInput.checked = false;
     propagatedInput.disabled = true;
     statsEl.replaceChildren();
@@ -533,6 +536,7 @@
           } could not be read.`
         : "");
 
+    correctedInput.disabled = !counts.corrected;
     propagatedInput.disabled = !counts.propagated;
     downloadButton.disabled = !state.result.zone;
     mapStyleSelect.disabled = !state.result.zone;
@@ -973,6 +977,7 @@
     if (canUseStreet) {
       const street = streetProjection();
       project = street.project;
+      mapFrame.classList.toggle("is-dark-map", state.tileStyle === "dark");
       tileLayer.classList.toggle("is-dark", state.tileStyle === "dark");
       drawTiles(street, state.tileStyle);
       mapStyleSelect.value = state.tileStyle;
@@ -984,6 +989,7 @@
       satelliteAttribution.hidden = state.tileStyle !== "satellite";
     } else {
       state.streetMode = false;
+      mapFrame.classList.remove("is-dark-map");
       mapStyleSelect.value = "local";
       zoomOutButton.hidden = false;
       zoomInButton.hidden = false;
@@ -1028,6 +1034,8 @@
       "aria-hidden": "true",
     });
     for (let index = 0; index < state.screenPoints.length; index++) {
+      const point = state.trace.points[index];
+      if (point.kind === "corrected" && !correctedInput.checked) continue;
       const position = state.screenPoints[index];
       const marker = svgElement("circle", {
         class: "route-point-marker route-point-target",
@@ -1036,7 +1044,7 @@
         r: 2.5,
         "data-point-index": index,
       });
-      if (state.trace.points[index].kind === "propagated") {
+      if (point.kind === "propagated") {
         marker.classList.add("is-odometry");
       }
       pointMarkers.appendChild(marker);
@@ -2153,19 +2161,26 @@
     return event.lineNo ? `${name}:${event.lineNo}` : name;
   }
 
-  archiveButton.addEventListener("click", () => void analyzeArchives());
-  collapseButton.addEventListener("click", () => {
-    bodyEl.hidden = !bodyEl.hidden;
-    collapseButton.textContent = bodyEl.hidden ? "Show" : "Hide";
-  });
-  propagatedInput.addEventListener("change", () => {
+  function changePointFilters() {
     stopPlayback();
     const point =
       state.trace && state.trace.points[state.currentIndex]
         ? state.trace.points[state.currentIndex]
         : null;
     applyTrace(point ? point.timestamp : null, false);
+  }
+
+  function changeCorrectedPointMarkers() {
+    renderMap();
+  }
+
+  archiveButton.addEventListener("click", () => void analyzeArchives());
+  collapseButton.addEventListener("click", () => {
+    bodyEl.hidden = !bodyEl.hidden;
+    collapseButton.textContent = bodyEl.hidden ? "Show" : "Hide";
   });
+  correctedInput.addEventListener("change", changeCorrectedPointMarkers);
+  propagatedInput.addEventListener("change", changePointFilters);
   rangeInput.addEventListener("input", () => {
     stopPlayback();
     state.activeEventIndex = -1;
