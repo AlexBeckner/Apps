@@ -100,8 +100,8 @@
     archivesScanned: false,
     archiveAnalysisRequested: false,
     analysisErrors: [],
-    includePropagated: false,
     currentIndex: -1,
+    selectedPointIndex: -1,
     playRaf: 0,
     playLastReal: 0,
     playSimulatedTime: 0,
@@ -190,8 +190,8 @@
     state.manualEvents = [];
     state.result = null;
     state.trace = null;
-    state.includePropagated = false;
     state.currentIndex = -1;
+    state.selectedPointIndex = -1;
     state.streetMode = false;
     state.tileStyle = "satellite";
     state.mapChoiceMade = false;
@@ -205,6 +205,7 @@
     state.suppressMapClickUntil = 0;
     state.activeEventIndex = -1;
     state.hoveredEventIndex = -1;
+    state.selectedPointIndex = -1;
     if (state.mapRenderRaf) cancelAnimationFrame(state.mapRenderRaf);
     state.mapRenderRaf = 0;
     mapFrame.classList.remove("dragging", "is-dark-map");
@@ -559,8 +560,7 @@
 
   function applyTrace(preserveTimestamp, jumpToEnd) {
     if (!state.result) return;
-    state.includePropagated = propagatedInput.checked;
-    state.trace = core.buildTrace(state.result, state.includePropagated);
+    state.trace = core.buildTrace(state.result, true);
     if (!state.trace.points.length) return;
 
     let index;
@@ -710,6 +710,7 @@
         ? state.trace.events[eventIndex]
         : null;
     if (!event || !event.point) return;
+    setSelectedPoint(-1);
     state.activeEventIndex = eventIndex;
     stopPlayback();
     setCurrentIndex(event.pointIndex);
@@ -749,6 +750,16 @@
         `.route-event-button[data-event-index="${state.activeEventIndex}"]`
       );
       if (entry) entry.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function setSelectedPoint(pointIndex) {
+    state.selectedPointIndex = Number.isInteger(pointIndex) ? pointIndex : -1;
+    for (const marker of svg.querySelectorAll(".route-point-marker")) {
+      marker.classList.toggle(
+        "is-selected",
+        Number(marker.dataset.pointIndex) === state.selectedPointIndex
+      );
     }
   }
 
@@ -859,7 +870,7 @@
     state.manualEvents.push(event);
     state.result.events.push({ ...event });
     state.result.events.sort((a, b) => a.timestamp - b.timestamp);
-    state.trace = core.buildTrace(state.result, state.includePropagated);
+    state.trace = core.buildTrace(state.result, true);
     renderEvents();
     renderMap();
     const eventIndex = state.trace.events.findIndex(
@@ -938,7 +949,7 @@
     state.result.events = state.result.events.filter(
       (event) => event.id !== eventId
     );
-    state.trace = core.buildTrace(state.result, state.includePropagated);
+    state.trace = core.buildTrace(state.result, true);
     state.activeEventIndex =
       activeId && activeId !== eventId
         ? state.trace.events.findIndex((event) => event.id === activeId)
@@ -1035,7 +1046,6 @@
     });
     for (let index = 0; index < state.screenPoints.length; index++) {
       const point = state.trace.points[index];
-      if (point.kind === "corrected" && !correctedInput.checked) continue;
       const position = state.screenPoints[index];
       const marker = svgElement("circle", {
         class: "route-point-marker route-point-target",
@@ -1046,6 +1056,16 @@
       });
       if (point.kind === "propagated") {
         marker.classList.add("is-odometry");
+      }
+      const markerVisible =
+        point.kind === "corrected"
+          ? correctedInput.checked
+          : point.kind === "propagated"
+            ? propagatedInput.checked
+            : true;
+      if (!markerVisible) marker.classList.add("is-hidden");
+      if (index === state.selectedPointIndex) {
+        marker.classList.add("is-selected");
       }
       pointMarkers.appendChild(marker);
     }
@@ -1535,6 +1555,7 @@
       return;
     }
     if (!state.trace || state.trace.points.length < 2) return;
+    setSelectedPoint(-1);
     state.activeEventIndex = -1;
     syncEventHighlights(false);
     updateTimeline();
@@ -1788,6 +1809,7 @@
     if (!step) return;
     event.preventDefault();
     stopPlayback();
+    setSelectedPoint(-1);
     state.activeEventIndex = -1;
     syncEventHighlights(false);
     setCurrentIndex(state.currentIndex + step);
@@ -2009,6 +2031,7 @@
     syncEventHighlights(false);
     stopPlayback();
     setCurrentIndex(pointIndex);
+    setSelectedPoint(pointIndex);
   }
 
   function onMapClick(event) {
@@ -2134,6 +2157,7 @@
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
+      hourCycle: "h23",
     });
   }
 
@@ -2145,6 +2169,7 @@
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
+      hourCycle: "h23",
     });
   }
 
@@ -2161,16 +2186,7 @@
     return event.lineNo ? `${name}:${event.lineNo}` : name;
   }
 
-  function changePointFilters() {
-    stopPlayback();
-    const point =
-      state.trace && state.trace.points[state.currentIndex]
-        ? state.trace.points[state.currentIndex]
-        : null;
-    applyTrace(point ? point.timestamp : null, false);
-  }
-
-  function changeCorrectedPointMarkers() {
+  function changePointMarkers() {
     renderMap();
   }
 
@@ -2179,10 +2195,11 @@
     bodyEl.hidden = !bodyEl.hidden;
     collapseButton.textContent = bodyEl.hidden ? "Show" : "Hide";
   });
-  correctedInput.addEventListener("change", changeCorrectedPointMarkers);
-  propagatedInput.addEventListener("change", changePointFilters);
+  correctedInput.addEventListener("change", changePointMarkers);
+  propagatedInput.addEventListener("change", changePointMarkers);
   rangeInput.addEventListener("input", () => {
     stopPlayback();
+    setSelectedPoint(-1);
     state.activeEventIndex = -1;
     syncEventHighlights(false);
     setCurrentIndex(Number(rangeInput.value));

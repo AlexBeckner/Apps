@@ -172,29 +172,57 @@ test("map layer control defaults to satellite and offers dark streets", async ()
   );
 });
 
-test("GPS-corrected point markers are opt-in while the route remains", async () => {
-  const [html, routeScript] = await Promise.all([
+test("point overlays are opt-in while route hit targets remain", async () => {
+  const [html, routeScript, css] = await Promise.all([
     readFile(new URL("public/index.html", root), "utf8"),
     readFile(new URL("public/route.js", root), "utf8"),
+    readFile(new URL("public/route.css", root), "utf8"),
   ]);
-  const input = html.match(
+  const correctedInput = html.match(
     /<input id="route-include-corrected"[^>]*>/
   )?.[0];
+  const propagatedInput = html.match(
+    /<input id="route-include-propagated"[^>]*>/
+  )?.[0];
 
-  assert.ok(input);
-  assert.doesNotMatch(input, /\bchecked\b/);
-  assert.match(html, /Include GPS-corrected Points/);
+  assert.ok(correctedInput);
+  assert.ok(propagatedInput);
+  assert.doesNotMatch(correctedInput, /\bchecked\b/);
+  assert.doesNotMatch(propagatedInput, /\bchecked\b/);
+  assert.match(html, /Show GPS-corrected points/);
+  assert.match(html, /Show odometry points/);
   assert.match(
     routeScript,
-    /point\.kind === "corrected" && !correctedInput\.checked/
+    /state\.trace = core\.buildTrace\(state\.result, true\)/
   );
   assert.match(
     routeScript,
-    /state\.trace = core\.buildTrace\(state\.result, state\.includePropagated\)/
+    /point\.kind === "corrected"[\s\S]*?correctedInput\.checked[\s\S]*?point\.kind === "propagated"[\s\S]*?propagatedInput\.checked/
+  );
+  assert.match(routeScript, /marker\.classList\.add\("is-hidden"\)/);
+  assert.match(
+    routeScript,
+    /correctedInput\.addEventListener\("change", changePointMarkers\)/
   );
   assert.match(
     routeScript,
-    /correctedInput\.addEventListener\("change", changeCorrectedPointMarkers\)/
+    /propagatedInput\.addEventListener\("change", changePointMarkers\)/
+  );
+  assert.match(
+    css,
+    /\.route-point-marker\.is-hidden\s*\{[^}]*opacity:\s*0/s
+  );
+  assert.match(
+    css,
+    /\.route-point-marker\.is-hidden:hover,[\s\S]*?\.route-point-marker\.is-hidden\.is-selected\s*\{[^}]*opacity:\s*1/s
+  );
+  assert.match(
+    routeScript,
+    /index === state\.selectedPointIndex[\s\S]*?classList\.add\("is-selected"\)/
+  );
+  assert.match(
+    routeScript,
+    /function selectPoint\(pointIndex\)[\s\S]*?setSelectedPoint\(pointIndex\)/
   );
 });
 
@@ -269,6 +297,22 @@ test("route map and playback bar support keyboard playback", async () => {
   );
   assert.match(routeScript, /applyTrace\(null, false\)/);
   assert.match(css, /\.route-map-frame:focus-visible/);
+});
+
+test("route viewer timestamps use a 24-hour clock", async () => {
+  const routeScript = await readFile(
+    new URL("public/route.js", root),
+    "utf8"
+  );
+
+  assert.match(
+    routeScript,
+    /function formatClock\(timestamp\)[\s\S]*?hourCycle: "h23"/
+  );
+  assert.match(
+    routeScript,
+    /function formatDateTime\(timestamp\)[\s\S]*?hourCycle: "h23"/
+  );
 });
 
 test("route tooltips require marker hover and selected details stay pinned", async () => {

@@ -295,6 +295,19 @@
   stroke: rgba(166, 139, 255, 0.55);
 }
 
+.route-point-marker.is-hidden {
+  opacity: 0;
+}
+
+.route-point-marker.is-hidden:hover,
+.route-point-marker.is-hidden.is-selected {
+  opacity: 1;
+}
+
+.route-point-marker.is-selected {
+  stroke: rgba(255, 255, 255, 0.72);
+}
+
 .route-event-marker {
   cursor: pointer;
   fill: #ffd479;
