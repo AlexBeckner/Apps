@@ -22,11 +22,11 @@ The Worker itself only does two things:
 ## Features
 
 - Pick a folder or drag & drop one onto the page (or choose archive files
-  directly).
-- Expands compressed archives automatically and searches the files inside:
-  `.zip`, `.tar`, `.tar.gz` / `.tgz`, and single-file `.gz`. Matches inside an
-  archive are shown with an archive-qualified path (e.g.
-  `logs.tgz/app/server.log`).
+  directly). Archive contents are indexed immediately, so inner files appear
+  in the browser and can be opened before a search.
+- Expands and searches compressed archives automatically: `.zip`, `.tar`,
+  `.tar.gz` / `.tgz`, and single-file `.gz`. Matches inside an archive are
+  shown with an archive-qualified path (e.g. `logs.tgz/app/server.log`).
 - Comma-separated search terms (default `ERROR, FATAL`), with quick-add chips
   for `WARN`, `CRITICAL`, `Exception`, etc.
 - Case-sensitive and regular-expression toggles.
@@ -36,11 +36,11 @@ The Worker itself only does two things:
   "Download CSV" export of all matches.
 - A per-file heatmap (click a file to filter results) showing each file's match
   count alongside its share of all matches (e.g. `1,234 (12%)`).
-- Click a selected file before searching to open it immediately. Text files use
-  the streaming viewer, images are fit to the available space with zoom
-  controls and trackpad pinch-to-zoom, and videos use the browser's native
-  playback controls. Media stays local via temporary object URLs and is never
-  uploaded.
+- Click a selected file, including one inside an archive, before searching to
+  open it immediately. Text files use the streaming viewer, images are fit to
+  the available space with zoom controls and trackpad pinch-to-zoom, and videos
+  use the browser's native playback controls. Media stays local via temporary
+  object URLs and is never uploaded.
 - Click any text result row to re-read the file (from disk or straight out of
   its archive), highlight every matching term, jump to the clicked line, and
   step between matches with the arrow keys, First/Last buttons, or Home/End
@@ -56,8 +56,8 @@ The Worker itself only does two things:
   point overlays, DBW engagement highlighting, a timestamped event list,
   annotation markers, a vehicle-speed gradient, and GeoJSON export. Reported
   wheel speed is interpolated onto the route when available, with a smoothed
-  location-derived fallback. Plain files are analyzed automatically; archive
-  analysis is opt-in so large bundles are not decompressed unexpectedly.
+  location-derived fallback. Plain files are analyzed automatically; parsing
+  archive contents for route data remains opt-in.
 - Displayed paths hide the shared root folder (or archive) so only the nested
   folders and file names are shown.
 

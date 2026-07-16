@@ -240,15 +240,15 @@
 }
 
 .route-speed-path.is-engaged.speed-band-0 {
-  stroke: #00b85a;
+  stroke: #f4df36;
 }
 
 .route-speed-path.is-engaged.speed-band-1 {
-  stroke: #24c45a;
+  stroke: #cfe342;
 }
 
 .route-speed-path.is-engaged.speed-band-2 {
-  stroke: #4dce55;
+  stroke: #a4df49;
 }
 
 .route-speed-path.is-engaged.speed-band-3 {
@@ -256,15 +256,15 @@
 }
 
 .route-speed-path.is-engaged.speed-band-4 {
-  stroke: #a4df49;
+  stroke: #4dce55;
 }
 
 .route-speed-path.is-engaged.speed-band-5 {
-  stroke: #cfe342;
+  stroke: #24c45a;
 }
 
 .route-speed-path.is-engaged.speed-band-6 {
-  stroke: #f4df36;
+  stroke: #00b85a;
 }
 
 .route-point-target {
@@ -501,7 +501,7 @@
 }
 
 .route-swatch.engaged {
-  background: linear-gradient(90deg, #00b85a, #78d84f, #f4df36);
+  background: linear-gradient(90deg, #f4df36, #78d84f, #00b85a);
   height: 5px;
   width: 46px;
 }

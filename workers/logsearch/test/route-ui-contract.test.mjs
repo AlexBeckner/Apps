@@ -126,6 +126,19 @@ test("uploads can replace or add files by picker and drag position", async () =>
   );
 });
 
+test("selected archives expand into the browse list before search", async () => {
+  const [html, archivesScript] = await Promise.all([
+    readFile(new URL("public/index.html", root), "utf8"),
+    readFile(new URL("public/archives.js", root), "utf8"),
+  ]);
+
+  assert.match(archivesScript, /async function listEntries\(/);
+  assert.match(html, /function expandArchivesForBrowse\(generation\)/);
+  assert.match(html, /await window\.LogArchives\.listEntries\(/);
+  assert.match(html, /contents will appear here automatically/);
+  assert.doesNotMatch(html, /will be expanded when you search/);
+});
+
 test("map layer control defaults to satellite and offers dark streets", async () => {
   const [html, routeScript, css] = await Promise.all([
     readFile(new URL("public/index.html", root), "utf8"),
@@ -396,7 +409,11 @@ test("route renders vehicle speed with a fixed-band gradient", async () => {
   );
   assert.match(
     css,
-    /\.route-speed-path\.is-engaged\.speed-band-6\s*\{[^}]*stroke:/s
+    /\.route-speed-path\.is-engaged\.speed-band-0\s*\{[^}]*stroke:\s*#f4df36/s
+  );
+  assert.match(
+    css,
+    /\.route-speed-path\.is-engaged\.speed-band-6\s*\{[^}]*stroke:\s*#00b85a/s
   );
   assert.match(
     css,
@@ -404,7 +421,7 @@ test("route renders vehicle speed with a fixed-band gradient", async () => {
   );
   assert.match(
     css,
-    /\.route-swatch\.engaged\s*\{[^}]*linear-gradient/s
+    /\.route-swatch\.engaged\s*\{[^}]*linear-gradient\(90deg,\s*#f4df36,\s*#78d84f,\s*#00b85a\)/s
   );
 });
 

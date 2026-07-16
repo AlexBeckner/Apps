@@ -1497,6 +1497,8 @@
       let persistenceQueue = Promise.resolve();
       let cacheSelectionGeneration = 0;
       let pendingSelectionMode = "replace";
+      let archiveBrowseGeneration = 0;
+      let archiveBrowse = { byArchive: new Map() };
       let displayRoot = ""; // shared root folder/archive trimmed from shown paths
       let viewerData = null; // virtualized model of the file open in the viewer
       let viewerIdx = -1; // index of the focused match in viewerData.matchLines
@@ -1539,8 +1541,15 @@
         );
       }
 
-      function showSelectionSummary() {
-        setDropInfo(selectionSummary());
+      function showSelectionSummary(detail) {
+        const summary = selectionSummary();
+        const archiveDetail =
+          detail === undefined ? archiveExpansionSummary() : detail;
+        setDropInfo(
+          summary && archiveDetail
+            ? `${summary} · ${archiveDetail}`
+            : summary || archiveDetail
+        );
       }
 
       // Paths are the app's file identity. When an added folder contains a path
@@ -1566,6 +1575,91 @@
           }
         }
         return merged;
+      }
+
+      function archiveKindForPath(path) {
+        return window.LogArchives
+          ? window.LogArchives.archiveKind(path)
+          : null;
+      }
+
+      function prepareArchiveBrowse(files, previous) {
+        const prior =
+          previous && previous.byArchive instanceof Map
+            ? previous.byArchive
+            : new Map();
+        const byArchive = new Map();
+        for (const item of files) {
+          if (!archiveKindForPath(item.path)) continue;
+          const old = prior.get(item.path);
+          if (
+            old &&
+            old.file === item.file &&
+            old.status !== "pending" &&
+            old.status !== "loading"
+          ) {
+            byArchive.set(item.path, old);
+            continue;
+          }
+          const supported = !!(
+            window.LogArchives &&
+            typeof window.LogArchives.listEntries === "function" &&
+            window.LogArchives.canExpand(item.path)
+          );
+          byArchive.set(item.path, {
+            file: item.file,
+            path: item.path,
+            status: supported ? "pending" : "unsupported",
+            entries: [],
+            skipped: [],
+            errors: [],
+          });
+        }
+        return { byArchive };
+      }
+
+      function archiveBrowseRecords() {
+        return Array.from(archiveBrowse.byArchive.values());
+      }
+
+      function archiveExpansionSummary() {
+        const records = archiveBrowseRecords();
+        if (!records.length) return "";
+        const pending = records.filter(
+          (record) =>
+            record.status === "pending" || record.status === "loading"
+        ).length;
+        if (pending) {
+          return `Expanding ${pending.toLocaleString()} archive${
+            pending === 1 ? "" : "s"
+          }`;
+        }
+        const expanded = records.filter(
+          (record) => record.status === "ready"
+        );
+        const unavailable = records.length - expanded.length;
+        const entryCount = expanded.reduce(
+          (total, record) => total + record.entries.length,
+          0
+        );
+        const parts = [];
+        if (expanded.length) {
+          parts.push(
+            `${entryCount.toLocaleString()} file${
+              entryCount === 1 ? "" : "s"
+            } inside ${expanded.length.toLocaleString()} expanded archive${
+              expanded.length === 1 ? "" : "s"
+            }`
+          );
+        }
+        if (unavailable) {
+          parts.push(
+            `${unavailable.toLocaleString()} archive${
+              unavailable === 1 ? "" : "s"
+            } unavailable`
+          );
+        }
+        return parts.join("; ");
       }
 
       function applyIncomingSelection(files, mode) {
@@ -1757,6 +1851,8 @@
           sessionStateTimer = 0;
         }
         selected = mergeSelections([], files);
+        const archiveGeneration = ++archiveBrowseGeneration;
+        archiveBrowse = prepareArchiveBrowse(selected, archiveBrowse);
         if (window.LogRoute) {
           window.LogRoute.setSelection(
             selected,
@@ -1779,6 +1875,78 @@
         clearSearchState();
         renderBrowseHeatmap();
         if (!options.fromCache) cacheSelection(selected);
+        void expandArchivesForBrowse(archiveGeneration);
+      }
+
+      async function expandArchivesForBrowse(generation) {
+        const pending = archiveBrowseRecords().filter(
+          (record) => record.status === "pending"
+        );
+        for (let index = 0; index < pending.length; index++) {
+          if (generation !== archiveBrowseGeneration) return;
+          const record = pending[index];
+          record.status = "loading";
+          showSelectionSummary(
+            `Expanding archive ${index + 1} of ${pending.length}: ${record.path}`
+          );
+          if (!running && !searchWasRun) renderBrowseHeatmap();
+
+          let listing;
+          try {
+            listing = await window.LogArchives.listEntries(
+              record.file,
+              record.path,
+              {
+                isCancelled: () => generation !== archiveBrowseGeneration,
+              }
+            );
+          } catch (error) {
+            listing = {
+              entries: [],
+              skipped: [],
+              errors: [
+                {
+                  path: record.path,
+                  reason: (error && error.message) || "could not be read",
+                },
+              ],
+            };
+          }
+          if (generation !== archiveBrowseGeneration) return;
+
+          const entriesByPath = new Map();
+          for (const entry of Array.isArray(listing.entries)
+            ? listing.entries
+            : []) {
+            const path = String((entry && entry.path) || "");
+            if (!path || entriesByPath.has(path)) continue;
+            const size = Number(entry.size);
+            entriesByPath.set(path, {
+              path,
+              size: Number.isFinite(size) && size >= 0 ? size : 0,
+            });
+          }
+          record.entries = Array.from(entriesByPath.values());
+          record.skipped = Array.isArray(listing.skipped)
+            ? listing.skipped.slice()
+            : [];
+          record.errors = (Array.isArray(listing.errors)
+            ? listing.errors
+            : []
+          ).map((issue) => {
+            const issuePath = String(
+              (issue && issue.path) || record.path
+            );
+            const reason = String(
+              (issue && issue.reason) || "could not be read"
+            );
+            return `${issuePath}: ${reason}`;
+          });
+          record.status =
+            record.errors.length && !record.entries.length ? "error" : "ready";
+          if (!running && !searchWasRun) renderBrowseHeatmap();
+        }
+        if (generation === archiveBrowseGeneration) showSelectionSummary();
       }
 
       function filesFromInput(fileList) {
@@ -2866,11 +3034,10 @@
       }
 
       // Before any search is run, the heatmap doubles as a file browser so a
-      // file can be opened without searching first. It lists the selected files
-      // by size -- known instantly, without reading them -- and clicking a row
-      // opens that file in the viewer with no search overlay. (Counting lines
-      // would mean reading every file up front, which would defeat opening one
-      // quickly, so size stands in for "how big is this file".)
+      // file can be opened without searching first. Plain files appear
+      // immediately; archive manifests are indexed as soon as they are selected
+      // and their entries join the same list. Decompressed contents are never
+      // retained; opening and searching continue to stream files on demand.
       function renderBrowseHeatmap() {
         heatmapEl.innerHTML = "";
         if (!selected.length) {
@@ -2879,25 +3046,44 @@
           return;
         }
 
-        // Only plain files can be opened directly; an archive's contents are
-        // not known until a search expands it.
-        const isArchive = (p) =>
-          !!(window.LogArchives && LogArchives.archiveKind(p));
-        const plain = selected.filter((s) => !isArchive(s.path));
-        const archiveCount = selected.length - plain.length;
+        const plain = selected.filter(
+          (item) => !archiveKindForPath(item.path)
+        );
+        const records = archiveBrowseRecords();
+        const entriesByPath = new Map(
+          plain.map((item) => [
+            item.path,
+            [item.path, Number(item.file.size) || 0],
+          ])
+        );
+        for (const record of records) {
+          for (const entry of record.entries) {
+            if (!entriesByPath.has(entry.path)) {
+              entriesByPath.set(entry.path, [entry.path, entry.size]);
+            }
+          }
+        }
+        const entries = Array.from(entriesByPath.values()).sort(
+          (a, b) => b[1] - a[1] || a[0].localeCompare(b[0])
+        );
 
         // Show paths relative to the shared root, matching the search view.
-        displayRoot = commonRoot(selected.map((s) => s.path));
-
-        const entries = plain
-          .map((s) => [s.path, s.file.size])
-          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+        displayRoot = commonRoot(
+          entries.length
+            ? entries.map((entry) => entry[0])
+            : selected.map((item) => item.path)
+        );
 
         const heading = document.createElement("h2");
         heading.textContent = entries.length
           ? `${entries.length.toLocaleString()} ` +
             `file${entries.length === 1 ? "" : "s"}`
-          : "No directly openable files";
+          : records.some(
+                (record) =>
+                  record.status === "pending" || record.status === "loading"
+              )
+            ? "Expanding archives..."
+            : "No openable files";
         heatmapEl.appendChild(heading);
 
         if (entries.length) {
@@ -2937,19 +3123,67 @@
           }
         }
 
-        if (archiveCount) {
+        const appendNote = (text) => {
           const note = document.createElement("p");
           note.className = "heat-note";
-          note.textContent =
-            `${archiveCount.toLocaleString()} ` +
-            `archive${archiveCount === 1 ? "" : "s"} will be expanded when you ` +
-            `search.`;
+          note.textContent = text;
           heatmapEl.appendChild(note);
+        };
+        const pendingCount = records.filter(
+          (record) =>
+            record.status === "pending" || record.status === "loading"
+        ).length;
+        const expandedCount = records.filter(
+          (record) => record.status === "ready"
+        ).length;
+        const unsupportedCount = records.filter(
+          (record) => record.status === "unsupported"
+        ).length;
+        const skippedCount = records.reduce(
+          (total, record) => total + record.skipped.length,
+          0
+        );
+        const archiveErrors = records.flatMap((record) => record.errors);
+        if (pendingCount) {
+          appendNote(
+            `Expanding ${pendingCount.toLocaleString()} archive${
+              pendingCount === 1 ? "" : "s"
+            } now; contents will appear here automatically.`
+          );
+        }
+        if (expandedCount) {
+          appendNote(
+            `${expandedCount.toLocaleString()} archive${
+              expandedCount === 1 ? "" : "s"
+            } expanded automatically.`
+          );
+        }
+        if (skippedCount) {
+          appendNote(
+            `${skippedCount.toLocaleString()} archived entr${
+              skippedCount === 1 ? "y was" : "ies were"
+            } skipped because the compression or encryption is unsupported.`
+          );
+        }
+        if (unsupportedCount) {
+          appendNote(
+            `${unsupportedCount.toLocaleString()} archive${
+              unsupportedCount === 1 ? "" : "s"
+            } cannot be expanded in this browser.`
+          );
+        }
+        if (archiveErrors.length) {
+          appendNote(
+            `${archiveErrors.length.toLocaleString()} archive${
+              archiveErrors.length === 1 ? "" : "s"
+            } could not be fully indexed: ${archiveErrors
+              .slice(0, 3)
+              .join("; ")}${archiveErrors.length > 3 ? "; ..." : "."}`
+          );
         }
 
         heatmapEl.style.display = "flex";
-        // Fill the page only when there is an actual file list to browse (an
-        // archive-only selection shows just a note, so leave it compact).
+        // Fill the page only when there is an actual file list to browse.
         setBrowseFill(entries.length > 0);
       }
 

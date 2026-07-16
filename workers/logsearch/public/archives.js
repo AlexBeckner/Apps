@@ -563,12 +563,107 @@
     // Entry not found: the sink's open() is simply never called.
   }
 
+  // Build a lightweight manifest for browsing an archive before a search. ZIP
+  // can be listed straight from its central directory; TAR variants must walk
+  // their headers, but payload bytes are discarded as they stream past. No
+  // decompressed file contents are retained in memory.
+  async function listEntries(file, path, opts) {
+    const options = opts || {};
+    const listing = {
+      entries: [],
+      skipped: [],
+      errors: [],
+    };
+    const kind = archiveKind(path);
+    if (!kind) return listing;
+
+    if (kind === "zip") {
+      let entries;
+      try {
+        entries = await readZipEntries(file);
+      } catch (error) {
+        listing.errors.push({
+          path,
+          reason: (error && error.message) || "could not be read",
+        });
+        return listing;
+      }
+      const codecs = support();
+      for (const entry of entries) {
+        if (options.isCancelled && options.isCancelled()) break;
+        if (entry.isDir) continue;
+        const full = joinPath(path, entry.name);
+        let reason = "";
+        if (entry.encrypted) {
+          reason = "encrypted";
+        } else if (entry.method !== 0 && entry.method !== 8) {
+          reason = "compression method " + entry.method;
+        } else if (entry.method === 8 && !codecs.deflateRaw) {
+          reason = "deflate unsupported by this browser";
+        }
+        if (reason) {
+          listing.skipped.push({ path: full, reason });
+        } else {
+          listing.entries.push({
+            path: full,
+            size: Number.isFinite(entry.uncompSize) ? entry.uncompSize : 0,
+          });
+        }
+      }
+      return listing;
+    }
+
+    if (kind === "gzip") {
+      if (!support().gzip) {
+        listing.errors.push({
+          path,
+          reason: "gzip unsupported by this browser",
+        });
+        return listing;
+      }
+      listing.entries.push({
+        path: path.replace(/\.(gz|gzip)$/i, "") || path,
+        size: 0,
+      });
+      return listing;
+    }
+
+    const sink = {
+      open(name, sizeHint) {
+        listing.entries.push({
+          path: name,
+          size: Number.isFinite(sizeHint) ? sizeHint : 0,
+        });
+        return null;
+      },
+      chunk() {
+        return false;
+      },
+      close() {},
+      skip(name, reason) {
+        listing.skipped.push({
+          path: name,
+          reason: reason || "could not be read",
+        });
+      },
+      error(archivePath, error) {
+        listing.errors.push({
+          path: archivePath,
+          reason: (error && error.message) || "could not be read",
+        });
+      },
+    };
+    await extract(file, path, sink, options);
+    return listing;
+  }
+
   root.LogArchives = {
     archiveKind,
     support,
     canExpand,
     extract,
     extractEntry,
+    listEntries,
     // exposed for tests:
     readZipEntries,
     openZipEntry,
