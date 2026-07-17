@@ -8,10 +8,10 @@ keep_vars = true
 ALLOWED_ORIGIN = "https://deploydashboard.appliedapps.workers.dev"
 # Webhooks are the fast path. These lower-frequency scans reconcile missed
 # webhook deliveries without relying on a fixed newest-build window.
-CACHE_SECONDS = "30"
+CACHE_SECONDS = "10"
 FINISHED_RECHECK_SECONDS = "300"
 FINISHED_SCAN_OVERLAP_SECONDS = "60"
-AUDIT_RECHECK_SECONDS = "60"
+AUDIT_RECHECK_SECONDS = "300"
 
 [[d1_databases]]
 binding = "DB"
