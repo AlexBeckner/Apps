@@ -68,7 +68,6 @@ const ACTIVE_BUILD_STATES = [
   "creating",
   "scheduled",
   "running",
-  "blocked",
   "failing",
   "canceling",
 ];
