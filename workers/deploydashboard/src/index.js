@@ -3,9 +3,11 @@ import { companyAuthResponse } from "../../githubdashboard/src/company-auth.js";
 import {
   AWAITING_DEPLOY,
   FINISHED_BUILD_STATES,
+  buildSummaryFingerprint,
   deriveState,
   parseRateLimitReset,
   parseRetryAfterMs,
+  verifyBuildkiteWebhookSignature,
 } from "./buildkite.js";
 
 const BUILDKITE_API_BASE = "https://api.buildkite.com/v2";
@@ -15,20 +17,26 @@ const DEFAULT_FLASHING_PIPELINE = "core-stack-aaos-flashing";
 const GITHUB_OWNER = "AppliedNeuron";
 const GITHUB_REPO = "core-stack";
 const HISTORY_SIZE = 10;
-const DEFAULT_SNAPSHOT_SIZE = 10;
-const DEFAULT_CACHE_SECONDS = 10;
+const DEFAULT_CACHE_SECONDS = 30;
 const DEFAULT_REFRESH_LEASE_SECONDS = 120;
 const DEFAULT_BUILD_DETAIL_LEASE_SECONDS = 60;
-const DEFAULT_STALE_ACTIVE_RECHECK_SECONDS = 300;
+const DEFAULT_FINISHED_RECHECK_SECONDS = 300;
+const DEFAULT_AUDIT_RECHECK_SECONDS = 60;
+const DEFAULT_FINISHED_SCAN_OVERLAP_SECONDS = 60;
 const DEFAULT_BUILDKITE_FETCH_TIMEOUT_MS = 8000;
 const BUILDKITE_MAX_ATTEMPTS = 2;
 const BUILDKITE_RETRY_BASE_MS = 250;
 const MAX_BUILDKITE_BODY_BYTES = 20 * 1024 * 1024;
+const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
+const WEBHOOK_MAX_AGE_SECONDS = 300;
+const RECONCILE_PER_PAGE = 100;
+const MAX_ACTIVE_PAGES = 200;
+const MAX_AUDIT_DETAIL_FETCHES = 10;
 const BACKFILL_PER_PAGE = 100;
 const DEFAULT_BACKFILL_PAGES = 50;
 const MAX_BACKFILL_PAGES = 200;
-const MAX_STALE_ACTIVE_RECHECKS = 10;
 const REFRESH_SCHEDULER_NAME = "global-refresh-scheduler";
+const BUILDKITE_WEBHOOK_PATH = "/api/webhooks/buildkite";
 
 const PR_NUMBER_RE = /\(#(\d+)\)/g;
 const CANONICAL_RIG_RE = /^(?:cosmo|wanda|(?:rog|mce|dmx)\d{3})$/;
@@ -56,16 +64,25 @@ const ACTIVE_JOB_STATES = new Set([
   "scheduled",
   "timing_out",
 ]);
-const NON_TERMINAL_STATES = [
+const ACTIVE_BUILD_STATES = [
   "creating",
   "scheduled",
   "running",
   "blocked",
-  "blocked_failed",
   "failing",
   "canceling",
-  AWAITING_DEPLOY,
 ];
+const BUILDKITE_WEBHOOK_EVENTS = new Set([
+  "build.scheduled",
+  "build.running",
+  "build.failing",
+  "build.finished",
+  "build.skipped",
+  "job.scheduled",
+  "job.started",
+  "job.finished",
+  "job.activated",
+]);
 const RETRYABLE_BUILDKITE_STATUSES = new Set([408, 425, 500, 502, 503, 504]);
 const IN_PROGRESS_STATES = new Set([
   "creating",
@@ -132,6 +149,14 @@ export default {
         );
       }
 
+      const url = new URL(request.url);
+      if (
+        request.method === "POST" &&
+        url.pathname === BUILDKITE_WEBHOOK_PATH
+      ) {
+        return handleBuildkiteWebhook(request, env);
+      }
+
       const authResponse = await companyAuthResponse(
         request,
         env,
@@ -141,7 +166,6 @@ export default {
         return authResponse;
       }
 
-      const url = new URL(request.url);
       if (request.method === "GET" && isAssetRoute(url.pathname)) {
         return assetResponse(request, env);
       }
@@ -259,7 +283,171 @@ export default {
   async scheduled(_event, env, ctx) {
     ctx.waitUntil(ensureRefreshScheduler(env, { fallbackToRefresh: true }));
   },
+
+  async queue(batch, env) {
+    await handleBuildkiteQueue(batch, env);
+  },
 };
+
+async function handleBuildkiteWebhook(request, env) {
+  if (!env.BUILDKITE_WEBHOOK_SECRET) {
+    throw httpError(503, "BUILDKITE_WEBHOOK_SECRET is not configured.");
+  }
+  if (!env.BUILDKITE_EVENTS) {
+    throw httpError(503, "BUILDKITE_EVENTS queue binding is not configured.");
+  }
+  if (!String(request.headers.get("Content-Type") || "").toLowerCase().includes("application/json")) {
+    throw httpError(415, "Buildkite webhook must use application/json.");
+  }
+
+  const rawBody = await requestTextWithinLimit(request, MAX_WEBHOOK_BODY_BYTES);
+  const validSignature = await verifyBuildkiteWebhookSignature({
+    rawBody,
+    header: request.headers.get("X-Buildkite-Signature"),
+    secret: env.BUILDKITE_WEBHOOK_SECRET,
+    maxAgeSeconds: WEBHOOK_MAX_AGE_SECONDS,
+  });
+  if (!validSignature) {
+    return jsonResponse(
+      request,
+      env,
+      { accepted: false, error: "Invalid or expired Buildkite signature." },
+      { status: 401 }
+    );
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    throw httpError(400, "Buildkite webhook body is not valid JSON.");
+  }
+
+  const headerEvent = String(request.headers.get("X-Buildkite-Event") || "");
+  const event = String(payload?.event || headerEvent);
+  if (!event || (headerEvent && payload?.event && headerEvent !== payload.event)) {
+    throw httpError(400, "Buildkite webhook event headers do not match the body.");
+  }
+  if (event === "ping") {
+    return jsonResponse(request, env, { accepted: true, event });
+  }
+  if (!BUILDKITE_WEBHOOK_EVENTS.has(event)) {
+    return jsonResponse(request, env, {
+      accepted: true,
+      ignored: true,
+      event,
+    });
+  }
+
+  const buildNumber = Number(payload?.build?.number);
+  const pipelineSlug = String(payload?.pipeline?.slug || "");
+  const source = sourceForPipeline(env, pipelineSlug);
+  if (!source || !Number.isInteger(buildNumber) || buildNumber <= 0) {
+    return jsonResponse(request, env, {
+      accepted: true,
+      ignored: true,
+      event,
+    });
+  }
+
+  await env.BUILDKITE_EVENTS.send({
+    source_key: source.key,
+    build_number: buildNumber,
+    event,
+    received_at: Math.floor(Date.now() / 1000),
+  });
+  console.log({
+    event: "deploydashboard_webhook_enqueued",
+    buildkite_event: event,
+    source: source.key,
+    build_number: buildNumber,
+  });
+  return jsonResponse(
+    request,
+    env,
+    { accepted: true, event, build_number: buildNumber },
+    { status: 202 }
+  );
+}
+
+async function handleBuildkiteQueue(batch, env) {
+  const groups = new Map();
+  for (const message of batch.messages) {
+    const sourceKey = String(message.body?.source_key || "");
+    const buildNumber = Number(message.body?.build_number);
+    const source = configuredSources(env).find((item) => item.key === sourceKey);
+    if (!source || !Number.isInteger(buildNumber) || buildNumber <= 0) {
+      console.error({
+        event: "deploydashboard_webhook_message_invalid",
+        message_id: message.id,
+      });
+      message.ack();
+      continue;
+    }
+    const key = `${sourceKey}:${buildNumber}`;
+    if (!groups.has(key)) {
+      groups.set(key, { source, buildNumber, messages: [] });
+    }
+    groups.get(key).messages.push(message);
+  }
+
+  for (const group of groups.values()) {
+    const { source, buildNumber, messages } = group;
+    try {
+      const rateLimitedUntil = await currentRateLimitUntil(env, source.key);
+      if (rateLimitedUntil > Date.now() / 1000) {
+        retryQueueMessages(messages, rateLimitedUntil);
+        continue;
+      }
+
+      const build = await fetchBuildDetail(env, source, buildNumber);
+      await saveBuildsWithSummary(env, source.key, [build]);
+      const receivedAt = Math.max(
+        ...messages.map((message) => Number(message.body?.received_at) || 0)
+      );
+      await setMeta(
+        env,
+        metaKey(source.key, "last_webhook_event_at"),
+        String(receivedAt || Math.floor(Date.now() / 1000))
+      );
+      await setMeta(
+        env,
+        metaKey(source.key, "last_refresh_at"),
+        String(Math.floor(Date.now() / 1000))
+      );
+      await writeCachedSnapshot(env, source);
+      for (const message of messages) message.ack();
+      console.log({
+        event: "deploydashboard_webhook_processed",
+        source: source.key,
+        build_number: buildNumber,
+        messages: messages.length,
+      });
+    } catch (error) {
+      if (error.rateLimitedUntil) {
+        await rememberRateLimit(env, source.key, error.rateLimitedUntil);
+      }
+      retryQueueMessages(messages, error.rateLimitedUntil);
+      console.error({
+        event: "deploydashboard_webhook_processing_failed",
+        source: source.key,
+        build_number: buildNumber,
+        attempts: Math.max(...messages.map((message) => message.attempts || 1)),
+        message: error.message || String(error),
+      });
+    }
+  }
+}
+
+function retryQueueMessages(messages, rateLimitedUntil = null) {
+  const until = Number(rateLimitedUntil) || 0;
+  const delaySeconds = until > Date.now() / 1000
+    ? Math.max(30, Math.min(43200, Math.ceil(until - Date.now() / 1000)))
+    : 30;
+  for (const message of messages) {
+    message.retry({ delaySeconds });
+  }
+}
 
 async function handleHealth(env) {
   const sources = [];
@@ -274,6 +462,19 @@ async function handleHealth(env) {
         env,
         metaKey(source.key, "last_refresh_attempt_at")
       ),
+      last_webhook_event_at: await getMeta(
+        env,
+        metaKey(source.key, "last_webhook_event_at")
+      ),
+      last_finished_scan_at: await getMeta(
+        env,
+        metaKey(source.key, "last_finished_scan_at")
+      ),
+      last_audit_scan_at: await getMeta(
+        env,
+        metaKey(source.key, "last_audit_scan_at")
+      ),
+      audit_page: await getMeta(env, metaKey(source.key, "audit_page")),
       rate_limited_until: await currentRateLimitUntil(env, source.key),
     });
   }
@@ -284,8 +485,12 @@ async function handleHealth(env) {
     organization_slug: primary?.organization_slug || DEFAULT_ORG_SLUG,
     pipeline_slug: primary?.pipeline_slug || DEFAULT_DEPLOYMENT_PIPELINE,
     pipeline_url: primary?.pipeline_url || pipelineUrl(DEFAULT_ORG_SLUG, DEFAULT_DEPLOYMENT_PIPELINE),
-    snapshot_size: snapshotSize(env),
     cache_seconds: cacheSeconds(env),
+    webhook: {
+      path: BUILDKITE_WEBHOOK_PATH,
+      secret_configured: Boolean(env.BUILDKITE_WEBHOOK_SECRET),
+      queue_configured: Boolean(env.BUILDKITE_EVENTS),
+    },
     refresh_scheduler: await refreshSchedulerStatus(env),
     rigs_dir: null,
     db_path: "cloudflare-d1",
@@ -384,7 +589,7 @@ async function getSnapshot(env, source, { force, historySize = HISTORY_SIZE }) {
   let rateLimitedUntil = null;
 
   if (force && env.BUILDKITE_API_TOKEN) {
-    const refresh = await refreshSource(env, source);
+    const refresh = await refreshSource(env, source, { force: true });
     errors.push(...refresh.errors);
     rateLimitedUntil = refresh.rate_limited_until;
     const cached = await readCachedSnapshot(env, source.key, historySize);
@@ -492,7 +697,7 @@ function trimSnapshotHistory(snapshot, historySize = HISTORY_SIZE) {
   };
 }
 
-async function refreshSource(env, source) {
+async function refreshSource(env, source, { force = false } = {}) {
   const knownRateLimitUntil = await currentRateLimitUntil(env, source.key);
   if (knownRateLimitUntil > Date.now() / 1000) {
     return {
@@ -509,41 +714,101 @@ async function refreshSource(env, source) {
 
   const errors = [];
   let rateLimitedUntil = null;
-  let builds = [];
+  const buildsByNumber = new Map();
+  const metadataUpdates = [];
   let fetchSucceeded = false;
   let storeSucceeded = true;
-  let staleCheckedNumbers = [];
+  const refreshStartedAt = Math.floor(Date.now() / 1000);
 
   try {
     try {
-      builds = await fetchRecentBuilds(env, source);
+      mergeBuildsByNumber(
+        buildsByNumber,
+        await fetchAllActiveBuilds(env, source)
+      );
       fetchSucceeded = true;
     } catch (error) {
       errors.push(buildkiteErrorMessage(error));
       rateLimitedUntil = error.rateLimitedUntil || null;
     }
 
-    if (builds.length) {
-      const rescue = await refreshStaleActiveBuilds(env, source, builds);
-      staleCheckedNumbers = rescue.checked_numbers;
-      builds = builds.concat(rescue.builds);
-      errors.push(...rescue.errors);
-      if (!rateLimitedUntil && rescue.rate_limited_until) {
-        rateLimitedUntil = rescue.rate_limited_until;
-      }
+    if (
+      !rateLimitedUntil &&
+      (force ||
+        await reconciliationDue(
+          env,
+          source.key,
+          "last_finished_scan_at",
+          finishedRecheckSeconds(env)
+        ))
+    ) {
+      const previousScan =
+        Number(await getMeta(env, metaKey(source.key, "last_finished_scan_at"))) ||
+        refreshStartedAt - finishedRecheckSeconds(env);
+      const finishedFrom = Math.max(
+        0,
+        previousScan - finishedScanOverlapSeconds(env)
+      );
       try {
-        await saveBuildsWithSummary(env, source.key, builds);
-        await markBuildsChecked(env, source.key, staleCheckedNumbers);
+        mergeBuildsByNumber(
+          buildsByNumber,
+          await fetchRecentlyFinishedBuilds(env, source, finishedFrom)
+        );
+        metadataUpdates.push([
+          metaKey(source.key, "last_finished_scan_at"),
+          String(refreshStartedAt),
+        ]);
+        fetchSucceeded = true;
       } catch (error) {
-        storeSucceeded = false;
-        const message = `D1 write failed during refresh: ${error.message || error}`;
-        console.error({
-          event: "deploydashboard_refresh_store_failed",
-          source: source.key,
-          message,
-        });
-        errors.push(message.slice(0, 300));
+        errors.push(buildkiteErrorMessage(error));
+        rateLimitedUntil = error.rateLimitedUntil || null;
       }
+    }
+
+    if (
+      !rateLimitedUntil &&
+      (force ||
+        await reconciliationDue(
+          env,
+          source.key,
+          "last_audit_scan_at",
+          auditRecheckSeconds(env)
+        ))
+    ) {
+      try {
+        const audit = await auditNextBuildPage(env, source);
+        mergeBuildsByNumber(buildsByNumber, audit.builds);
+        metadataUpdates.push(
+          [metaKey(source.key, "audit_page"), String(audit.next_page)],
+          [
+            metaKey(source.key, "last_audit_scan_at"),
+            String(refreshStartedAt),
+          ]
+        );
+        fetchSucceeded = true;
+      } catch (error) {
+        errors.push(buildkiteErrorMessage(error));
+        rateLimitedUntil = error.rateLimitedUntil || null;
+      }
+    }
+
+    try {
+      const builds = [...buildsByNumber.values()];
+      if (builds.length) {
+        await saveBuildsWithSummary(env, source.key, builds);
+      }
+      for (const [key, value] of metadataUpdates) {
+        await setMeta(env, key, value);
+      }
+    } catch (error) {
+      storeSucceeded = false;
+      const message = `D1 write failed during refresh: ${error.message || error}`;
+      console.error({
+        event: "deploydashboard_refresh_store_failed",
+        source: source.key,
+        message,
+      });
+      errors.push(message.slice(0, 300));
     }
 
     const attemptedAt = Math.floor(Date.now() / 1000);
@@ -564,20 +829,120 @@ async function refreshSource(env, source) {
   }
 }
 
-async function fetchRecentBuilds(env, source) {
-  const builds = await buildkiteJson(env, `${buildsUrl(source)}?${new URLSearchParams({
-    per_page: String(snapshotSize(env)),
-    page: "1",
+async function fetchAllActiveBuilds(env, source) {
+  const params = new URLSearchParams({
+    per_page: String(RECONCILE_PER_PAGE),
     include_retried_jobs: "true",
-  })}`);
-  if (!Array.isArray(builds)) {
-    throw httpError(502, `Unexpected Buildkite response shape: ${typeof builds}`);
+    exclude_pipeline: "true",
+  });
+  for (const state of ACTIVE_BUILD_STATES) {
+    params.append("state[]", state);
   }
-  return builds;
+  return fetchBuildPages(env, source, params, MAX_ACTIVE_PAGES);
+}
+
+async function fetchRecentlyFinishedBuilds(env, source, finishedFrom) {
+  const params = new URLSearchParams({
+    per_page: String(RECONCILE_PER_PAGE),
+    include_retried_jobs: "true",
+    exclude_pipeline: "true",
+    finished_from: new Date(finishedFrom * 1000).toISOString(),
+  });
+  return fetchBuildPages(env, source, params, MAX_BACKFILL_PAGES);
+}
+
+async function fetchBuildPages(env, source, baseParams, maxPages) {
+  const builds = [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const params = new URLSearchParams(baseParams);
+    params.set("page", String(page));
+    const data = await buildkiteJson(env, `${buildsUrl(source)}?${params}`);
+    if (!Array.isArray(data)) {
+      throw httpError(502, `Unexpected Buildkite response shape: ${typeof data}`);
+    }
+    builds.push(...data);
+    if (data.length < RECONCILE_PER_PAGE) return builds;
+  }
+  throw httpError(
+    502,
+    `Buildkite reconciliation exceeded ${maxPages} pages for ${source.key}.`
+  );
+}
+
+async function auditNextBuildPage(env, source) {
+  const configuredPage =
+    Number(await getMeta(env, metaKey(source.key, "audit_page"))) || 1;
+  const page = Math.max(1, Math.floor(configuredPage));
+  const params = new URLSearchParams({
+    per_page: String(RECONCILE_PER_PAGE),
+    page: String(page),
+    exclude_jobs: "true",
+    exclude_pipeline: "true",
+  });
+
+  let summaries;
+  try {
+    summaries = await buildkiteJson(env, `${buildsUrl(source)}?${params}`);
+  } catch (error) {
+    if (error.status === 400 && page > 1) {
+      return { builds: [], next_page: 1 };
+    }
+    throw error;
+  }
+  if (!Array.isArray(summaries)) {
+    throw httpError(
+      502,
+      `Unexpected Buildkite audit response shape: ${typeof summaries}`
+    );
+  }
+  if (!summaries.length) {
+    return { builds: [], next_page: 1 };
+  }
+
+  const fingerprints = await getStoredBuildFingerprints(
+    env,
+    source.key,
+    summaries.map((build) => build?.number)
+  );
+  const changedNumbers = summaries
+    .filter((build) => {
+      const number = build?.number;
+      return (
+        Number.isInteger(number) &&
+        fingerprints.get(number) !== buildSummaryFingerprint(build)
+      );
+    })
+    .map((build) => build.number);
+  const builds = [];
+  for (const number of changedNumbers.slice(0, MAX_AUDIT_DETAIL_FETCHES)) {
+    builds.push(await fetchBuildDetail(env, source, number));
+  }
+
+  const pageHasPendingDetails =
+    changedNumbers.length > MAX_AUDIT_DETAIL_FETCHES;
+  const reachedEnd = summaries.length < RECONCILE_PER_PAGE;
+  return {
+    builds,
+    next_page: pageHasPendingDetails ? page : reachedEnd ? 1 : page + 1,
+  };
+}
+
+function mergeBuildsByNumber(target, builds) {
+  for (const build of builds || []) {
+    if (Number.isInteger(build?.number) && build.number > 0) {
+      target.set(build.number, build);
+    }
+  }
 }
 
 async function fetchBuildDetail(env, source, buildNumber) {
-  return buildkiteJson(env, `${buildsUrl(source)}/${buildNumber}?include_retried_jobs=true`);
+  return buildkiteJson(
+    env,
+    `${buildsUrl(source)}/${buildNumber}?${new URLSearchParams({
+      include_retried_jobs: "true",
+      exclude_pipeline: "true",
+    })}`
+  );
 }
 
 async function buildkiteJson(env, url) {
@@ -688,6 +1053,30 @@ async function responseTextWithinLimit(response) {
   return text + decoder.decode();
 }
 
+async function requestTextWithinLimit(request, maxBytes) {
+  const contentLength = Number(request.headers.get("Content-Length"));
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw httpError(413, "Buildkite webhook payload is too large.");
+  }
+  if (!request.body) return "";
+
+  const reader = request.body.getReader();
+  const decoder = new TextDecoder();
+  let byteCount = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    byteCount += value.byteLength;
+    if (byteCount > maxBytes) {
+      await reader.cancel();
+      throw httpError(413, "Buildkite webhook payload is too large.");
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
 function nonRetryableBuildkiteError(message) {
   const error = httpError(502, message);
   error.retryable = false;
@@ -702,48 +1091,6 @@ function buildkiteRetryDelayMs(error, attempt) {
 
 function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-async function refreshStaleActiveBuilds(env, source, snapshotBuilds) {
-  const snapshotNumbers = new Set(
-    snapshotBuilds
-      .map((build) => build?.number)
-      .filter((number) => Number.isInteger(number))
-  );
-  const activeNumbers = await getActiveBuildNumbers(
-    env,
-    source.key,
-    MAX_STALE_ACTIVE_RECHECKS,
-    [...snapshotNumbers]
-  );
-  const builds = [];
-  const checkedNumbers = [];
-  const errors = [];
-  let rateLimitedUntil = null;
-
-  for (const number of activeNumbers) {
-    if (snapshotNumbers.has(number)) continue;
-    try {
-      builds.push(await fetchBuildDetail(env, source, number));
-      checkedNumbers.push(number);
-    } catch (error) {
-      errors.push(buildkiteErrorMessage(error));
-      if (!rateLimitedUntil && error.rateLimitedUntil) {
-        rateLimitedUntil = error.rateLimitedUntil;
-      }
-      if (!error.rateLimitedUntil) {
-        checkedNumbers.push(number);
-      }
-      if (error.rateLimitedUntil || error.retryable) break;
-    }
-  }
-
-  return {
-    builds,
-    checked_numbers: checkedNumbers,
-    errors,
-    rate_limited_until: rateLimitedUntil,
-  };
 }
 
 async function backfill(env, source, maxPages) {
@@ -1053,11 +1400,14 @@ async function saveBuildsWithSummary(env, sourceKey, builds) {
         last_event_at = excluded.last_event_at,
         raw_json = excluded.raw_json,
         updated_at = excluded.updated_at
-      WHERE builds.rig IS NOT excluded.rig
-         OR builds.state IS NOT excluded.state
-         OR builds.created_at IS NOT excluded.created_at
-         OR builds.last_event_at IS NOT excluded.last_event_at
-         OR builds.raw_json IS NOT excluded.raw_json`
+      WHERE (
+        builds.rig IS NOT excluded.rig
+        OR builds.state IS NOT excluded.state
+        OR builds.created_at IS NOT excluded.created_at
+        OR builds.last_event_at IS NOT excluded.last_event_at
+        OR builds.raw_json IS NOT excluded.raw_json
+      )
+      AND COALESCE(excluded.last_event_at, '') >= COALESCE(builds.last_event_at, '')`
     ).bind(...values).run();
   }
 
@@ -1084,6 +1434,27 @@ async function existingBuildState(env, sourceKey, numbers) {
         state: row.state || null,
         last_event_at: row.last_event_at || null,
       });
+    }
+  }
+  return out;
+}
+
+async function getStoredBuildFingerprints(env, sourceKey, numbers) {
+  const out = new Map();
+  const validNumbers = [...new Set(numbers)]
+    .filter((number) => Number.isInteger(number) && number > 0);
+  for (const chunk of chunked(validNumbers, 90)) {
+    const placeholders = chunk.map(() => "?").join(", ");
+    const result = await env.DB.prepare(
+      `SELECT build_number, raw_json
+       FROM builds
+       WHERE source = ? AND build_number IN (${placeholders})`
+    ).bind(sourceKey, ...chunk).all();
+    for (const row of result.results || []) {
+      const build = decodeRawBuild(row.raw_json);
+      if (build) {
+        out.set(Number(row.build_number), buildSummaryFingerprint(build));
+      }
     }
   }
   return out;
@@ -1143,40 +1514,6 @@ async function getBuild(env, sourceKey, buildNumber) {
     `SELECT raw_json FROM builds WHERE source = ? AND build_number = ?`
   ).bind(sourceKey, buildNumber).first();
   return row ? decodeRawBuild(row.raw_json) : null;
-}
-
-async function getActiveBuildNumbers(env, sourceKey, limit, excludedNumbers = []) {
-  const statePlaceholders = NON_TERMINAL_STATES.map(() => "?").join(", ");
-  const terminalStates = [...FINISHED_BUILD_STATES];
-  const terminalPlaceholders = terminalStates.map(() => "?").join(", ");
-  const exclusions = new Set(excludedNumbers.filter(Number.isInteger));
-  const checkedBefore = Date.now() / 1000 - staleActiveRecheckSeconds(env);
-  const candidateLimit = limit + exclusions.size;
-  const result = await env.DB.prepare(
-    `SELECT build_number
-     FROM builds
-     WHERE source = ?
-       AND state IN (${statePlaceholders})
-       AND updated_at <= ?
-       AND (
-         state <> ?
-         OR COALESCE(json_extract(raw_json, '$.state'), 'unknown')
-            NOT IN (${terminalPlaceholders})
-       )
-     ORDER BY updated_at ASC, build_number DESC
-     LIMIT ?`
-  ).bind(
-    sourceKey,
-    ...NON_TERMINAL_STATES,
-    checkedBefore,
-    AWAITING_DEPLOY,
-    ...terminalStates,
-    candidateLimit
-  ).all();
-  return (result.results || [])
-    .map((row) => Number(row.build_number))
-    .filter((number) => Number.isInteger(number) && !exclusions.has(number))
-    .slice(0, limit);
 }
 
 async function markBuildsChecked(env, sourceKey, buildNumbers) {
@@ -1388,6 +1725,12 @@ function resolveSource(env, requested) {
   const found = sources.find((source) => source.key === requested);
   if (!found) throw httpError(400, `Unknown source: ${requested}`);
   return found;
+}
+
+function sourceForPipeline(env, pipelineSlug) {
+  return configuredSources(env).find(
+    (source) => source.pipeline_slug === pipelineSlug
+  ) || null;
 }
 
 function sourceSummaries(env) {
@@ -1769,17 +2112,6 @@ function httpError(status, message) {
   return error;
 }
 
-function snapshotSize(env) {
-  const value = Number(env.SNAPSHOT_SIZE || DEFAULT_SNAPSHOT_SIZE);
-  return Math.max(
-    1,
-    Math.min(
-      100,
-      Number.isFinite(value) ? Math.floor(value) : DEFAULT_SNAPSHOT_SIZE
-    )
-  );
-}
-
 function snapshotHistorySize(url) {
   if (parseBoolean(url.searchParams.get("compact"))) return 1;
   const value = Number(url.searchParams.get("history_size") || HISTORY_SIZE);
@@ -1805,9 +2137,24 @@ function buildDetailLeaseSeconds(env) {
   return Math.max(10, Math.min(300, Number.isFinite(value) ? Math.floor(value) : DEFAULT_BUILD_DETAIL_LEASE_SECONDS));
 }
 
-function staleActiveRecheckSeconds(env) {
+function finishedRecheckSeconds(env) {
   const value = Number(
-    env.STALE_ACTIVE_RECHECK_SECONDS || DEFAULT_STALE_ACTIVE_RECHECK_SECONDS
+    env.FINISHED_RECHECK_SECONDS || DEFAULT_FINISHED_RECHECK_SECONDS
+  );
+  return Math.max(
+    60,
+    Math.min(
+      3600,
+      Number.isFinite(value)
+        ? Math.floor(value)
+        : DEFAULT_FINISHED_RECHECK_SECONDS
+    )
+  );
+}
+
+function auditRecheckSeconds(env) {
+  const value = Number(
+    env.AUDIT_RECHECK_SECONDS || DEFAULT_AUDIT_RECHECK_SECONDS
   );
   return Math.max(
     30,
@@ -1815,9 +2162,36 @@ function staleActiveRecheckSeconds(env) {
       3600,
       Number.isFinite(value)
         ? Math.floor(value)
-        : DEFAULT_STALE_ACTIVE_RECHECK_SECONDS
+        : DEFAULT_AUDIT_RECHECK_SECONDS
     )
   );
+}
+
+function finishedScanOverlapSeconds(env) {
+  const value = Number(
+    env.FINISHED_SCAN_OVERLAP_SECONDS ||
+      DEFAULT_FINISHED_SCAN_OVERLAP_SECONDS
+  );
+  return Math.max(
+    0,
+    Math.min(
+      600,
+      Number.isFinite(value)
+        ? Math.floor(value)
+        : DEFAULT_FINISHED_SCAN_OVERLAP_SECONDS
+    )
+  );
+}
+
+async function reconciliationDue(
+  env,
+  sourceKey,
+  metadataName,
+  intervalSeconds
+) {
+  const lastRun =
+    Number(await getMeta(env, metaKey(sourceKey, metadataName))) || 0;
+  return Date.now() / 1000 - lastRun >= intervalSeconds;
 }
 
 function buildkiteFetchTimeoutMs(env) {
