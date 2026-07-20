@@ -10,13 +10,19 @@ export const FINISHED_BUILD_STATES = new Set([
 
 export function deriveState(build) {
   const raw = String(build?.state || "unknown");
+  const jobs = build?.jobs;
+  const pendingProceedBlock =
+    Array.isArray(jobs) && jobs.some(isPendingProceedBlock);
+
+  if (raw === "passed" && build?.blocked === true && pendingProceedBlock) {
+    return AWAITING_DEPLOY;
+  }
   if (FINISHED_BUILD_STATES.has(raw)) {
     return raw;
   }
 
-  const jobs = build?.jobs;
   if (Array.isArray(jobs)) {
-    return jobs.some(isPendingProceedBlock) ? AWAITING_DEPLOY : raw;
+    return pendingProceedBlock ? AWAITING_DEPLOY : raw;
   }
   return raw === "blocked" || raw === "blocked_failed"
     ? AWAITING_DEPLOY

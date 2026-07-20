@@ -18,10 +18,29 @@ const pendingDeployJob = {
   label: "Proceed with deploy",
 };
 
-test("terminal build state takes precedence over leftover manual blocks", () => {
-  for (const state of ["passed", "failed", "canceled", "skipped", "not_run"]) {
+test("a passed build still blocked at the deploy gate is awaiting deploy", () => {
+  assert.equal(
+    deriveState({
+      state: "passed",
+      blocked: true,
+      jobs: [pendingDeployJob],
+    }),
+    AWAITING_DEPLOY
+  );
+});
+
+test("other finished states take precedence over leftover manual blocks", () => {
+  assert.equal(
+    deriveState({
+      state: "passed",
+      blocked: false,
+      jobs: [pendingDeployJob],
+    }),
+    "passed"
+  );
+  for (const state of ["failed", "canceled", "skipped", "not_run"]) {
     assert.equal(
-      deriveState({ state, jobs: [pendingDeployJob] }),
+      deriveState({ state, blocked: true, jobs: [pendingDeployJob] }),
       state
     );
   }
