@@ -3,6 +3,7 @@ import { companyAuthResponse } from "../../githubdashboard/src/company-auth.js";
 import {
   AWAITING_DEPLOY,
   FINISHED_BUILD_STATES,
+  buildNumbersMissingFromResponse,
   buildSummaryFingerprint,
   deriveState,
   parseRateLimitReset,
@@ -31,6 +32,7 @@ const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
 const WEBHOOK_MAX_AGE_SECONDS = 300;
 const RECONCILE_PER_PAGE = 100;
 const MAX_ACTIVE_PAGES = 200;
+const MAX_ACTIVE_TRANSITION_DETAIL_FETCHES = 10;
 const MAX_AUDIT_DETAIL_FETCHES = 10;
 const BACKFILL_PER_PAGE = 100;
 const DEFAULT_BACKFILL_PAGES = 50;
@@ -837,7 +839,31 @@ async function fetchAllActiveBuilds(env, source) {
   for (const state of ACTIVE_BUILD_STATES) {
     params.append("state[]", state);
   }
-  return fetchBuildPages(env, source, params, MAX_ACTIVE_PAGES);
+  const builds = await fetchBuildPages(env, source, params, MAX_ACTIVE_PAGES);
+
+  // Buildkite removes a build from the active-state listing as soon as it
+  // reaches a terminal state. If that transition happens between polls, the
+  // list no longer contains either the old or new version and D1 can remain
+  // stuck at "running" until the slower finished-build scan. Re-fetch any
+  // previously active build that disappeared from this response by number so
+  // the next 10-second reconciliation records its terminal state.
+  const storedActiveNumbers = await getStoredActiveBuildNumbers(env, source.key);
+  const missingNumbers = buildNumbersMissingFromResponse(
+    storedActiveNumbers,
+    builds,
+    MAX_ACTIVE_TRANSITION_DETAIL_FETCHES
+  );
+  for (const buildNumber of missingNumbers) {
+    builds.push(await fetchBuildDetail(env, source, buildNumber));
+  }
+  if (missingNumbers.length) {
+    console.log({
+      event: "deploydashboard_active_transitions_reconciled",
+      source: source.key,
+      build_numbers: missingNumbers,
+    });
+  }
+  return builds;
 }
 
 async function fetchRecentlyFinishedBuilds(env, source, finishedFrom) {
@@ -1496,6 +1522,19 @@ async function getLatestBuildRows(env, sourceKey, limit) {
      LIMIT ?`
   ).bind(sourceKey, limit).all();
   return (result.results || []).map((row) => decodeRawBuild(row.raw_json)).filter(Boolean);
+}
+
+async function getStoredActiveBuildNumbers(env, sourceKey) {
+  const placeholders = ACTIVE_BUILD_STATES.map(() => "?").join(", ");
+  const result = await env.DB.prepare(
+    `SELECT build_number
+     FROM builds
+     WHERE source = ? AND state IN (${placeholders})
+     ORDER BY last_event_at DESC, build_number DESC`
+  ).bind(sourceKey, ...ACTIVE_BUILD_STATES).all();
+  return (result.results || [])
+    .map((row) => Number(row.build_number))
+    .filter((number) => Number.isInteger(number) && number > 0);
 }
 
 async function getRigBuilds(env, sourceKey, rig) {

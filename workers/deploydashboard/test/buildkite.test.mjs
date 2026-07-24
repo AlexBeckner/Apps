@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   AWAITING_DEPLOY,
+  buildNumbersMissingFromResponse,
   buildSummaryFingerprint,
   deriveState,
   parseBuildkiteSignatureHeader,
@@ -121,6 +122,22 @@ test("build summary fingerprints detect lifecycle changes without job payloads",
       started_at: "2026-07-17T13:27:15.489Z",
       finished_at: null,
     })
+  );
+});
+
+test("previously active builds missing from the active response are reconciled", () => {
+  const activeResponse = [{ number: 6689 }, { number: 6687 }];
+  assert.deepEqual(
+    buildNumbersMissingFromResponse([6689, 6688, 6688, 6687], activeResponse),
+    [6688]
+  );
+  assert.deepEqual(
+    buildNumbersMissingFromResponse([6688, 6686], activeResponse, 1),
+    [6688]
+  );
+  assert.deepEqual(
+    buildNumbersMissingFromResponse([6688], activeResponse, 0),
+    []
   );
 });
 

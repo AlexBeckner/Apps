@@ -46,6 +46,38 @@ export function buildSummaryFingerprint(build) {
   });
 }
 
+export function buildNumbersMissingFromResponse(
+  candidateNumbers,
+  builds,
+  limit = Number.POSITIVE_INFINITY
+) {
+  const returnedNumbers = new Set(
+    (builds || [])
+      .map((build) => build?.number)
+      .filter((number) => Number.isInteger(number) && number > 0)
+  );
+  const cap = Number.isFinite(limit)
+    ? Math.max(0, Math.floor(limit))
+    : Number.POSITIVE_INFINITY;
+  if (cap === 0) return [];
+  const missing = [];
+  const seen = new Set();
+  for (const number of candidateNumbers || []) {
+    if (
+      !Number.isInteger(number) ||
+      number <= 0 ||
+      seen.has(number) ||
+      returnedNumbers.has(number)
+    ) {
+      continue;
+    }
+    seen.add(number);
+    missing.push(number);
+    if (missing.length >= cap) break;
+  }
+  return missing;
+}
+
 export function parseBuildkiteSignatureHeader(value) {
   if (!value) return null;
   const parts = new Map();

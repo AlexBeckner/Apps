@@ -14,8 +14,10 @@ and retry attempt, and upsert the result into D1.
 Reconciliation remains page-independent and requires no manual sync:
 
 - every 10 seconds, fetch every queued or executing build (paginated, with all
-  jobs); Buildkite's broad `blocked` filter is intentionally excluded because
-  it also returns completed builds with unused manual escape-hatch steps;
+  jobs), then fetch by number any previously active build that disappeared
+  from that listing so terminal transitions cannot leave a stale `running`
+  row; Buildkite's broad `blocked` filter is intentionally excluded because it
+  also returns completed builds with unused manual escape-hatch steps;
 - every five minutes, fetch every build finished since the prior scan, with a
   one-minute overlap;
 - every five minutes, inspect one 100-build summary page and fetch full details
