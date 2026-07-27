@@ -141,7 +141,20 @@
     return { file, path: String(record.path || file.name) };
   }
 
-  async function loadSession() {
+  function storedSessionBytes(records) {
+    return records.reduce((total, record) => {
+      const declared = Number(record && record.size);
+      const blobSize = Number(record && record.blob && record.blob.size);
+      const size = Number.isFinite(declared)
+        ? declared
+        : Number.isFinite(blobSize)
+          ? blobSize
+          : 0;
+      return Math.min(Number.MAX_SAFE_INTEGER, total + Math.max(0, size));
+    }, 0);
+  }
+
+  async function loadSession(options) {
     if (!isSupported()) return null;
     const database = await openDatabase();
     const transaction = database.transaction(
@@ -159,6 +172,20 @@
       complete,
     ]);
     if (!state || !Array.isArray(records) || !records.length) return null;
+
+    const maxBytes = Number(options && options.maxBytes);
+    const totalBytes = storedSessionBytes(records);
+    if (
+      Number.isFinite(maxBytes) &&
+      maxBytes >= 0 &&
+      totalBytes > maxBytes
+    ) {
+      const error = new Error("Saved session exceeds the restore size limit.");
+      error.name = "SessionTooLargeError";
+      error.totalBytes = totalBytes;
+      error.maxBytes = maxBytes;
+      throw error;
+    }
 
     const files = records
       .slice()

@@ -50,7 +50,7 @@ test("main inline application has valid JavaScript syntax", async () => {
   assert.doesNotThrow(() => new vm.Script(html.slice(start, end)));
 });
 
-test("uploaded files and search state persist in IndexedDB", async () => {
+test("saved sessions are size-limited and never auto-run a search", async () => {
   const [html, persistenceScript] = await Promise.all([
     readFile(new URL("public/index.html", root), "utf8"),
     readFile(new URL("public/persistence.js", root), "utf8"),
@@ -63,11 +63,62 @@ test("uploaded files and search state persist in IndexedDB", async () => {
   assert.match(persistenceScript, /async function saveState\(/);
   assert.match(persistenceScript, /async function loadSession\(/);
   assert.match(persistenceScript, /new root\.File\(\[record\.blob\]/);
+  assert.match(persistenceScript, /function storedSessionBytes\(/);
+  assert.match(persistenceScript, /error\.name = "SessionTooLargeError"/);
   assert.match(html, /function captureSessionState\(/);
+  assert.match(html, /SESSION_CACHE_BUDGET = 128 \* 1024 \* 1024/);
   assert.match(html, /async function restoreCachedSession\(/);
-  assert.match(html, /await runSearch\(\{ restoreState: snapshot \}\)/);
+  assert.match(html, /maxBytes: SESSION_CACHE_BUDGET/);
+  assert.match(html, /searchParams\.get\("reset-session"\) === "1"/);
+  assert.match(html, /Saved session cleared\. Choose files to start again\./);
+  assert.match(html, /Search settings were restored; press Search to rerun it/);
   assert.match(html, /void restoreCachedSession\(\)/);
   assert.match(html, /id="clear-cache"/);
+
+  const restoreStart = html.indexOf("async function restoreCachedSession()");
+  const restoreEnd = html.indexOf("\n      function setSelection(", restoreStart);
+  assert.ok(restoreStart >= 0);
+  assert.ok(restoreEnd > restoreStart);
+  assert.doesNotMatch(html.slice(restoreStart, restoreEnd), /\brunSearch\s*\(/);
+});
+
+test("search result and line buffering use bounded memory", async () => {
+  const html = await readFile(new URL("public/index.html", root), "utf8");
+
+  assert.match(html, /STORE_BUDGET = 64 \* 1024 \* 1024/);
+  assert.match(html, /text\.length \* 2 \+ STORE_MATCH_OVERHEAD/);
+  assert.match(html, /MAX_SCANNED_LINE_CHARS = 1024 \* 1024/);
+  assert.match(html, /function lineEmitter\(onLine, options = \{\}\)/);
+  assert.match(html, /discarding = true/);
+  assert.match(html, /ctx\.longLinesTruncated\+\+/);
+  assert.match(html, /ctx\.storedBytes \+ cost <= STORE_BUDGET/);
+
+  const emitted = [];
+  const truncated = [];
+  const sandbox = { emitterFactory: null };
+  vm.runInNewContext(
+    `const MAX_SCANNED_LINE_CHARS = 8;\n` +
+      `${extractNamedFunction(html, "lineEmitter")}\n` +
+      `emitterFactory = lineEmitter;`,
+    sandbox
+  );
+  const emitter = sandbox.emitterFactory(
+    (line, lineNo) => emitted.push([line, lineNo]),
+    {
+      maxChars: 8,
+      onTruncated: (lineNo) => truncated.push(lineNo),
+    }
+  );
+  emitter.push("1234");
+  emitter.push("56789");
+  emitter.push("discarded\r\nok");
+  emitter.finish();
+
+  assert.deepEqual(emitted, [
+    ["12345678", 1],
+    ["ok", 2],
+  ]);
+  assert.deepEqual(truncated, [1]);
 });
 
 test("uploads can replace or add files by picker and drag position", async () => {
@@ -457,4 +508,21 @@ test("timestamped viewer lines can toggle manual route events", async () => {
 
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function extractNamedFunction(source, name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.ok(start >= 0, `missing function ${name}`);
+  const bodyStart = source.indexOf(") {", start) + 2;
+  assert.ok(bodyStart > start + 1, `missing body for function ${name}`);
+
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index++) {
+    if (source[index] === "{") depth++;
+    if (source[index] === "}") {
+      depth--;
+      if (depth === 0) return source.slice(start, index + 1);
+    }
+  }
+  assert.fail(`unterminated function ${name}`);
 }

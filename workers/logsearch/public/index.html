@@ -1345,14 +1345,20 @@
     <script src="route-core.js"></script>
     <script src="route.js"></script>
     <script>
-      // Retain matches until their text is estimated to use this much memory,
-      // rather than a fixed count -- so a run with a few hundred thousand short
-      // matches stays fully in memory (instant filtering) while a pathological
-      // run with millions of matches still can't exhaust the tab. Each match
-      // costs roughly its text length plus a small per-object overhead.
-      const STORE_BUDGET = 400 * 1024 * 1024; // ~400 MB of retained match text
-      const STORE_MATCH_OVERHEAD = 64; // approx per-match object cost, in bytes
-      const matchCost = (text) => text.length + STORE_MATCH_OVERHEAD;
+      // Keep result retention well below a tab's practical heap limit. Counts
+      // remain exact after this fills; filters re-read the local source on demand.
+      // JavaScript strings are UTF-16, so budget two bytes per character plus a
+      // conservative allowance for each match object.
+      const STORE_BUDGET = 64 * 1024 * 1024;
+      const STORE_MATCH_OVERHEAD = 160;
+      const matchCost = (text) =>
+        text.length * 2 + STORE_MATCH_OVERHEAD;
+      // Restoring from IndexedDB deserializes every selected Blob into the page.
+      // Large selections stay usable in the current tab but are not persisted.
+      const SESSION_CACHE_BUDGET = 128 * 1024 * 1024;
+      // A malformed "text" entry with no newlines must not grow one string until
+      // it consumes the tab. Only the prefix of an overlong line is searched.
+      const MAX_SCANNED_LINE_CHARS = 1024 * 1024;
       const PAGE_SIZE = 1000; // matches shown per results page
       const BINARY_SNIFF_BYTES = 8000;
       const VIEWER_BLOCK_LINES = 500; // lines per virtualized viewer block
@@ -1525,9 +1531,16 @@
         dropzone.classList.toggle("has-selection", !!text);
       }
 
+      function selectionBytes(files = selected) {
+        return files.reduce((sum, item) => {
+          const size = Number(item && item.file && item.file.size);
+          return sum + (Number.isFinite(size) && size > 0 ? size : 0);
+        }, 0);
+      }
+
       function selectionSummary(files = selected) {
         if (!files.length) return "";
-        const totalBytes = files.reduce((sum, item) => sum + item.file.size, 0);
+        const totalBytes = selectionBytes(files);
         const roots = new Set(
           files.map((item) => item.path.split("/")[0] || "(files)")
         );
@@ -1682,12 +1695,13 @@
             ? window.LogRoute.getSessionState()
             : null;
         return {
-          version: 1,
+          version: 2,
           terms: termsInput.value,
           caseSensitive: caseInput.checked,
           regexMode: regexInput.checked,
           filterText: filterInput.value,
-          searchWasRun,
+          searchWasRun:
+            searchWasRun && !running && !!lastRun && !lastRun.cancelled,
           activeTerm,
           activeFile,
           currentPage,
@@ -1749,6 +1763,32 @@
         const persistence = window.LogSearchPersistence;
         if (!persistence || !persistence.isSupported()) return;
         const generation = ++cacheSelectionGeneration;
+        const totalBytes = selectionBytes(files);
+        if (totalBytes > SESSION_CACHE_BUDGET) {
+          sessionCachingEnabled = false;
+          window.clearTimeout(sessionStateTimer);
+          sessionStateTimer = 0;
+          clearCacheBtn.hidden = false;
+          setCacheStatus(
+            `${formatBytes(totalBytes)} is too large to save as a browser session ` +
+              `(limit ${formatBytes(SESSION_CACHE_BUDGET)}). It will stay open until refresh.`
+          );
+          void enqueuePersistence(() => persistence.clearSession())
+            .then(() => {
+              if (generation === cacheSelectionGeneration) {
+                clearCacheBtn.hidden = true;
+              }
+            })
+            .catch(() => {
+              if (generation !== cacheSelectionGeneration) return;
+              clearCacheBtn.hidden = false;
+              setCacheStatus(
+                "This selection will not be restored, and the older saved session could not be cleared.",
+                true
+              );
+            });
+          return;
+        }
         sessionCachingEnabled = true;
         clearCacheBtn.hidden = false;
         setCacheStatus("Saving session locally...");
@@ -1798,10 +1838,50 @@
       async function restoreCachedSession() {
         const persistence = window.LogSearchPersistence;
         if (!persistence || !persistence.isSupported()) return;
+        const currentUrl = new URL(window.location.href);
+        if (currentUrl.searchParams.get("reset-session") === "1") {
+          try {
+            await enqueuePersistence(() => persistence.clearSession());
+            currentUrl.searchParams.delete("reset-session");
+            window.history.replaceState(
+              null,
+              "",
+              `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`
+            );
+            clearCacheBtn.hidden = true;
+            setCacheStatus("Saved session cleared. Choose files to start again.");
+          } catch (error) {
+            clearCacheBtn.hidden = false;
+            setCacheStatus(
+              "Could not clear the saved session. Reload this recovery URL to retry.",
+              true
+            );
+          }
+          return;
+        }
         let cached;
         try {
-          cached = await persistence.loadSession();
+          cached = await persistence.loadSession({
+            maxBytes: SESSION_CACHE_BUDGET,
+          });
         } catch (error) {
+          if (error && error.name === "SessionTooLargeError") {
+            clearCacheBtn.hidden = false;
+            try {
+              await enqueuePersistence(() => persistence.clearSession());
+              clearCacheBtn.hidden = true;
+              setCacheStatus(
+                `Removed a ${formatBytes(error.totalBytes || 0)} saved session ` +
+                  `because sessions over ${formatBytes(SESSION_CACHE_BUDGET)} are not restored.`
+              );
+            } catch (clearError) {
+              setCacheStatus(
+                "The saved session is too large to restore. Use “Forget saved session” to remove it.",
+                true
+              );
+            }
+            return;
+          }
           setCacheStatus("Could not restore the saved session.", true);
           return;
         }
@@ -1827,14 +1907,15 @@
             fromCache: true,
             routeState: snapshot.routeState || null,
           });
-          searchWasRun = !!snapshot.searchWasRun;
-          if (searchWasRun && termsInput.value.trim()) {
-            await runSearch({ restoreState: snapshot });
-          }
+          const searchNeedsRerun =
+            !!snapshot.searchWasRun && !!termsInput.value.trim();
           setCacheStatus(
             `Restored ${cached.files.length.toLocaleString()} saved file${
               cached.files.length === 1 ? "" : "s"
-            }.`
+            }.` +
+              (searchNeedsRerun
+                ? " Search settings were restored; press Search to rerun it."
+                : "")
           );
         } catch (error) {
           setCacheStatus("Could not finish restoring the saved session.", true);
@@ -2514,10 +2595,8 @@
         return { combined, highlight, perTerm };
       }
 
-      async function runSearch(options = {}) {
+      async function runSearch() {
         if (running) return;
-        const restoreState =
-          options && options.restoreState ? options.restoreState : null;
         showConfigError("");
         let terms;
         try {
@@ -2548,9 +2627,9 @@
           return;
         }
 
+        running = true;
         searchWasRun = true;
         scheduleSessionStateSave(true);
-        running = true;
         cancelRequested = false;
         searchBtn.disabled = true;
         cancelBtn.style.display = "";
@@ -2585,6 +2664,7 @@
           unsupported: 0, // archived entries we can't read (encrypted, etc.)
           archiveErrors: [], // archives that failed to parse
           archivesExpanded: 0,
+          longLinesTruncated: 0,
           termCounts: Object.fromEntries(terms.map((t) => [t, 0])),
           fileCounts: Object.create(null),
           fileTerms: Object.create(null), // path -> Set of terms that matched in it
@@ -2614,30 +2694,6 @@
         lastRun = ctx;
         displayRoot = commonRoot(Object.keys(ctx.fileCounts));
 
-        let restoredPage = 0;
-        if (restoreState) {
-          activeTerm =
-            typeof restoreState.activeTerm === "string" &&
-            Object.prototype.hasOwnProperty.call(
-              ctx.termCounts,
-              restoreState.activeTerm
-            )
-              ? restoreState.activeTerm
-              : null;
-          activeFile =
-            typeof restoreState.activeFile === "string" &&
-            Object.prototype.hasOwnProperty.call(
-              ctx.fileCounts,
-              restoreState.activeFile
-            )
-              ? restoreState.activeFile
-              : null;
-          restoredPage = Number.isFinite(Number(restoreState.currentPage))
-            ? Math.max(0, Math.trunc(Number(restoreState.currentPage)))
-            : 0;
-          currentPage = restoredPage;
-        }
-
         running = false;
         cancelBtn.style.display = "none";
         searchBtn.disabled = false;
@@ -2649,41 +2705,7 @@
         renderHeatmap(ctx);
         renderTermFilter(ctx);
         renderResults();
-        if (restoreState) {
-          await restoreSearchResultState(restoreState, restoredPage);
-        }
         scheduleSessionStateSave(true);
-      }
-
-      async function restoreSearchResultState(snapshot, restoredPage) {
-        if (activeFile && storeCapped()) {
-          const path = activeFile;
-          const token = fileScanToken;
-          let rescanned = null;
-          try {
-            rescanned = await rescanFileMatches(path);
-          } catch (error) {
-            rescanned = null;
-          }
-          if (token !== fileScanToken || activeFile !== path) return;
-          if (rescanned) {
-            activeFileMatches = rescanned.matches;
-            activeFileCapped = rescanned.capped;
-          }
-          currentPage = restoredPage;
-          renderResults();
-          return;
-        }
-        if (
-          !activeFile &&
-          snapshot.globalScanKey &&
-          snapshot.globalScanKey === globalScanKey() &&
-          needsGlobalRescan()
-        ) {
-          await runGlobalRescan();
-          currentPage = restoredPage;
-          renderResults();
-        }
       }
 
       // Turn the flat selection into scan tasks, expanding archives when the
@@ -2791,6 +2813,13 @@
               `${unsupportedArchives === 1 ? "was" : "were"} skipped.`
           );
         }
+        if (ctx.longLinesTruncated) {
+          parts.push(
+            `${ctx.longLinesTruncated.toLocaleString()} overlong log line${
+              ctx.longLinesTruncated === 1 ? " was" : "s were"
+            } searched only through the first ${MAX_SCANNED_LINE_CHARS.toLocaleString()} characters.`
+          );
+        }
         scanNote.textContent = parts.join(" ");
       }
 
@@ -2798,10 +2827,20 @@
       // sniffs the first chunk for a NUL byte to skip binary content.
       function makeLineScanner(path, ctx) {
         const { combined, perTerm } = ctx.matchers;
-        let buffer = "";
-        let lineNo = 0;
         let sniffed = false;
         let binary = false;
+        const emitter = lineEmitter(
+          (line, lineNo) => {
+            ctx.totalLines++;
+            testLine(line, lineNo, path, ctx, combined, perTerm);
+          },
+          {
+            maxChars: MAX_SCANNED_LINE_CHARS,
+            onTruncated() {
+              ctx.longLinesTruncated++;
+            },
+          }
+        );
         return {
           get binary() {
             return binary;
@@ -2816,27 +2855,10 @@
                 return;
               }
             }
-            // The leftover buffer never contains "\n", so the first search can
-            // skip it. Keeps files with very long lines linear-time.
-            const searchFrom = buffer.length;
-            buffer += text;
-            let nl = buffer.indexOf("\n", searchFrom);
-            while (nl !== -1) {
-              let line = buffer.slice(0, nl);
-              buffer = buffer.slice(nl + 1);
-              if (line.endsWith("\r")) line = line.slice(0, -1);
-              lineNo++;
-              ctx.totalLines++;
-              testLine(line, lineNo, path, ctx, combined, perTerm);
-              nl = buffer.indexOf("\n");
-            }
+            emitter.push(text);
           },
           finish() {
-            if (binary || !buffer.length) return;
-            if (buffer.endsWith("\r")) buffer = buffer.slice(0, -1);
-            lineNo++;
-            ctx.totalLines++;
-            testLine(buffer, lineNo, path, ctx, combined, perTerm);
+            if (!binary) emitter.finish();
           },
         };
       }
@@ -2903,12 +2925,13 @@
             );
           }
         }
-        if (ctx.storedBytes < STORE_BUDGET) {
-          // Guard against pathologically long lines blowing up memory/DOM.
-          const text = line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
+        // Guard against pathologically long rows blowing up memory/DOM.
+        const text = line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
+        const cost = matchCost(text);
+        if (ctx.storedBytes + cost <= STORE_BUDGET) {
           ctx.matches.push({ path, lineNo, text });
           ctx.stored++;
-          ctx.storedBytes += matchCost(text);
+          ctx.storedBytes += cost;
         }
       }
 
@@ -3288,13 +3311,14 @@
           shouldStop: () => capped || token !== fileScanToken,
           onLine(line, lineNo) {
             if (capped || !combined.test(line)) return;
-            if (bytes >= STORE_BUDGET) {
+            const text =
+              line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
+            const cost = matchCost(text);
+            if (bytes + cost > STORE_BUDGET) {
               capped = true;
               return;
             }
-            const text =
-              line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
-            bytes += matchCost(text);
+            bytes += cost;
             matches.push({ path, lineNo, text });
           },
         });
@@ -3448,13 +3472,14 @@
                 ) {
                   return;
                 }
-                if (bytes >= STORE_BUDGET) {
+                const text =
+                  line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
+                const cost = matchCost(text);
+                if (bytes + cost > STORE_BUDGET) {
                   capped = true;
                   return;
                 }
-                const text =
-                  line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
-                bytes += matchCost(text);
+                bytes += cost;
                 matches.push({ path, lineNo, text });
               },
             });
@@ -3923,32 +3948,70 @@
       // Split streamed text into lines with the same semantics as
       // String.split("\n"): every "\n" ends a line, a trailing newline yields a
       // final empty line, and a lone "\r" before the newline is stripped.
-      function lineEmitter(onLine) {
+      function lineEmitter(onLine, options = {}) {
+        const requestedMax = Number(options.maxChars);
+        const maxChars =
+          Number.isFinite(requestedMax) && requestedMax > 0
+            ? Math.max(1, Math.trunc(requestedMax))
+            : MAX_SCANNED_LINE_CHARS;
         let buffer = "";
         let lineNo = 0;
+        let discarding = false;
+        let truncated = false;
+
+        function emitLine() {
+          let line = buffer;
+          const wasTruncated = truncated;
+          buffer = "";
+          discarding = false;
+          truncated = false;
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+          onLine(line, ++lineNo);
+          if (wasTruncated && typeof options.onTruncated === "function") {
+            options.onTruncated(lineNo);
+          }
+        }
+
         return {
           push(text) {
-            // The leftover buffer never contains "\n", so the search can skip
-            // it. Keeps very long lines (rare, but huge) linear-time.
-            const searchFrom = buffer.length;
-            buffer += text;
-            let nl = buffer.indexOf("\n", searchFrom);
-            while (nl !== -1) {
-              let line = buffer.slice(0, nl);
-              buffer = buffer.slice(nl + 1);
-              if (line.endsWith("\r")) line = line.slice(0, -1);
-              onLine(line, ++lineNo);
-              nl = buffer.indexOf("\n");
+            if (!text) return;
+            let cursor = 0;
+            while (cursor < text.length) {
+              if (discarding) {
+                const newline = text.indexOf("\n", cursor);
+                if (newline === -1) return;
+                emitLine();
+                cursor = newline + 1;
+                continue;
+              }
+
+              const newline = text.indexOf("\n", cursor);
+              const end = newline === -1 ? text.length : newline;
+              const available = maxChars - buffer.length;
+              const pieceLength = end - cursor;
+              if (pieceLength <= available) {
+                buffer += text.slice(cursor, end);
+              } else {
+                if (available > 0) {
+                  buffer += text.slice(cursor, cursor + available);
+                }
+                truncated = true;
+                if (newline === -1) {
+                  discarding = true;
+                  return;
+                }
+              }
+
+              if (newline === -1) return;
+              emitLine();
+              cursor = newline + 1;
             }
           },
           finish() {
             // A trailing "\n" leaves an empty buffer; emitting it would invent a
             // phantom last line and disagree with the search's line numbering.
-            if (!buffer.length) return;
-            let line = buffer;
-            buffer = "";
-            if (line.endsWith("\r")) line = line.slice(0, -1);
-            onLine(line, ++lineNo);
+            if (!buffer.length && !discarding && !truncated) return;
+            emitLine();
           },
         };
       }
