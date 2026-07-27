@@ -1345,20 +1345,6 @@
     <script src="route-core.js"></script>
     <script src="route.js"></script>
     <script>
-      // Keep result retention well below a tab's practical heap limit. Counts
-      // remain exact after this fills; filters re-read the local source on demand.
-      // JavaScript strings are UTF-16, so budget two bytes per character plus a
-      // conservative allowance for each match object.
-      const STORE_BUDGET = 64 * 1024 * 1024;
-      const STORE_MATCH_OVERHEAD = 160;
-      const matchCost = (text) =>
-        text.length * 2 + STORE_MATCH_OVERHEAD;
-      // Restoring from IndexedDB deserializes every selected Blob into the page.
-      // Large selections stay usable in the current tab but are not persisted.
-      const SESSION_CACHE_BUDGET = 128 * 1024 * 1024;
-      // A malformed "text" entry with no newlines must not grow one string until
-      // it consumes the tab. Only the prefix of an overlong line is searched.
-      const MAX_SCANNED_LINE_CHARS = 1024 * 1024;
       const PAGE_SIZE = 1000; // matches shown per results page
       const BINARY_SNIFF_BYTES = 8000;
       const VIEWER_BLOCK_LINES = 500; // lines per virtualized viewer block
@@ -1531,16 +1517,9 @@
         dropzone.classList.toggle("has-selection", !!text);
       }
 
-      function selectionBytes(files = selected) {
-        return files.reduce((sum, item) => {
-          const size = Number(item && item.file && item.file.size);
-          return sum + (Number.isFinite(size) && size > 0 ? size : 0);
-        }, 0);
-      }
-
       function selectionSummary(files = selected) {
         if (!files.length) return "";
-        const totalBytes = selectionBytes(files);
+        const totalBytes = files.reduce((sum, item) => sum + item.file.size, 0);
         const roots = new Set(
           files.map((item) => item.path.split("/")[0] || "(files)")
         );
@@ -1763,32 +1742,6 @@
         const persistence = window.LogSearchPersistence;
         if (!persistence || !persistence.isSupported()) return;
         const generation = ++cacheSelectionGeneration;
-        const totalBytes = selectionBytes(files);
-        if (totalBytes > SESSION_CACHE_BUDGET) {
-          sessionCachingEnabled = false;
-          window.clearTimeout(sessionStateTimer);
-          sessionStateTimer = 0;
-          clearCacheBtn.hidden = false;
-          setCacheStatus(
-            `${formatBytes(totalBytes)} is too large to save as a browser session ` +
-              `(limit ${formatBytes(SESSION_CACHE_BUDGET)}). It will stay open until refresh.`
-          );
-          void enqueuePersistence(() => persistence.clearSession())
-            .then(() => {
-              if (generation === cacheSelectionGeneration) {
-                clearCacheBtn.hidden = true;
-              }
-            })
-            .catch(() => {
-              if (generation !== cacheSelectionGeneration) return;
-              clearCacheBtn.hidden = false;
-              setCacheStatus(
-                "This selection will not be restored, and the older saved session could not be cleared.",
-                true
-              );
-            });
-          return;
-        }
         sessionCachingEnabled = true;
         clearCacheBtn.hidden = false;
         setCacheStatus("Saving session locally...");
@@ -1861,27 +1814,8 @@
         }
         let cached;
         try {
-          cached = await persistence.loadSession({
-            maxBytes: SESSION_CACHE_BUDGET,
-          });
+          cached = await persistence.loadSession();
         } catch (error) {
-          if (error && error.name === "SessionTooLargeError") {
-            clearCacheBtn.hidden = false;
-            try {
-              await enqueuePersistence(() => persistence.clearSession());
-              clearCacheBtn.hidden = true;
-              setCacheStatus(
-                `Removed a ${formatBytes(error.totalBytes || 0)} saved session ` +
-                  `because sessions over ${formatBytes(SESSION_CACHE_BUDGET)} are not restored.`
-              );
-            } catch (clearError) {
-              setCacheStatus(
-                "The saved session is too large to restore. Use “Forget saved session” to remove it.",
-                true
-              );
-            }
-            return;
-          }
           setCacheStatus("Could not restore the saved session.", true);
           return;
         }
@@ -2655,7 +2589,6 @@
         const ctx = {
           matches: [],
           stored: 0,
-          storedBytes: 0, // estimated memory used by retained match text
           totalMatches: 0,
           totalLines: 0,
           filesScanned: 0,
@@ -2664,7 +2597,6 @@
           unsupported: 0, // archived entries we can't read (encrypted, etc.)
           archiveErrors: [], // archives that failed to parse
           archivesExpanded: 0,
-          longLinesTruncated: 0,
           termCounts: Object.fromEntries(terms.map((t) => [t, 0])),
           fileCounts: Object.create(null),
           fileTerms: Object.create(null), // path -> Set of terms that matched in it
@@ -2813,13 +2745,6 @@
               `${unsupportedArchives === 1 ? "was" : "were"} skipped.`
           );
         }
-        if (ctx.longLinesTruncated) {
-          parts.push(
-            `${ctx.longLinesTruncated.toLocaleString()} overlong log line${
-              ctx.longLinesTruncated === 1 ? " was" : "s were"
-            } searched only through the first ${MAX_SCANNED_LINE_CHARS.toLocaleString()} characters.`
-          );
-        }
         scanNote.textContent = parts.join(" ");
       }
 
@@ -2829,18 +2754,10 @@
         const { combined, perTerm } = ctx.matchers;
         let sniffed = false;
         let binary = false;
-        const emitter = lineEmitter(
-          (line, lineNo) => {
-            ctx.totalLines++;
-            testLine(line, lineNo, path, ctx, combined, perTerm);
-          },
-          {
-            maxChars: MAX_SCANNED_LINE_CHARS,
-            onTruncated() {
-              ctx.longLinesTruncated++;
-            },
-          }
-        );
+        const emitter = lineEmitter((line, lineNo) => {
+          ctx.totalLines++;
+          testLine(line, lineNo, path, ctx, combined, perTerm);
+        });
         return {
           get binary() {
             return binary;
@@ -2909,10 +2826,8 @@
 
       function testLine(line, lineNo, path, ctx, combined, perTerm) {
         if (!combined.test(line)) return;
-        // Counts are the *true* totals across the whole scan so the heatmap,
-        // term chips, and summary show the real picture. The results list keeps
-        // match text only up to STORE_BUDGET of memory; if that fills, a filter
-        // (or a heatmap file click) re-reads from disk to recover the rest.
+        // Retain the complete matching line. Results are paged in the UI, but
+        // no match text is shortened or omitted by an application size limit.
         ctx.totalMatches++;
         ctx.fileCounts[path] = (ctx.fileCounts[path] || 0) + 1;
         for (const t of perTerm) {
@@ -2925,14 +2840,8 @@
             );
           }
         }
-        // Guard against pathologically long rows blowing up memory/DOM.
-        const text = line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
-        const cost = matchCost(text);
-        if (ctx.storedBytes + cost <= STORE_BUDGET) {
-          ctx.matches.push({ path, lineNo, text });
-          ctx.stored++;
-          ctx.storedBytes += cost;
-        }
+        ctx.matches.push({ path, lineNo, text: line });
+        ctx.stored++;
       }
 
       function updateProgress(ctx, index, total, path) {
@@ -2973,13 +2882,6 @@
         summaryEl.style.display = "flex";
       }
 
-      const HEAT_LIMIT = 100; // max file rows drawn in the search heatmap
-      // The browse list is the only way to open a file before searching, so it
-      // shows many more rows than the search heatmap (which can be narrowed with
-      // the results filter). Still capped to guard against a pathological drop
-      // of tens of thousands of files.
-      const BROWSE_LIMIT = 1000;
-
       function renderHeatmap(ctx) {
         heatmapEl.innerHTML = "";
         setBrowseFill(false);
@@ -2992,8 +2894,6 @@
           return;
         }
 
-        const shown = entries.slice(0, HEAT_LIMIT);
-
         const heading = document.createElement("h2");
         heading.textContent =
           `${entries.length.toLocaleString()} ` +
@@ -3003,7 +2903,7 @@
         const list = document.createElement("div");
         list.className = "heat-list";
 
-        for (const [path, count] of shown) {
+        for (const [path, count] of entries) {
           const row = document.createElement("div");
           row.className = "heat-row" + (activeFile === path ? " active" : "");
           row.dataset.file = path;
@@ -3032,14 +2932,6 @@
           list.appendChild(row);
         }
         heatmapEl.appendChild(list);
-
-        if (entries.length > shown.length) {
-          const note = document.createElement("p");
-          note.className = "heat-note";
-          note.textContent =
-            `Showing the top ${shown.length} files by hit count.`;
-          heatmapEl.appendChild(note);
-        }
         heatmapEl.style.display = "flex";
       }
 
@@ -3110,11 +3002,9 @@
         heatmapEl.appendChild(heading);
 
         if (entries.length) {
-          const shown = entries.slice(0, BROWSE_LIMIT);
-
           const list = document.createElement("div");
           list.className = "heat-list";
-          for (const [path, size] of shown) {
+          for (const [path, size] of entries) {
             const row = document.createElement("div");
             row.className = "heat-row browse";
             row.dataset.file = path;
@@ -3135,15 +3025,6 @@
             list.appendChild(row);
           }
           heatmapEl.appendChild(list);
-
-          if (entries.length > shown.length) {
-            const note = document.createElement("p");
-            note.className = "heat-note";
-            note.textContent =
-              `Showing the ${shown.length.toLocaleString()} largest of ` +
-              `${entries.length.toLocaleString()} files.`;
-            heatmapEl.appendChild(note);
-          }
         }
 
         const appendNote = (text) => {
@@ -3295,9 +3176,8 @@
         scrollToResults();
       }
 
-      // Re-read one file (from disk or its archive) and collect every matching
-      // line, streaming so the whole file is never held in memory. Capped per
-      // file to keep memory bounded; reading stops as soon as the cap is hit.
+      // Re-read one file (from disk or its archive) and collect every complete
+      // matching line without an application-imposed size cap.
       async function rescanFileMatches(path) {
         const source = findSource(path);
         if (!source) return null;
@@ -3305,25 +3185,15 @@
         const token = fileScanToken;
         const combined = lastRun.matchers.combined;
         const matches = [];
-        let bytes = 0;
-        let capped = false;
         const ok = await streamSourceLines(source, {
-          shouldStop: () => capped || token !== fileScanToken,
+          shouldStop: () => token !== fileScanToken,
           onLine(line, lineNo) {
-            if (capped || !combined.test(line)) return;
-            const text =
-              line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
-            const cost = matchCost(text);
-            if (bytes + cost > STORE_BUDGET) {
-              capped = true;
-              return;
-            }
-            bytes += cost;
-            matches.push({ path, lineNo, text });
+            if (!combined.test(line)) return;
+            matches.push({ path, lineNo, text: line });
           },
         });
-        if (!ok && !capped) return null;
-        return { matches, capped };
+        if (!ok) return null;
+        return { matches, capped: false };
       }
 
       // Each heatmap row shows its raw count and its share of all matches.
@@ -3425,10 +3295,9 @@
         return `<button type="button" id="search-all" class="search-all-btn">${label}</button>`;
       }
 
-      // Re-read every matched file from disk (streaming) and collect the lines
-      // that pass the active term/text filter, so a capped store no longer hides
-      // matches. When a term chip is active the read is scoped to just the files
-      // known to contain that term; the read is cancelled if the filter changes.
+      // Re-read every matched file from disk and collect every complete line
+      // that passes the active term/text filter. The read is cancelled only if
+      // the filter changes.
       async function runGlobalRescan() {
         if (!lastRun || !needsGlobalRescan()) return;
         const key = globalScanKey();
@@ -3451,19 +3320,16 @@
             : Object.keys(lastRun.fileCounts);
 
         const matches = [];
-        let bytes = 0;
-        let capped = false;
         resultsNote.textContent = `Searching all files... 0 / ${paths.length}`;
         for (let i = 0; i < paths.length; i++) {
           if (token !== globalScanToken) return; // superseded by a newer filter
-          if (capped) break;
           const path = paths[i];
           const source = findSource(path);
           if (source) {
             await streamSourceLines(source, {
-              shouldStop: () => capped || token !== globalScanToken,
+              shouldStop: () => token !== globalScanToken,
               onLine(line, lineNo) {
-                if (capped || !combined.test(line)) return;
+                if (!combined.test(line)) return;
                 if (termRe && !termRe.test(line)) return;
                 if (
                   filterText &&
@@ -3472,15 +3338,7 @@
                 ) {
                   return;
                 }
-                const text =
-                  line.length > 4000 ? line.slice(0, 4000) + " ..." : line;
-                const cost = matchCost(text);
-                if (bytes + cost > STORE_BUDGET) {
-                  capped = true;
-                  return;
-                }
-                bytes += cost;
-                matches.push({ path, lineNo, text });
+                matches.push({ path, lineNo, text: line });
               },
             });
           }
@@ -3490,7 +3348,7 @@
             `${matches.length.toLocaleString()} found`;
         }
         if (token !== globalScanToken) return;
-        globalScan = { key, matches, capped };
+        globalScan = { key, matches, capped: false };
         globalScanLoading = false;
         currentPage = 0;
         renderResults();
@@ -3948,70 +3806,32 @@
       // Split streamed text into lines with the same semantics as
       // String.split("\n"): every "\n" ends a line, a trailing newline yields a
       // final empty line, and a lone "\r" before the newline is stripped.
-      function lineEmitter(onLine, options = {}) {
-        const requestedMax = Number(options.maxChars);
-        const maxChars =
-          Number.isFinite(requestedMax) && requestedMax > 0
-            ? Math.max(1, Math.trunc(requestedMax))
-            : MAX_SCANNED_LINE_CHARS;
+      function lineEmitter(onLine) {
         let buffer = "";
         let lineNo = 0;
-        let discarding = false;
-        let truncated = false;
-
-        function emitLine() {
-          let line = buffer;
-          const wasTruncated = truncated;
-          buffer = "";
-          discarding = false;
-          truncated = false;
-          if (line.endsWith("\r")) line = line.slice(0, -1);
-          onLine(line, ++lineNo);
-          if (wasTruncated && typeof options.onTruncated === "function") {
-            options.onTruncated(lineNo);
-          }
-        }
-
         return {
           push(text) {
-            if (!text) return;
-            let cursor = 0;
-            while (cursor < text.length) {
-              if (discarding) {
-                const newline = text.indexOf("\n", cursor);
-                if (newline === -1) return;
-                emitLine();
-                cursor = newline + 1;
-                continue;
-              }
-
-              const newline = text.indexOf("\n", cursor);
-              const end = newline === -1 ? text.length : newline;
-              const available = maxChars - buffer.length;
-              const pieceLength = end - cursor;
-              if (pieceLength <= available) {
-                buffer += text.slice(cursor, end);
-              } else {
-                if (available > 0) {
-                  buffer += text.slice(cursor, cursor + available);
-                }
-                truncated = true;
-                if (newline === -1) {
-                  discarding = true;
-                  return;
-                }
-              }
-
-              if (newline === -1) return;
-              emitLine();
-              cursor = newline + 1;
+            // The leftover buffer never contains "\n", so the search can skip
+            // it. Keeps very long lines (rare, but huge) linear-time.
+            const searchFrom = buffer.length;
+            buffer += text;
+            let nl = buffer.indexOf("\n", searchFrom);
+            while (nl !== -1) {
+              let line = buffer.slice(0, nl);
+              buffer = buffer.slice(nl + 1);
+              if (line.endsWith("\r")) line = line.slice(0, -1);
+              onLine(line, ++lineNo);
+              nl = buffer.indexOf("\n");
             }
           },
           finish() {
             // A trailing "\n" leaves an empty buffer; emitting it would invent a
             // phantom last line and disagree with the search's line numbering.
-            if (!buffer.length && !discarding && !truncated) return;
-            emitLine();
+            if (!buffer.length) return;
+            let line = buffer;
+            buffer = "";
+            if (line.endsWith("\r")) line = line.slice(0, -1);
+            onLine(line, ++lineNo);
           },
         };
       }

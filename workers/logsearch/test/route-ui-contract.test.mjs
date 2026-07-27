@@ -50,7 +50,7 @@ test("main inline application has valid JavaScript syntax", async () => {
   assert.doesNotThrow(() => new vm.Script(html.slice(start, end)));
 });
 
-test("saved sessions are size-limited and never auto-run a search", async () => {
+test("saved sessions require manual searches and support recovery", async () => {
   const [html, persistenceScript] = await Promise.all([
     readFile(new URL("public/index.html", root), "utf8"),
     readFile(new URL("public/persistence.js", root), "utf8"),
@@ -63,12 +63,11 @@ test("saved sessions are size-limited and never auto-run a search", async () => 
   assert.match(persistenceScript, /async function saveState\(/);
   assert.match(persistenceScript, /async function loadSession\(/);
   assert.match(persistenceScript, /new root\.File\(\[record\.blob\]/);
-  assert.match(persistenceScript, /function storedSessionBytes\(/);
-  assert.match(persistenceScript, /error\.name = "SessionTooLargeError"/);
+  assert.doesNotMatch(persistenceScript, /SessionTooLargeError|maxBytes/);
   assert.match(html, /function captureSessionState\(/);
-  assert.match(html, /SESSION_CACHE_BUDGET = 128 \* 1024 \* 1024/);
+  assert.doesNotMatch(html, /SESSION_CACHE_BUDGET/);
   assert.match(html, /async function restoreCachedSession\(/);
-  assert.match(html, /maxBytes: SESSION_CACHE_BUDGET/);
+  assert.match(html, /cached = await persistence\.loadSession\(\)/);
   assert.match(html, /searchParams\.get\("reset-session"\) === "1"/);
   assert.match(html, /Saved session cleared\. Choose files to start again\./);
   assert.match(html, /Search settings were restored; press Search to rerun it/);
@@ -82,43 +81,37 @@ test("saved sessions are size-limited and never auto-run a search", async () => 
   assert.doesNotMatch(html.slice(restoreStart, restoreEnd), /\brunSearch\s*\(/);
 });
 
-test("search result and line buffering use bounded memory", async () => {
+test("searches retain complete lines and every match without size caps", async () => {
   const html = await readFile(new URL("public/index.html", root), "utf8");
 
-  assert.match(html, /STORE_BUDGET = 64 \* 1024 \* 1024/);
-  assert.match(html, /text\.length \* 2 \+ STORE_MATCH_OVERHEAD/);
-  assert.match(html, /MAX_SCANNED_LINE_CHARS = 1024 \* 1024/);
-  assert.match(html, /function lineEmitter\(onLine, options = \{\}\)/);
-  assert.match(html, /discarding = true/);
-  assert.match(html, /ctx\.longLinesTruncated\+\+/);
-  assert.match(html, /ctx\.storedBytes \+ cost <= STORE_BUDGET/);
+  assert.doesNotMatch(
+    html,
+    /STORE_BUDGET|MAX_SCANNED_LINE_CHARS|SESSION_CACHE_BUDGET/
+  );
+  assert.doesNotMatch(html, /line\.length > 4000|BROWSE_LIMIT|HEAT_LIMIT/);
+  assert.match(html, /ctx\.matches\.push\(\{ path, lineNo, text: line \}\)/);
+  assert.match(html, /function lineEmitter\(onLine\)/);
 
   const emitted = [];
-  const truncated = [];
   const sandbox = { emitterFactory: null };
   vm.runInNewContext(
-    `const MAX_SCANNED_LINE_CHARS = 8;\n` +
-      `${extractNamedFunction(html, "lineEmitter")}\n` +
+    `${extractNamedFunction(html, "lineEmitter")}\n` +
       `emitterFactory = lineEmitter;`,
     sandbox
   );
-  const emitter = sandbox.emitterFactory(
-    (line, lineNo) => emitted.push([line, lineNo]),
-    {
-      maxChars: 8,
-      onTruncated: (lineNo) => truncated.push(lineNo),
-    }
+  const emitter = sandbox.emitterFactory((line, lineNo) =>
+    emitted.push([line, lineNo])
   );
-  emitter.push("1234");
-  emitter.push("56789");
-  emitter.push("discarded\r\nok");
+  const longLine = "x".repeat(1024 * 1024 + 17);
+  emitter.push(longLine.slice(0, 600000));
+  emitter.push(longLine.slice(600000));
+  emitter.push("\r\nok");
   emitter.finish();
 
   assert.deepEqual(emitted, [
-    ["12345678", 1],
+    [longLine, 1],
     ["ok", 2],
   ]);
-  assert.deepEqual(truncated, [1]);
 });
 
 test("uploads can replace or add files by picker and drag position", async () => {
