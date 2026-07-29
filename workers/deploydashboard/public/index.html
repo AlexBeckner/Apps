@@ -302,6 +302,39 @@
         border-left: 1px solid #e9b6ff !important;
       }
 
+      button.copy-button,
+      html.dark button.copy-button {
+        border: none !important;
+        background: transparent !important;
+        width: 1em;
+        height: 1em;
+        flex: 0 0 1em;
+        padding: 0;
+        line-height: 1;
+        vertical-align: middle;
+        opacity: 0.55;
+        cursor: pointer;
+      }
+      button.copy-button svg {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      button.copy-button:hover,
+      button.copy-button:focus-visible {
+        opacity: 1;
+      }
+      html.dark button.copy-button[data-copy-state="success"],
+      html.dark button.copy-button[data-copy-state="success"] * {
+        color: #4ade80 !important;
+        opacity: 1;
+      }
+      html.dark button.copy-button[data-copy-state="error"],
+      html.dark button.copy-button[data-copy-state="error"] * {
+        color: #ff674d !important;
+        opacity: 1;
+      }
+
       /* Search-match highlight. Classic amber highlighter with black text so
          it reads clearly on both the light and (pure black) dark surfaces.
          The dark rule needs higher specificity + !important to beat the
@@ -322,6 +355,7 @@
     </style>
   </head>
   <body class="min-h-screen">
+    <div id="copyStatus" class="sr-only" role="status" aria-live="polite"></div>
     <header class="sticky top-0 z-10">
       <div class="w-full px-[17px] py-4 flex flex-wrap items-start gap-4">
         <div class="flex-1 min-w-[240px] flex flex-col gap-1">
@@ -769,6 +803,18 @@
       }
 
       const PAUSE_ICON_SVG = `<svg class="w-3 h-3" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M5.5 4.5A1.5 1.5 0 017 6v8a1.5 1.5 0 01-3 0V6a1.5 1.5 0 011.5-1.5zm8 0A1.5 1.5 0 0115 6v8a1.5 1.5 0 01-3 0V6a1.5 1.5 0 011.5-1.5z"/></svg>`;
+      const COPY_ICON_SVG = `<svg viewBox="0 0 512 512" fill="none" stroke="currentColor" stroke-width="29" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M156 41v-5c0-12 10-22 24-22h238c16 0 29 13 29 29v337c0 16-12 28-27 28"/><rect x="65" y="103" width="290" height="394" rx="28"/></svg>`;
+      const COPY_SUCCESS_ICON_SVG = `<svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M16.704 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.296-7.293a1 1 0 011.408 0z" clip-rule="evenodd"/></svg>`;
+      const COPY_ERROR_ICON_SVG = `<svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>`;
+
+      function copyButton(value, label) {
+        const actionLabel = `Copy ${label}`;
+        return `<button type="button" class="copy-button inline-flex shrink-0 items-center justify-center" data-copy-value="${escapeHtml(value)}" data-copy-label="${escapeHtml(label)}" title="${escapeHtml(actionLabel)}" aria-label="${escapeHtml(actionLabel)}">${COPY_ICON_SVG}</button>`;
+      }
+
+      function valueWithCopy(valueHtml, value, label) {
+        return `<span class="inline-flex items-center gap-1.5 min-w-0">${valueHtml}${copyButton(value, label)}</span>`;
+      }
 
       function statusPill(
         state,
@@ -831,17 +877,30 @@
         // plain text, since it's not a git ref to link to GitHub. A dash
         // makes a missing version obvious rather than silently showing the
         // branch under an "AAOS Version" header.
-        const branchCell = sourceUsesVersion()
+        const usesVersion = sourceUsesVersion();
+        const branchCell = usesVersion
           ? (deploy.version
-              ? `<span class="font-mono">${highlightTerm(deploy.version, filter)}</span>`
+              ? valueWithCopy(
+                  `<span class="font-mono">${highlightTerm(deploy.version, filter)}</span>`,
+                  deploy.version,
+                  "AAOS version",
+                )
               : `<span class="opacity-50">—</span>`)
           : (deploy.branch
-              ? (deploy.branch_url
-                  ? `<a href="${escapeHtml(deploy.branch_url)}" target="_blank" rel="noopener" class="font-mono hover:underline" title="View on GitHub">${highlightTerm(deploy.branch, filter)}</a>`
-                  : `<span class="font-mono">${highlightTerm(deploy.branch, filter)}</span>`)
+              ? valueWithCopy(
+                  deploy.branch_url
+                    ? `<a href="${escapeHtml(deploy.branch_url)}" target="_blank" rel="noopener" class="font-mono hover:underline" title="View on GitHub">${highlightTerm(deploy.branch, filter)}</a>`
+                    : `<span class="font-mono">${highlightTerm(deploy.branch, filter)}</span>`,
+                  deploy.branch,
+                  "branch",
+                )
               : "-");
         const commitCell = deploy.commit
-          ? `<a href="${escapeHtml(deploy.commit_url)}" target="_blank" rel="noopener" class="font-mono hover:underline" title="View on GitHub">${highlightTerm(deploy.commit_short, filter)}</a>`
+          ? valueWithCopy(
+              `<a href="${escapeHtml(deploy.commit_url)}" target="_blank" rel="noopener" class="font-mono hover:underline" title="View on GitHub">${highlightTerm(deploy.commit_short, filter)}</a>`,
+              deploy.commit,
+              "commit SHA",
+            )
           : "-";
         const authorCell = deploy.triggered_by
           ? highlightTerm(deploy.triggered_by, filter)
@@ -1530,7 +1589,7 @@
         body.querySelectorAll("tr[data-rig]").forEach((tr) => {
           tr.addEventListener("click", (e) => {
             if (e.target.closest("a")) return;
-            if (e.target.closest("button[data-history-rig]")) return;
+            if (e.target.closest("button")) return;
             const rigName = tr.getAttribute("data-rig");
             // Accordion: opening a rig collapses any other open rig.
             // Clicking the already-open rig collapses it. Note that the
@@ -1559,6 +1618,69 @@
         });
         scheduleSyncDeployColumnWidths();
       }
+
+      async function writeClipboardText(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          try {
+            await navigator.clipboard.writeText(text);
+            return;
+          } catch (err) {
+            // Fall back for browsers or contexts that deny Clipboard API access.
+          }
+        }
+
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        const copied = document.execCommand("copy");
+        textarea.remove();
+        if (!copied) throw new Error("Copy command failed");
+      }
+
+      const copyButtonResetTimers = new WeakMap();
+
+      function showCopyButtonResult(button, success) {
+        const label = button.getAttribute("data-copy-label") || "value";
+        const actionLabel = `Copy ${label}`;
+        const message = success ? `Copied ${label}` : `Could not copy ${label}`;
+        const previousTimer = copyButtonResetTimers.get(button);
+        if (previousTimer) clearTimeout(previousTimer);
+
+        button.innerHTML = success
+          ? COPY_SUCCESS_ICON_SVG
+          : COPY_ERROR_ICON_SVG;
+        button.setAttribute("data-copy-state", success ? "success" : "error");
+        button.setAttribute("aria-label", message);
+        $("copyStatus").textContent = message;
+
+        const resetTimer = setTimeout(() => {
+          if (!button.isConnected) return;
+          button.innerHTML = COPY_ICON_SVG;
+          button.removeAttribute("data-copy-state");
+          button.setAttribute("aria-label", actionLabel);
+        }, 1500);
+        copyButtonResetTimers.set(button, resetTimer);
+      }
+
+      // Copy buttons appear in the main table, nested deploy history, and the
+      // standalone history panel. Delegation keeps all three working after
+      // their markup is replaced during refreshes.
+      document.addEventListener("click", async (e) => {
+        const button = e.target.closest("button[data-copy-value]");
+        if (!button) return;
+        e.preventDefault();
+        e.stopPropagation();
+        try {
+          await writeClipboardText(button.getAttribute("data-copy-value") || "");
+          showCopyButtonResult(button, true);
+        } catch (err) {
+          showCopyButtonResult(button, false);
+        }
+      });
 
       // Document-level delegation for the build row chevrons. Both the
       // rig-table-expansion table and the standalone history panel table
