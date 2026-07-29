@@ -966,9 +966,9 @@
       }
 
       // Canonical fleet shapes accepted in the rig autocomplete. Keep in
-      // sync with ``_CANONICAL_RIG_RE`` in buildkite_client.py so the
-      // autocomplete and the main table agree on what counts as a real rig.
-      const RIG_SUGGEST_RE = /^(?:cosmo|wanda|(?:rog|mce|dmx)\d{3})$/i;
+      // sync with ``CANONICAL_RIG_RE`` in src/index.js so the autocomplete
+      // and the main table agree on what counts as a real rig.
+      const RIG_SUGGEST_RE = /^(?:cosmo|wanda|(?:rog|mce|dmx|civ)\d{3})$/i;
 
       // Pretty display names for rigs whose canonical name doesn't match the
       // mce### pattern people often think in. Keys are canonical names (as
@@ -1000,8 +1000,8 @@
         const knownNames = new Set(state.knownRigs || []);
         // Union so rigs without recent deploys still appear in the dropdown,
         // then narrow to the canonical fleet shapes: cosmo, wanda, rog###,
-        // mce###. Anything else (helper directories, one-off names, etc.)
-        // is hidden from the suggestion list.
+        // mce###, dmx###, and civ###. Anything else (helper directories,
+        // one-off names, etc.) is hidden from the suggestion list.
         const items = Array.from(new Set([...snapshotNames, ...knownNames]))
           .filter((n) => RIG_SUGGEST_RE.test(n))
           .map((n) => ({

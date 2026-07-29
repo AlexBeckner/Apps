@@ -42,7 +42,7 @@ const REFRESH_SCHEDULER_NAME = "global-refresh-scheduler";
 const BUILDKITE_WEBHOOK_PATH = "/api/webhooks/buildkite";
 
 const PR_NUMBER_RE = /\(#(\d+)\)/g;
-const CANONICAL_RIG_RE = /^(?:cosmo|wanda|(?:rog|mce|dmx)\d{3})$/;
+const CANONICAL_RIG_RE = /^(?:cosmo|wanda|(?:rog|mce|dmx|civ)\d{3})$/;
 const AAOS_IMAGE_VERSION_RE = /(\d+)\.tgz/;
 const PURE_DIGITS_RE = /^\d+$/;
 const RIG_ALIASES = new Map([
