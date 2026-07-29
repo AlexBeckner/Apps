@@ -349,9 +349,31 @@
             <input
               id="search"
               type="search"
-              placeholder="Filter by rig / branch / commit / author..."
-              class="px-3 py-2 w-72"
+              placeholder="Filter"
+              class="px-3 py-2 w-56"
             />
+
+            <form id="historyForm" class="flex items-center gap-3">
+              <input
+                id="historyRigInput"
+                list="rigSuggestions"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="Select a rig to show deploy history"
+                placeholder="Rig History"
+                class="px-3 py-2 w-56 font-mono placeholder:font-sans"
+              />
+              <datalist id="rigSuggestions"></datalist>
+
+              <button
+                type="button"
+                id="historyClearBtn"
+                class="px-3 py-2 hidden"
+              >
+                Clear
+              </button>
+            </form>
 
             <button
               id="adminBtn"
@@ -415,56 +437,24 @@
     <main class="w-full px-[17px] pt-1 pb-6">
       <section
         id="historyCard"
-        class="mb-6 rounded-lg overflow-hidden"
+        class="mb-3 rounded-lg overflow-hidden"
       >
-        <div class="flex flex-wrap items-end gap-3">
-          <form id="historyForm" class="flex flex-wrap items-end gap-3">
-            <div class="flex flex-col">
-              <input
-                id="historyRigInput"
-                list="rigSuggestions"
-                type="text"
-                autocomplete="off"
-                spellcheck="false"
-                placeholder="e.g. mce201"
-                class="px-3 py-2 w-56 font-mono"
-              />
-              <datalist id="rigSuggestions"></datalist>
-            </div>
-
-            <button
-              type="submit"
-              class="px-3 py-2"
-            >
-              Show history
-            </button>
-
-            <button
-              type="button"
-              id="historyClearBtn"
-              class="px-3 py-2 hidden"
-            >
-              Clear
-            </button>
-          </form>
-
+        <div
+          id="statusBanners"
+          class="flex flex-wrap items-center justify-end gap-3"
+        >
           <div
-            id="statusBanners"
-            class="ml-auto flex flex-wrap items-center gap-3"
-          >
-            <div
-              id="rateLimitBanner"
-              class="hidden px-3 py-2 rounded app-error-notice"
-            ></div>
-            <div
-              id="syncBanner"
-              class="hidden px-3 py-2 rounded app-info-notice"
-            ></div>
-            <div
-              id="errorBanner"
-              class="hidden px-3 py-2 rounded app-error-notice"
-            ></div>
-          </div>
+            id="rateLimitBanner"
+            class="hidden px-3 py-2 rounded app-error-notice"
+          ></div>
+          <div
+            id="syncBanner"
+            class="hidden px-3 py-2 rounded app-info-notice"
+          ></div>
+          <div
+            id="errorBanner"
+            class="hidden px-3 py-2 rounded app-error-notice"
+          ></div>
         </div>
 
         <div
@@ -2120,6 +2110,14 @@
         e.preventDefault();
         const rig = $("historyRigInput").value;
         loadHistory(rig);
+      });
+      $("historyRigInput").addEventListener("change", (e) => {
+        const rig = e.target.value;
+        if (parseRigInput(rig)) {
+          loadHistory(rig);
+        } else {
+          clearHistory();
+        }
       });
       $("historyClearBtn").addEventListener("click", clearHistory);
 
