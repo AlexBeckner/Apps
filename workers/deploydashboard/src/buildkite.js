@@ -8,6 +8,11 @@ export const FINISHED_BUILD_STATES = new Set([
   "not_run",
 ]);
 
+// Exit 40 is soft-failed by the deployment pipeline: the deploy completed,
+// but one or more MPKs did not start successfully.
+const MPK_VALIDATION_STEP_RE = /deploy and validate mpks are started/i;
+const MPK_VALIDATION_FAILURE_EXIT_STATUS = 40;
+
 export function deriveState(build) {
   const raw = String(build?.state || "unknown");
   const jobs = build?.jobs;
@@ -27,6 +32,23 @@ export function deriveState(build) {
   return raw === "blocked" || raw === "blocked_failed"
     ? AWAITING_DEPLOY
     : raw;
+}
+
+export function passedWithMpkValidationFailure(build) {
+  if (deriveState(build) !== "passed" || !Array.isArray(build?.jobs)) {
+    return false;
+  }
+  return build.jobs.some((job) => {
+    if (!job || typeof job !== "object" || job.retried === true) {
+      return false;
+    }
+    const name = String(job.name || job.label || "");
+    return (
+      job.state === "failed" &&
+      Number(job.exit_status) === MPK_VALIDATION_FAILURE_EXIT_STATUS &&
+      MPK_VALIDATION_STEP_RE.test(name)
+    );
+  });
 }
 
 export function buildSummaryFingerprint(build) {

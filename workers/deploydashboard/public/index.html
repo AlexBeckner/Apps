@@ -770,7 +770,10 @@
 
       const PAUSE_ICON_SVG = `<svg class="w-3 h-3" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M5.5 4.5A1.5 1.5 0 017 6v8a1.5 1.5 0 01-3 0V6a1.5 1.5 0 011.5-1.5zm8 0A1.5 1.5 0 0115 6v8a1.5 1.5 0 01-3 0V6a1.5 1.5 0 011.5-1.5z"/></svg>`;
 
-      function statusPill(state) {
+      function statusPill(
+        state,
+        { passedWithMpkValidationFailure = false } = {},
+      ) {
         // Build- and job-level "blocked" both mean the same thing in this
         // pipeline: paused at a manual gate. Render them identically to
         // ``awaiting_deploy`` so a deploy script that's gated behind an
@@ -797,10 +800,18 @@
         };
         const entry = map[state] || [pillCls, state || "unknown"];
         const [cls, label, icon] = entry;
+        const showMpkValidationAsterisk =
+          state === "passed" && passedWithMpkValidationFailure;
+        const displayLabel = showMpkValidationAsterisk
+          ? `${label}*`
+          : label;
+        const title = showMpkValidationAsterisk
+          ? "passed — deployment completed, but MPK validation failed with exit code 40"
+          : label;
         const inner = icon
-          ? `${icon}<span>${escapeHtml(label)}</span>`
-          : escapeHtml(label);
-        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded font-medium ${cls}" title="${escapeHtml(label)}">${inner}</span>`;
+          ? `${icon}<span>${escapeHtml(displayLabel)}</span>`
+          : escapeHtml(displayLabel);
+        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded font-medium ${cls}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${inner}</span>`;
       }
 
       function deployCells(deploy, filter = "") {
@@ -826,11 +837,11 @@
               : `<span class="opacity-50">—</span>`)
           : (deploy.branch
               ? (deploy.branch_url
-                  ? `<a href="${escapeHtml(deploy.branch_url)}" target="_blank" rel="noopener" class="font-mono hover:underline" title="View ${escapeHtml(deploy.branch)} on GitHub">${highlightTerm(deploy.branch, filter)}</a>`
+                  ? `<a href="${escapeHtml(deploy.branch_url)}" target="_blank" rel="noopener" class="font-mono hover:underline" title="View on GitHub">${highlightTerm(deploy.branch, filter)}</a>`
                   : `<span class="font-mono">${highlightTerm(deploy.branch, filter)}</span>`)
               : "-");
         const commitCell = deploy.commit
-          ? `<a href="${escapeHtml(deploy.commit_url)}" target="_blank" rel="noopener" class="font-mono hover:underline" title="View Commit on GitHub">${highlightTerm(deploy.commit_short, filter)}</a>`
+          ? `<a href="${escapeHtml(deploy.commit_url)}" target="_blank" rel="noopener" class="font-mono hover:underline" title="View on GitHub">${highlightTerm(deploy.commit_short, filter)}</a>`
           : "-";
         const authorCell = deploy.triggered_by
           ? highlightTerm(deploy.triggered_by, filter)
@@ -857,7 +868,10 @@
           ? `<a href="${escapeHtml(deploy.build_url)}" target="_blank" rel="noopener" class="hover:underline"${buildTitleAttr}>#${deploy.build_number}</a>`
           : `<span${buildTitleAttr}>#${deploy.build_number}</span>`;
         return {
-          status: statusPill(deploy.state),
+          status: statusPill(deploy.state, {
+            passedWithMpkValidationFailure:
+              deploy.passed_with_mpk_validation_failure === true,
+          }),
           branch: branchCell,
           commit: commitCell,
           author: authorCell,
@@ -1483,9 +1497,7 @@
             || matchesDeploy(rig.name, latest, state.filter);
           const isExpanded =
             state.expanded.has(rig.name) || !filterMatchesLatest;
-          const status = latest
-            ? statusPill(latest.state)
-            : `<span>-</span>`;
+          const status = latest ? c.status : `<span>-</span>`;
 
           rows.push(`
             <tr class="cursor-pointer" data-rig="${escapeHtml(rig.name)}">

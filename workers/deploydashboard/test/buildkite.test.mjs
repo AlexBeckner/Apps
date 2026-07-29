@@ -10,6 +10,7 @@ import {
   parseBuildkiteSignatureHeader,
   parseRateLimitReset,
   parseRetryAfterMs,
+  passedWithMpkValidationFailure,
   verifyBuildkiteWebhookSignature,
 } from "../src/buildkite.js";
 
@@ -67,6 +68,44 @@ test("force-unlock blocks do not look like deploy gates", () => {
 test("builds without job details still normalize blocked states", () => {
   assert.equal(deriveState({ state: "blocked" }), AWAITING_DEPLOY);
   assert.equal(deriveState({ state: "blocked_failed" }), AWAITING_DEPLOY);
+});
+
+test("passed builds flag an active MPK validation failure with exit code 40", () => {
+  const validationFailure = {
+    name: "Deploy and Validate MPKs are Started (vpn : False)",
+    state: "failed",
+    exit_status: 40,
+    soft_failed: true,
+    retried: false,
+  };
+  assert.equal(
+    passedWithMpkValidationFailure({
+      state: "passed",
+      jobs: [validationFailure],
+    }),
+    true
+  );
+  assert.equal(
+    passedWithMpkValidationFailure({
+      state: "failed",
+      jobs: [validationFailure],
+    }),
+    false
+  );
+  assert.equal(
+    passedWithMpkValidationFailure({
+      state: "passed",
+      jobs: [{ ...validationFailure, exit_status: 1 }],
+    }),
+    false
+  );
+  assert.equal(
+    passedWithMpkValidationFailure({
+      state: "passed",
+      jobs: [{ ...validationFailure, retried: true }],
+    }),
+    false
+  );
 });
 
 test("rate-limit reset uses the most conservative quota header", () => {

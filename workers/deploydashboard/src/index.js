@@ -8,6 +8,7 @@ import {
   deriveState,
   parseRateLimitReset,
   parseRetryAfterMs,
+  passedWithMpkValidationFailure,
   verifyBuildkiteWebhookSignature,
 } from "./buildkite.js";
 
@@ -1815,6 +1816,7 @@ function buildToDeploy(build, sourceKey) {
     build_number: Number(build.number || 0),
     build_url: String(build.web_url || ""),
     state: deriveState(build),
+    passed_with_mpk_validation_failure: passedWithMpkValidationFailure(build),
     branch,
     branch_url: branch
       ? `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/tree/${branch.split("/").map(encodeURIComponent).join("/")}`
