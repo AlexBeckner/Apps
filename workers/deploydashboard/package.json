@@ -10,6 +10,6 @@
     "migrate:remote": "wrangler d1 migrations apply deploydashboard --remote"
   },
   "devDependencies": {
-    "wrangler": "4.105.0"
+    "wrangler": "4.115.0"
   }
 }

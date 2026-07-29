@@ -1200,6 +1200,10 @@ async function backfill(env, source, maxPages) {
   if (pagesFetched > 0) {
     await setMeta(env, metaKey(source.key, "last_refresh_at"), String(attemptedAt));
   }
+  const syncedAt = errors.length === 0 ? attemptedAt : null;
+  if (syncedAt) {
+    await setMeta(env, metaKey(source.key, "last_sync_at"), String(syncedAt));
+  }
   if (!rateLimitedUntil && pagesFetched > 0) {
     await rememberRateLimit(env, source.key, 0);
   }
@@ -1218,6 +1222,7 @@ async function backfill(env, source, maxPages) {
     errors,
     rate_limited_until: rateLimitedUntil,
     max_pages: cap,
+    synced_at: syncedAt,
     stats: await storeStats(env, source.key),
   };
 }
@@ -1601,12 +1606,15 @@ async function storeStats(env, sourceKey) {
      FROM builds
      WHERE source = ?`
   ).bind(sourceKey).first();
+  const lastSyncedAt =
+    Number(await getMeta(env, metaKey(sourceKey, "last_sync_at"))) || null;
   return {
     enabled: true,
     total_builds: Number(row?.total_builds || 0),
     total_rigs: Number(row?.total_rigs || 0),
     first_event_at: row?.first_event_at || null,
     last_event_at: row?.last_event_at || null,
+    last_synced_at: lastSyncedAt,
     db_path: "cloudflare-d1",
   };
 }
