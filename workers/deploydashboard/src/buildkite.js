@@ -1,5 +1,15 @@
 export const AWAITING_DEPLOY = "awaiting_deploy";
 
+const AAOS_IMAGE_FILENAME_RE = /(?:^|[/\\\s])([^/\\\s]+\.tgz)/i;
+const PURE_DIGITS_RE = /^\d+$/;
+const AAOS_VERSION_KEYS = new Set([
+  "aaos_version",
+  "aaos_build_number",
+  "aaos_build",
+  "flashing_version",
+  "version",
+]);
+
 export const FINISHED_BUILD_STATES = new Set([
   "passed",
   "failed",
@@ -49,6 +59,34 @@ export function passedWithMpkValidationFailure(build) {
       MPK_VALIDATION_STEP_RE.test(name)
     );
   });
+}
+
+export function extractAaosVersion(build) {
+  const mappings = [build?.meta_data, build?.env];
+  for (const mapping of mappings) {
+    if (!mapping || typeof mapping !== "object") continue;
+    for (const value of Object.values(mapping)) {
+      const match = AAOS_IMAGE_FILENAME_RE.exec(String(value));
+      if (match) return match[1];
+    }
+  }
+  for (const mapping of mappings) {
+    if (!mapping || typeof mapping !== "object") continue;
+    const lowered = new Map(
+      Object.entries(mapping).map(([key, value]) => [
+        String(key).trim().toLowerCase(),
+        value,
+      ])
+    );
+    for (const key of AAOS_VERSION_KEYS) {
+      const value = lowered.get(key);
+      if (value != null && PURE_DIGITS_RE.test(String(value).trim())) {
+        return String(value).trim();
+      }
+    }
+  }
+  const match = AAOS_IMAGE_FILENAME_RE.exec(String(build?.message || ""));
+  return match ? match[1] : null;
 }
 
 export function buildSummaryFingerprint(build) {

@@ -7,6 +7,7 @@ import {
   buildNumbersMissingFromResponse,
   buildSummaryFingerprint,
   deriveState,
+  extractAaosVersion,
   parseBuildkiteSignatureHeader,
   parseRateLimitReset,
   parseRetryAfterMs,
@@ -105,6 +106,38 @@ test("passed builds flag an active MPK validation failure with exit code 40", ()
       jobs: [{ ...validationFailure, retried: true }],
     }),
     false
+  );
+});
+
+test("AAOS image versions retain the full .tgz filename", () => {
+  assert.equal(
+    extractAaosVersion({
+      meta_data: {
+        aaos_image_s3_object:
+          "aaos_images/14/applied_8295_adaptive/physical/hmi_someip_bridge_testing_v9.tgz",
+      },
+    }),
+    "hmi_someip_bridge_testing_v9.tgz"
+  );
+  assert.equal(
+    extractAaosVersion({
+      env: {
+        AAOS_IMAGE:
+          "aaos_images/14/applied_8295_adaptive/physical/hmi_someip_bridge_testing_v9.tgz",
+      },
+    }),
+    "hmi_someip_bridge_testing_v9.tgz"
+  );
+});
+
+test("AAOS version extraction keeps numeric and message fallbacks", () => {
+  assert.equal(
+    extractAaosVersion({ meta_data: { aaos_build_number: "42" } }),
+    "42"
+  );
+  assert.equal(
+    extractAaosVersion({ message: "flashing hmi_someip_bridge_testing_v9.tgz" }),
+    "hmi_someip_bridge_testing_v9.tgz"
   );
 });
 

@@ -6,6 +6,7 @@ import {
   buildNumbersMissingFromResponse,
   buildSummaryFingerprint,
   deriveState,
+  extractAaosVersion,
   parseRateLimitReset,
   parseRetryAfterMs,
   passedWithMpkValidationFailure,
@@ -43,18 +44,9 @@ const BUILDKITE_WEBHOOK_PATH = "/api/webhooks/buildkite";
 
 const PR_NUMBER_RE = /\(#(\d+)\)/g;
 const CANONICAL_RIG_RE = /^(?:cosmo|wanda|(?:rog|mce|dmx|civ)\d{3})$/;
-const AAOS_IMAGE_VERSION_RE = /(\d+)\.tgz/;
-const PURE_DIGITS_RE = /^\d+$/;
 const RIG_ALIASES = new Map([
   ["mce101", "cosmo"],
   ["mce102", "wanda"],
-]);
-const AAOS_VERSION_KEYS = new Set([
-  "aaos_version",
-  "aaos_build_number",
-  "aaos_build",
-  "flashing_version",
-  "version",
 ]);
 const HIDDEN_JOB_TYPES = new Set(["wait", "waiter"]);
 const ACTIVE_JOB_STATES = new Set([
@@ -1960,29 +1952,6 @@ function normalizeRig(raw) {
 
 function isCanonicalRig(name) {
   return Boolean(name) && CANONICAL_RIG_RE.test(name);
-}
-
-function extractAaosVersion(build) {
-  const mappings = [build.meta_data, build.env];
-  for (const mapping of mappings) {
-    if (!mapping || typeof mapping !== "object") continue;
-    for (const value of Object.values(mapping)) {
-      const match = AAOS_IMAGE_VERSION_RE.exec(String(value));
-      if (match) return match[1];
-    }
-  }
-  for (const mapping of mappings) {
-    if (!mapping || typeof mapping !== "object") continue;
-    const lowered = new Map(Object.entries(mapping).map(([key, value]) => [String(key).trim().toLowerCase(), value]));
-    for (const key of AAOS_VERSION_KEYS) {
-      const value = lowered.get(key);
-      if (value != null && PURE_DIGITS_RE.test(String(value).trim())) {
-        return String(value).trim();
-      }
-    }
-  }
-  const match = AAOS_IMAGE_VERSION_RE.exec(String(build.message || ""));
-  return match ? match[1] : null;
 }
 
 function lastEventAt(build) {
