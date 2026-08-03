@@ -8,6 +8,24 @@ from `/`, and exposes two narrow API endpoints from the same protected origin:
 - `GET /`
 - `GET /parameter-file?ref=<ref>&file=<fileName>`
 - `GET /branch-suggestions?prefix=<branchPrefix>`
+- `GET /commit-suggestions?ref=<branch>`
+- `GET /commit?ref=<ref>`
+
+`ref` accepts a branch, tag, or commit SHA, so hashes can be read at a specific
+commit instead of a branch head.
+
+`/commit-suggestions` returns recent commits on the branch merged with a deeper
+slice of the commits that touch the parameter directory, newest first. Entries
+that change a parameter file are marked `changesParameters` — those are the only
+commits where a hash can change.
+
+`/commit` resolves a single ref to `{ sha, shortSha, subject, date, author,
+htmlUrl, changesParameters }`, which the UI uses to show which commit produced
+the hashes on screen.
+
+Note that `core-stack` is large enough that GitHub will not resolve very short
+SHA prefixes; the 7 characters `git log --oneline` prints are usually rejected,
+so use at least 8.
 
 Only these parameter files are allowed:
 

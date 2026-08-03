@@ -33,7 +33,32 @@
       }
 
       .branch-column {
+        display: grid;
+        gap: 4px;
         padding: 0;
+      }
+
+      .commit-meta {
+        color: #aaa;
+        font-size: 12px;
+        min-height: 16px;
+        overflow-wrap: anywhere;
+      }
+
+      .commit-meta.error {
+        color: #ff4d4d;
+      }
+
+      .commit-meta a {
+        color: #8ab4f8;
+      }
+
+      .ref-kind {
+        text-transform: uppercase;
+      }
+
+      .params-flag {
+        color: #f0c060;
       }
 
       p {
@@ -172,6 +197,15 @@
             placeholder="master"
             value="master"
           >
+          <label class="sr-only" for="left-commit">Left commit</label>
+          <input
+            id="left-commit"
+            autocomplete="off"
+            list="left-commit-suggestions"
+            placeholder="commit (default: branch head)"
+          >
+          <p id="left-commit-meta" class="commit-meta"></p>
+          <datalist id="left-commit-suggestions"></datalist>
         </div>
         <div></div>
         <div class="branch-column">
@@ -182,6 +216,15 @@
             list="branch-suggestions"
             placeholder="branch, tag, or commit SHA"
           >
+          <label class="sr-only" for="right-commit">Right commit</label>
+          <input
+            id="right-commit"
+            autocomplete="off"
+            list="right-commit-suggestions"
+            placeholder="commit (default: branch head)"
+          >
+          <p id="right-commit-meta" class="commit-meta"></p>
+          <datalist id="right-commit-suggestions"></datalist>
         </div>
       </section>
 
@@ -204,20 +247,36 @@
         { module: "Throttle", fileName: "FORD_GE1 Throttle.json" },
       ];
 
+      // GitHub ref URLs whose remainder is the ref itself, with no trailing
+      // path segments to disambiguate: /tree/<ref>, /commits/<ref>,
+      // /commit/<sha>.
+      const REF_URL_MARKERS = ["/tree/", "/commits/", "/commit/"];
+      const COMMIT_SHA_PATTERN = /^([0-9a-f]{7,40})(?=$|[\s·,])/i;
+      const SHORT_SHA_LENGTH = 8;
+
       const columns = {
-        left: {
-          input: document.querySelector("#left-ref"),
-          files: new Map(),
-          errors: new Map(),
-          requestId: 0,
-        },
-        right: {
-          input: document.querySelector("#right-ref"),
-          files: new Map(),
-          errors: new Map(),
-          requestId: 0,
-        },
+        left: createColumn("left"),
+        right: createColumn("right"),
       };
+
+      function createColumn(name) {
+        return {
+          input: document.querySelector(`#${name}-ref`),
+          commitInput: document.querySelector(`#${name}-commit`),
+          commitList: document.querySelector(`#${name}-commit-suggestions`),
+          metaEl: document.querySelector(`#${name}-commit-meta`),
+          files: new Map(),
+          errors: new Map(),
+          requestId: 0,
+          commitSuggestionRequestId: 0,
+          commitListBranch: null,
+          commit: null,
+          commitError: "",
+          pinned: false,
+          refResolved: false,
+          loading: false,
+        };
+      }
 
       const rowsEl = document.querySelector("#rows");
       const branchSuggestions = document.querySelector("#branch-suggestions");
@@ -230,15 +289,46 @@
 
       function normalizeRef(input) {
         const trimmed = input.trim();
-        const treeMarker = "/tree/";
-        const treeIndex = trimmed.indexOf(treeMarker);
+        return refFromUrl(trimmed) || trimmed.replace(/^origin\//, "");
+      }
 
-        if (treeIndex !== -1) {
-          const treeRef = trimmed.slice(treeIndex + treeMarker.length);
-          return decodeURIComponent(treeRef.split(/[?#]/)[0]);
+      function normalizeCommit(input) {
+        const trimmed = input.trim();
+        if (!trimmed) {
+          return "";
         }
 
-        return trimmed.replace(/^origin\//, "");
+        // Accepts a bare SHA, a commit URL, or a picked suggestion label such
+        // as "b67d9a6e · 2026-06-11 · Update FORD_GE1 Gateway".
+        const candidate = refFromUrl(trimmed) || trimmed;
+        const sha = candidate.match(COMMIT_SHA_PATTERN);
+        return sha ? sha[1].toLowerCase() : candidate;
+      }
+
+      function refFromUrl(value) {
+        for (const marker of REF_URL_MARKERS) {
+          const index = value.indexOf(marker);
+          if (index === -1) {
+            continue;
+          }
+
+          const remainder = value
+            .slice(index + marker.length)
+            .split(/[?#]/)[0]
+            .replace(/\/+$/, "");
+          if (remainder) {
+            return decodeURIComponent(remainder);
+          }
+        }
+
+        return "";
+      }
+
+      function columnRef(column) {
+        return (
+          normalizeCommit(column.commitInput.value) ||
+          normalizeRef(column.input.value)
+        );
       }
 
       function renderBackendStatus() {
@@ -285,20 +375,42 @@
         return data;
       }
 
-      function friendlyLoadError(error) {
+      function friendlyLoadError(error, context = {}) {
         const message = error?.message || "";
-        if (isBranchNotFoundError(error, message)) {
+        if (isRefNotFoundError(error, message)) {
+          if (context.refResolved) {
+            return "Not present at this commit.";
+          }
+
+          return refNotFoundMessage(context);
+        }
+
+        const fallback = context.pinned
+          ? "Unable to load commit."
+          : "Unable to load branch.";
+        if (message.length > 180) {
+          return fallback;
+        }
+
+        return message || fallback;
+      }
+
+      // core-stack has enough objects that GitHub refuses to resolve very short
+      // SHA prefixes, including the 7 characters git log prints by default.
+      function refNotFoundMessage(context) {
+        if (!context.pinned) {
           return "Branch not found.";
         }
 
-        if (message.length > 180) {
-          return "Unable to load branch.";
+        const ref = context.ref || "";
+        if (/^[0-9a-f]+$/i.test(ref) && ref.length < SHORT_SHA_LENGTH) {
+          return `Commit not found. Use at least ${SHORT_SHA_LENGTH} characters of the SHA.`;
         }
 
-        return message || "Unable to load branch.";
+        return "Commit not found.";
       }
 
-      function isBranchNotFoundError(error, message) {
+      function isRefNotFoundError(error, message) {
         if (error?.status === 404 || error?.status === 422) {
           return true;
         }
@@ -430,10 +542,16 @@
           message.className = "error";
           message.textContent = error;
           cell.appendChild(message);
+        } else if (column.commitError) {
+          // The ref itself did not resolve; the meta line already says why.
+          const dash = document.createElement("p");
+          dash.className = "placeholder";
+          dash.textContent = "—";
+          cell.appendChild(dash);
         } else {
           const placeholder = document.createElement("p");
           placeholder.className = "placeholder";
-          placeholder.textContent = normalizeRef(column.input.value)
+          placeholder.textContent = columnRef(column)
             ? "Loading..."
             : "Enter a branch";
           cell.appendChild(placeholder);
@@ -479,35 +597,175 @@
         }
       }
 
+      async function updateCommitSuggestions(columnName) {
+        const column = columns[columnName];
+        const branch = normalizeRef(column.input.value);
+        const requestId = column.commitSuggestionRequestId + 1;
+        column.commitSuggestionRequestId = requestId;
+        column.commitListBranch = branch;
+
+        if (!branch) {
+          column.commitList.innerHTML = "";
+          return;
+        }
+
+        try {
+          const data = await fetchProxyJson("commit-suggestions", {
+            ref: branch,
+          });
+          if (requestId !== column.commitSuggestionRequestId) {
+            return;
+          }
+
+          column.commitList.innerHTML = "";
+          (data.commits || []).forEach((commit) => {
+            const option = document.createElement("option");
+            option.value = commit.sha;
+            option.label = commitOptionLabel(commit);
+            column.commitList.appendChild(option);
+          });
+        } catch {
+          if (requestId === column.commitSuggestionRequestId) {
+            column.commitList.innerHTML = "";
+            column.commitListBranch = null;
+          }
+        }
+      }
+
+      function commitOptionLabel(commit) {
+        return [
+          commit.shortSha,
+          formatCommitDate(commit.date),
+          commit.changesParameters
+            ? `[params] ${commit.subject}`
+            : commit.subject,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+      }
+
+      function formatCommitDate(date) {
+        return String(date || "").slice(0, 10);
+      }
+
+      function renderCommitMeta(columnName) {
+        const column = columns[columnName];
+        const meta = column.metaEl;
+        meta.className = "commit-meta";
+        meta.textContent = "";
+
+        if (column.commitError) {
+          meta.className = "commit-meta error";
+          meta.textContent = column.commitError;
+          return;
+        }
+
+        if (!column.commit) {
+          meta.textContent = column.loading ? "Resolving commit..." : "";
+          return;
+        }
+
+        const kind = document.createElement("span");
+        kind.className = "ref-kind";
+        kind.textContent = column.pinned ? "pinned" : "head";
+
+        const link = document.createElement("a");
+        link.href = column.commit.htmlUrl;
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        link.textContent = column.commit.shortSha;
+
+        meta.append(kind, document.createTextNode(" · "), link);
+
+        const date = formatCommitDate(column.commit.date);
+        if (date) {
+          meta.append(document.createTextNode(` · ${date}`));
+        }
+
+        if (column.commit.changesParameters) {
+          const flag = document.createElement("span");
+          flag.className = "params-flag";
+          flag.textContent = "[params]";
+          meta.append(document.createTextNode(" · "), flag);
+        }
+
+        if (column.commit.subject) {
+          meta.append(document.createTextNode(` · ${column.commit.subject}`));
+        }
+      }
+
       async function loadColumn(columnName) {
         const column = columns[columnName];
-        const ref = normalizeRef(column.input.value);
+        const commit = normalizeCommit(column.commitInput.value);
+        const branch = normalizeRef(column.input.value);
+        const ref = commit || branch;
         const requestId = column.requestId + 1;
         column.requestId = requestId;
         column.files.clear();
         column.errors.clear();
+        column.commit = null;
+        column.commitError = "";
+        column.refResolved = false;
+        column.pinned = Boolean(commit);
+        column.loading = Boolean(ref);
+
+        renderRows();
+        renderCommitMeta(columnName);
 
         if (!ref) {
-          renderRows();
           return;
         }
 
-        renderRows();
-
-        const results = await fetchAllFiles(ref);
+        const [commitResult, results] = await Promise.all([
+          fetchProxyJson("commit", { ref })
+            .then((data) => ({ commit: data.commit }))
+            .catch((error) => ({ error })),
+          fetchAllFiles(ref),
+        ]);
         if (requestId !== column.requestId) {
           return;
+        }
+
+        column.loading = false;
+        if (commitResult.commit) {
+          column.commit = commitResult.commit;
+          column.refResolved = true;
+        } else {
+          column.commitError = friendlyLoadError(commitResult.error, {
+            pinned: column.pinned,
+            ref,
+          });
         }
 
         for (const { file, result } of results) {
           if (result.status === "fulfilled") {
             column.files.set(result.value.module, result.value);
-          } else {
-            column.errors.set(file.module, friendlyLoadError(result.reason));
+          } else if (column.refResolved) {
+            // Per-file failures only; a bad ref is reported once, in the meta
+            // line, rather than repeated in every row.
+            column.errors.set(
+              file.module,
+              friendlyLoadError(result.reason, {
+                pinned: column.pinned,
+                refResolved: true,
+                ref,
+              })
+            );
           }
         }
 
         renderRows();
+        renderCommitMeta(columnName);
+
+        // Populate the picker ahead of the first click, but only once the ref
+        // resolved, so partially typed branch names do not trigger lookups.
+        if (
+          branch &&
+          column.refResolved &&
+          column.commitListBranch !== branch
+        ) {
+          updateCommitSuggestions(columnName);
+        }
       }
 
       function debounce(callback, waitMs) {
@@ -518,20 +776,33 @@
         };
       }
 
-      columns.left.input.addEventListener(
-        "input",
-        debounce(() => {
-          updateBranchSuggestions(columns.left.input);
-          loadColumn("left");
-        }, 400)
-      );
-      columns.right.input.addEventListener(
-        "input",
-        debounce(() => {
-          updateBranchSuggestions(columns.right.input);
-          loadColumn("right");
-        }, 400)
-      );
+      function invalidateCommitSuggestions(column) {
+        column.commitSuggestionRequestId += 1;
+        column.commitListBranch = null;
+        column.commitList.innerHTML = "";
+      }
+
+      for (const columnName of ["left", "right"]) {
+        const column = columns[columnName];
+        const onBranchSettled = debounce(() => {
+          updateBranchSuggestions(column.input);
+          loadColumn(columnName);
+        }, 400);
+
+        column.input.addEventListener("input", () => {
+          invalidateCommitSuggestions(column);
+          onBranchSettled();
+        });
+        column.commitInput.addEventListener(
+          "input",
+          debounce(() => loadColumn(columnName), 400)
+        );
+        column.commitInput.addEventListener("focus", () => {
+          if (column.commitListBranch !== normalizeRef(column.input.value)) {
+            updateCommitSuggestions(columnName);
+          }
+        });
+      }
 
       loadColumn("left");
     </script>

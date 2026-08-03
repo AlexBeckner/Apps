@@ -6,6 +6,17 @@ const PARAMETER_DIRECTORY =
   "onroad/controls/dbw/dataspeed_v2/parameters";
 const MAX_REF_LENGTH = 200;
 const BRANCH_NOT_FOUND_MESSAGE = "Branch not found.";
+const COMMIT_NOT_FOUND_MESSAGE = "Commit not found.";
+const COMMIT_SHA_PATTERN = /^[0-9a-f]+$/i;
+// core-stack has enough objects that GitHub refuses to resolve very short SHA
+// prefixes, so a short ref that misses is usually just too short.
+const SHORT_SHA_LENGTH = 8;
+// Recent branch history, plus a deeper slice of the commits that actually
+// touch the parameter directory: those are the only commits where a hash can
+// change, and the last one is often far outside recent history.
+const COMMIT_HISTORY_LIMIT = 40;
+const PARAMETER_HISTORY_LIMIT = 15;
+const COMMIT_SUGGESTION_LIMIT = 50;
 
 const PARAMETER_FILES = new Map([
   ["FORD_GE1 Gateway.json", "Gateway"],
@@ -65,11 +76,19 @@ export default {
         );
       }
 
+      // These are awaited so that handler rejections reach the catch below and
+      // are reported as JSON with the intended status.
       if (url.pathname === "/parameter-file") {
-        return handleParameterFile(request, env, url);
+        return await handleParameterFile(request, env, url);
       }
       if (url.pathname === "/branch-suggestions") {
-        return handleBranchSuggestions(request, env, url);
+        return await handleBranchSuggestions(request, env, url);
+      }
+      if (url.pathname === "/commit-suggestions") {
+        return await handleCommitSuggestions(request, env, url);
+      }
+      if (url.pathname === "/commit") {
+        return await handleCommit(request, env, url);
       }
       if (url.pathname === "/health") {
         return jsonResponse(request, env, { ok: true });
@@ -106,7 +125,7 @@ async function handleParameterFile(request, env, url) {
     contentsApiUrl(ref, fileName),
     "application/vnd.github.object+json",
     env,
-    { notFoundMessage: BRANCH_NOT_FOUND_MESSAGE }
+    { notFoundMessage: refNotFoundMessage(ref) }
   );
 
   if (metadata.type !== "file" || metadata.encoding !== "base64") {
@@ -156,6 +175,105 @@ async function handleBranchSuggestions(request, env, url) {
   });
 }
 
+async function handleCommitSuggestions(request, env, url) {
+  const ref = normalizeRequiredParam(url, "ref");
+  const [history, parameterHistory] = await Promise.all([
+    githubJson(
+      commitsApiUrl(ref, COMMIT_HISTORY_LIMIT),
+      "application/vnd.github+json",
+      env,
+      { notFoundMessage: refNotFoundMessage(ref) }
+    ),
+    githubJson(
+      commitsApiUrl(ref, PARAMETER_HISTORY_LIMIT, PARAMETER_DIRECTORY),
+      "application/vnd.github+json",
+      env
+    ).catch(() => []),
+  ]);
+
+  const parameterShas = new Set(
+    asArray(parameterHistory)
+      .map((commit) => commit?.sha)
+      .filter(Boolean)
+  );
+  const commits = new Map();
+  for (const commit of [...asArray(history), ...asArray(parameterHistory)]) {
+    if (!commit?.sha || commits.has(commit.sha)) {
+      continue;
+    }
+    commits.set(
+      commit.sha,
+      summarizeCommit(commit, parameterShas.has(commit.sha))
+    );
+  }
+
+  return jsonResponse(request, env, {
+    commits: [...commits.values()]
+      .sort((left, right) => Date.parse(right.date) - Date.parse(left.date))
+      .slice(0, COMMIT_SUGGESTION_LIMIT),
+  });
+}
+
+async function handleCommit(request, env, url) {
+  const ref = normalizeRequiredParam(url, "ref");
+  const commit = await githubJson(
+    singleCommitApiUrl(ref),
+    "application/vnd.github+json",
+    env,
+    { notFoundMessage: refNotFoundMessage(ref) }
+  );
+
+  return jsonResponse(request, env, {
+    commit: summarizeCommit(commit, changesParameters(commit)),
+  });
+}
+
+function summarizeCommit(commit, changesParameterFiles) {
+  const sha = String(commit.sha || "");
+  return {
+    sha,
+    shortSha: sha.slice(0, 8),
+    subject: firstLine(commit.commit?.message),
+    date: commit.commit?.committer?.date || commit.commit?.author?.date || "",
+    author: commit.author?.login || commit.commit?.author?.name || "",
+    htmlUrl: `https://github.com/${OWNER}/${REPO}/commit/${sha}`,
+    changesParameters: changesParameterFiles,
+  };
+}
+
+// The file list is only present on the single-commit endpoint, and GitHub omits
+// it for very large commits, so this flag is best effort: an absent list leaves
+// the commit unmarked rather than marking it wrongly.
+function changesParameters(commit) {
+  if (!Array.isArray(commit.files)) {
+    return false;
+  }
+
+  return commit.files.some(
+    (file) =>
+      typeof file?.filename === "string" &&
+      file.filename.startsWith(`${PARAMETER_DIRECTORY}/`)
+  );
+}
+
+function firstLine(message) {
+  return String(message || "").split("\n")[0].trim();
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function refNotFoundMessage(ref) {
+  if (!COMMIT_SHA_PATTERN.test(ref)) {
+    return BRANCH_NOT_FOUND_MESSAGE;
+  }
+
+  return ref.length < SHORT_SHA_LENGTH
+    ? `${COMMIT_NOT_FOUND_MESSAGE} Use at least ${SHORT_SHA_LENGTH} characters of the SHA.`
+    : COMMIT_NOT_FOUND_MESSAGE;
+}
+
 async function fetchBranchUpdatedAt(ref, env) {
   try {
     const commitUrl = ref.object?.url;
@@ -201,6 +319,21 @@ function contentsApiUrl(ref, fileName) {
   return `https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodedPath(
     path
   )}?ref=${encodeURIComponent(ref)}`;
+}
+
+function commitsApiUrl(ref, perPage, path) {
+  const params = new URLSearchParams({ sha: ref, per_page: String(perPage) });
+  if (path) {
+    params.set("path", path);
+  }
+
+  return `https://api.github.com/repos/${OWNER}/${REPO}/commits?${params}`;
+}
+
+function singleCommitApiUrl(ref) {
+  return `https://api.github.com/repos/${OWNER}/${REPO}/commits/${encodeURIComponent(
+    ref
+  )}`;
 }
 
 function matchingRefsApiUrl(prefix) {
