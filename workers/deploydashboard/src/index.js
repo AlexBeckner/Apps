@@ -47,6 +47,12 @@ const CANONICAL_RIG_RE = /^(?:cosmo|wanda|(?:rog|mce|dmx|civ)\d{3})$/;
 const RIG_ALIASES = new Map([
   ["mce101", "cosmo"],
   ["mce102", "wanda"],
+  // mce105_v2 is the same physical rig as mce105 under a newer Buildkite
+  // name; fold it in so both report under one row. normalizeRig() strips
+  // hyphens before the lookup, so an ``mce105-v2`` spelling arrives here as
+  // ``mce105v2`` — both forms are mapped.
+  ["mce105_v2", "mce105"],
+  ["mce105v2", "mce105"],
 ]);
 const HIDDEN_JOB_TYPES = new Set(["wait", "waiter"]);
 const ACTIVE_JOB_STATES = new Set([
