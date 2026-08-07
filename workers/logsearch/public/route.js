@@ -63,6 +63,7 @@
   const workspaceEl = byId("route-workspace");
   const correctedInput = byId("route-include-corrected");
   const propagatedInput = byId("route-include-propagated");
+  const eventsInput = byId("route-include-events");
   const archiveButton = byId("route-archives");
   const collapseButton = byId("route-collapse");
   const downloadButton = byId("route-download");
@@ -86,6 +87,7 @@
   const eventList = byId("route-event-list");
   const routeLegendLabel = byId("route-legend-label");
   const engagedLegend = byId("route-engaged-legend");
+  const eventLegend = byId("route-event-legend");
 
   const state = {
     selection: [],
@@ -217,6 +219,8 @@
     correctedInput.disabled = true;
     propagatedInput.checked = false;
     propagatedInput.disabled = true;
+    eventsInput.checked = true;
+    eventsInput.disabled = true;
     statsEl.replaceChildren();
     eventList.replaceChildren();
     eventsEl.hidden = true;
@@ -245,6 +249,7 @@
     timeEl.textContent = "";
     routeLegendLabel.textContent = "Route";
     engagedLegend.hidden = true;
+    eventLegend.hidden = true;
     statusEl.textContent = "";
   }
 
@@ -625,13 +630,16 @@
 
   function renderEvents() {
     eventList.replaceChildren();
-    const events = state.trace.events
+    const available = state.trace.events
       .map((event, eventIndex) => ({ event, eventIndex }))
       .filter(({ event }) => event.point);
+    eventsInput.disabled = !available.length;
+    const events = eventsInput.checked ? available : [];
     eventsEl.hidden = !events.length;
     if (workspaceEl) {
       workspaceEl.classList.toggle("no-events", !events.length);
     }
+    eventLegend.hidden = !events.length;
     for (const { event, eventIndex } of events) {
       const row = document.createElement("div");
       row.className = "route-event-row";
@@ -845,6 +853,11 @@
       const existingIndex = state.trace.events.findIndex(
         (event) => event.id === existing.id
       );
+      if (!eventsInput.checked) {
+        eventsInput.checked = true;
+        renderEvents();
+        renderMap();
+      }
       if (existingIndex >= 0) selectEvent(existingIndex, true);
       return {
         ok: true,
@@ -871,6 +884,7 @@
     state.result.events.push({ ...event });
     state.result.events.sort((a, b) => a.timestamp - b.timestamp);
     state.trace = core.buildTrace(state.result, true);
+    eventsInput.checked = true;
     renderEvents();
     renderMap();
     const eventIndex = state.trace.events.findIndex(
@@ -1071,8 +1085,9 @@
     }
     svg.appendChild(pointMarkers);
 
-    for (let index = 0; index < state.trace.events.length; index++) {
-      const event = state.trace.events[index];
+    const eventMarkers = eventsInput.checked ? state.trace.events : [];
+    for (let index = 0; index < eventMarkers.length; index++) {
+      const event = eventMarkers[index];
       if (!event.point) continue;
       const position = project(event.point);
       const marker = svgElement("polygon", {
@@ -2190,6 +2205,17 @@
     renderMap();
   }
 
+  function changeEventVisibility() {
+    if (!eventsInput.checked) {
+      state.activeEventIndex = -1;
+      state.hoveredEventIndex = -1;
+      hideMapTooltip();
+    }
+    if (!state.trace || !state.trace.points.length) return;
+    renderEvents();
+    renderMap();
+  }
+
   archiveButton.addEventListener("click", () => void analyzeArchives());
   collapseButton.addEventListener("click", () => {
     bodyEl.hidden = !bodyEl.hidden;
@@ -2197,6 +2223,7 @@
   });
   correctedInput.addEventListener("change", changePointMarkers);
   propagatedInput.addEventListener("change", changePointMarkers);
+  eventsInput.addEventListener("change", changeEventVisibility);
   rangeInput.addEventListener("input", () => {
     stopPlayback();
     setSelectedPoint(-1);

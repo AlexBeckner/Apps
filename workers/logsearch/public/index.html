@@ -1201,6 +1201,10 @@
               <input id="route-include-propagated" type="checkbox" disabled>
               Show odometry points
             </label>
+            <label class="toggle">
+              <input id="route-include-events" type="checkbox" checked disabled>
+              Show events
+            </label>
             <button id="route-archives" type="button" hidden>Analyze archives</button>
             <button id="route-download" type="button" disabled>Download GeoJSON</button>
             <button id="route-collapse" type="button">Hide</button>
@@ -1273,7 +1277,7 @@
                     <span class="route-legend-item" id="route-engaged-legend" hidden><span class="route-swatch engaged"></span>Engaged</span>
                     <span class="route-legend-item"><span class="route-swatch start"></span>Start</span>
                     <span class="route-legend-item"><span class="route-swatch end"></span>End</span>
-                    <span class="route-legend-item"><span class="route-swatch event"></span>Event</span>
+                    <span class="route-legend-item" id="route-event-legend" hidden><span class="route-swatch event"></span>Event</span>
                   </div>
                 </div>
               </div>

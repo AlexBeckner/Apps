@@ -283,6 +283,40 @@ test("point overlays are opt-in while route hit targets remain", async () => {
   );
 });
 
+test("events are shown by default and can be toggled off", async () => {
+  const [html, routeScript] = await Promise.all([
+    readFile(new URL("public/index.html", root), "utf8"),
+    readFile(new URL("public/route.js", root), "utf8"),
+  ]);
+  const eventsInput = html.match(/<input id="route-include-events"[^>]*>/)?.[0];
+
+  assert.ok(eventsInput);
+  assert.match(eventsInput, /\bchecked\b/);
+  assert.match(eventsInput, /\bdisabled\b/);
+  assert.match(html, /Show events/);
+  assert.match(html, /id="route-event-legend" hidden/);
+  assert.match(
+    routeScript,
+    /eventsInput\.disabled = !available\.length/
+  );
+  assert.match(
+    routeScript,
+    /const events = eventsInput\.checked \? available : \[\]/
+  );
+  assert.match(
+    routeScript,
+    /const eventMarkers = eventsInput\.checked \? state\.trace\.events : \[\]/
+  );
+  assert.match(
+    routeScript,
+    /function changeEventVisibility\(\)[\s\S]*?state\.activeEventIndex = -1[\s\S]*?state\.hoveredEventIndex = -1[\s\S]*?hideMapTooltip\(\)/
+  );
+  assert.match(
+    routeScript,
+    /eventsInput\.addEventListener\("change", changeEventVisibility\)/
+  );
+});
+
 test("route workspace places events before an interactive map", async () => {
   const [html, routeScript, css] = await Promise.all([
     readFile(new URL("public/index.html", root), "utf8"),
